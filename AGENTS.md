@@ -1192,32 +1192,29 @@ git push                # Push to remote
 
 ---
 
-## cass — Cross-Agent Session Search
+## cass — retired 2026-08-17, do not reinstall
 
-`cass` indexes prior agent conversations (Claude Code, Codex, Cursor, Gemini, ChatGPT, etc.) so we can reuse solved problems.
+`cass` (Cross-Agent Session Search) is **gone**. This section used to tell agents
+to run `cass health`, `cass search --robot`, `cass view`, and `cass expand` here.
+Every one of those commands is now unresolvable, and nothing in this repo should
+call, install, or rebuild it.
 
-**Rules:** Never run bare `cass` (TUI). Always use `--robot` or `--json`.
+Dale retired it after a five-lane viability assessment found the tool
+structurally non-viable. The binaries were removed from both machines, its
+Homebrew tap untapped, its skill installs deleted from all runtime skill roots,
+its managed-skill owner (`jsm`) uninstalled, and its 4,000-commit repository
+retired. Assessment and retirement record:
+`~/.agent-config/thoughts/shared/handoffs/20260817-cass-viability-assessment/`
+and `.../20260817-cass-retirement/`.
 
-### Examples
+**Do not reinstall it, and do not restore this section from git history.** The
+replacement is `~/dev/groove-session-search` — stock SQLite + FTS5, with the
+index treated as a disposable cache. Point agents there, not here.
 
-```bash
-cass health
-cass search "async runtime" --robot --limit 5
-cass view /path/to/session.jsonl -n 42 --json
-cass expand /path/to/session.jsonl -n 42 -C 3 --json
-cass capabilities --json
-cass robot-docs guide
-```
-
-### Tips
-
-- Use `--fields minimal` for lean output
-- Filter by agent with `--agent`
-- Use `--days N` to limit to recent history
-
-stdout is data-only, stderr is diagnostics; exit code 0 means success.
-
-Treat cass as a way to avoid re-solving problems other agents already handled.
+The session data cass had captured was not lost with it: 6,892 conversation
+files whose originals the harnesses had already deleted existed only inside
+cass's raw mirror, and they were extracted and blake3-verified to
+`~/session-archive/rescued-from-cass/` before anything was removed.
 
 ---
 
