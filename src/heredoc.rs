@@ -2012,6 +2012,12 @@ struct SubstitutionLevel {
     kind: Option<SubstitutionKind>,
     /// Index of the `(` for `$(`/`<(`/`>(`, or of the opening backtick.
     open_at: usize,
+    /// This substitution opened where a COMMAND would start inside the string
+    /// its enclosing executor will run. `sh -c "$( )"` and `eval "a; $( )"` do;
+    /// `sh -c "echo $( )"` and `eval x $( )` do not -- there the result is an
+    /// argument to something else, and executing it was a measured false
+    /// positive on this fleet's own corpus.
+    in_program_text: bool,
     /// First non-assignment word of the simple command in progress at this level.
     first_word: Option<String>,
     /// `-c` seen in that simple command, which is what makes a shell execute a string.
@@ -2023,6 +2029,13 @@ struct SubstitutionLevel {
     expect_redirect_target: bool,
     /// A declaration builtin (`export`, `local`, ...) led this simple command.
     saw_declaration: bool,
+    /// Words consumed after the command word, not counting `-flags`. The first
+    /// argument of `eval` or `sh -c` is the program text; later ones are not.
+    args_after_command: usize,
+    /// Nothing but whitespace and separators has been seen since the current
+    /// double-quoted span opened, so a substitution here is in command position
+    /// WITHIN that string: `sh -c "$( )"` executes, `sh -c "echo $( )"` does not.
+    quoted_prefix_clear: bool,
     in_single: bool,
     in_double: bool,
 }
@@ -2032,11 +2045,14 @@ impl SubstitutionLevel {
         Self {
             kind,
             open_at,
+            in_program_text: false,
             first_word: None,
             has_dash_c: false,
             pending_from: None,
             expect_redirect_target: false,
             saw_declaration: false,
+            args_after_command: 0,
+            quoted_prefix_clear: true,
             in_single: false,
             in_double: false,
         }
@@ -2049,7 +2065,29 @@ impl SubstitutionLevel {
         self.pending_from = None;
         self.expect_redirect_target = false;
         self.saw_declaration = false;
+        self.args_after_command = 0;
+        self.quoted_prefix_clear = true;
     }
+}
+
+/// Is a substitution opening here in command position inside the string the
+/// enclosing executor will run?
+fn opens_in_program_text(parent: &SubstitutionLevel) -> bool {
+    parent.args_after_command == 0 && (!parent.in_double || parent.quoted_prefix_clear)
+}
+
+/// The first char boundary at or after `i`, clamped to the end of the string.
+///
+/// Byte-stepping a `&str` is fine until something slices at the index. Rounding
+/// up to a boundary keeps every later `&command[..]` legal without changing what
+/// the scan sees: the bytes being skipped are continuation bytes of a character
+/// the scan has already stepped past.
+fn next_char_boundary(s: &str, i: usize) -> usize {
+    let mut i = i.min(s.len());
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
 }
 
 /// Does this heredoc's body reach an interpreter through a SUBSTITUTION?
@@ -2101,9 +2139,34 @@ pub fn heredoc_substitution_result_is_executed(command: &str, heredoc_start: usi
             continue;
         }
 
+        // A heredoc BODY is data, not shell. Walking one as shell is how a
+        // markdown code fence inside an earlier heredoc left an odd backtick
+        // count and pushed a phantom substitution level that never closed --
+        // denying the document-assembly shape this fleet writes review packages
+        // with. Skip the body whole.
+        if c == b'<'
+            && b.get(i + 1) == Some(&b'<')
+            && b.get(i + 2) != Some(&b'<')
+            && !levels[top].in_single
+        {
+            if let Some((delim, off, ty)) = parse_heredoc_delimiter(&command[i + 2..]) {
+                let body_start = i + 2 + off;
+                if let Some(end) = find_heredoc_terminator(command, body_start, &delim, ty) {
+                    i = next_char_boundary(command, end);
+                    continue;
+                }
+            }
+        }
+
         match c {
+            // `i += 2` over a backslash can land INSIDE a multibyte character,
+            // and the next `&command[from..i]` then panics on a non-char
+            // boundary. The crate is `panic = "abort"`, so the PreToolUse hook
+            // dies and Claude Code reads a dead hook as an ALLOW: a crash here
+            // fails OPEN. `echo \<em dash>` is enough, and this fleet writes em
+            // dashes constantly. `.agent-config-dnsgm` (P0).
             b'\\' => {
-                i += 2;
+                i = next_char_boundary(command, i + 2);
                 continue;
             }
             // Inside `" "` an apostrophe is an ordinary character. Opening a
@@ -2116,15 +2179,18 @@ pub fn heredoc_substitution_result_is_executed(command: &str, heredoc_start: usi
             }
             b'"' => {
                 levels[top].in_double = !levels[top].in_double;
+                if levels[top].in_double {
+                    levels[top].quoted_prefix_clear = true;
+                }
                 i += 1;
                 continue;
             }
             // `$((` is arithmetic, not a command substitution.
             b'$' if b.get(i + 1) == Some(&b'(') && b.get(i + 2) != Some(&b'(') => {
-                levels.push(SubstitutionLevel::new(
-                    Some(SubstitutionKind::Command),
-                    i + 1,
-                ));
+                let pt = opens_in_program_text(&levels[top]);
+                let mut lv = SubstitutionLevel::new(Some(SubstitutionKind::Command), i + 1);
+                lv.in_program_text = pt;
+                levels.push(lv);
                 i += 2;
                 continue;
             }
@@ -2135,17 +2201,20 @@ pub fn heredoc_substitution_result_is_executed(command: &str, heredoc_start: usi
                 {
                     levels.pop();
                 } else {
-                    levels.push(SubstitutionLevel::new(Some(SubstitutionKind::Command), i));
+                    let pt = opens_in_program_text(&levels[top]);
+                    let mut lv = SubstitutionLevel::new(Some(SubstitutionKind::Command), i);
+                    lv.in_program_text = pt;
+                    levels.push(lv);
                 }
                 i += 1;
                 continue;
             }
             // Process substitution is inert inside double quotes.
             b'<' | b'>' if b.get(i + 1) == Some(&b'(') && !levels[top].in_double => {
-                levels.push(SubstitutionLevel::new(
-                    Some(SubstitutionKind::Process),
-                    i + 1,
-                ));
+                let pt = opens_in_program_text(&levels[top]);
+                let mut lv = SubstitutionLevel::new(Some(SubstitutionKind::Process), i + 1);
+                lv.in_program_text = pt;
+                levels.push(lv);
                 i += 2;
                 continue;
             }
@@ -2171,7 +2240,14 @@ pub fn heredoc_substitution_result_is_executed(command: &str, heredoc_start: usi
 
         // Inside double quotes only the cases above are special; everything
         // else is part of one argument and cannot start a new simple command.
+        // The prefix flag still moves, because a `;` inside the string DOES
+        // start a new command within the program text an executor will run.
         if levels[top].in_double {
+            if matches!(c, b';' | b'&' | b'|' | b'\n') {
+                levels[top].quoted_prefix_clear = true;
+            } else if !c.is_ascii_whitespace() {
+                levels[top].quoted_prefix_clear = false;
+            }
             i += 1;
             continue;
         }
@@ -2181,7 +2257,9 @@ pub fn heredoc_substitution_result_is_executed(command: &str, heredoc_start: usi
             level.reset_command();
         } else if c.is_ascii_whitespace() {
             if let Some(from) = level.pending_from.take() {
-                let word = &command[from..i];
+                // `get` rather than `[..]`: a panic in this function takes the
+                // whole hook down and fails open (`.agent-config-dnsgm`).
+                let word = command.get(from..i).unwrap_or("");
                 if word == "-c" {
                     level.has_dash_c = true;
                 }
@@ -2198,6 +2276,8 @@ pub fn heredoc_substitution_result_is_executed(command: &str, heredoc_start: usi
                 }
                 if level.first_word.is_none() && !skip {
                     level.first_word = Some(word.to_string());
+                } else if level.first_word.is_some() && !skip && !word.starts_with('-') {
+                    level.args_after_command += 1;
                 }
             }
         } else if level.pending_from.is_none() {
@@ -2233,11 +2313,15 @@ pub fn heredoc_substitution_result_is_executed(command: &str, heredoc_start: usi
             continue;
         }
 
-        if word_matches(EXECUTES_STRING_ARGUMENT, enclosing) {
-            return true;
-        }
-        if word_matches(SHELL_INTERPRETERS, enclosing) && parent.has_dash_c {
-            return true;
+        // Both of these run a STRING as a program, so the substitution has to
+        // land where a command would start inside that string.
+        if level.in_program_text {
+            if word_matches(EXECUTES_STRING_ARGUMENT, enclosing) {
+                return true;
+            }
+            if word_matches(SHELL_INTERPRETERS, enclosing) && parent.has_dash_c {
+                return true;
+            }
         }
         // `export V=$( )` is still an assignment, so a declaration builtin does
         // not end the search the way an ordinary command word does.
@@ -2256,7 +2340,7 @@ pub fn heredoc_substitution_result_is_executed(command: &str, heredoc_start: usi
         let partial = parent
             .pending_from
             .filter(|from| *from < dollar)
-            .map_or("", |from| &command[from..dollar]);
+            .map_or("", |from| command.get(from..dollar).unwrap_or(""));
 
         if partial.is_empty() && !declared {
             // `$(cat <<'EOF' ... EOF)` standing alone: the body becomes the
@@ -2274,7 +2358,10 @@ pub fn heredoc_substitution_result_is_executed(command: &str, heredoc_start: usi
                 } else {
                     skip_balanced_paren(b, level.open_at)
                 };
-                if captured_variable_is_executed(&command[close.min(command.len())..], name) {
+                let rest = command
+                    .get(next_char_boundary(command, close)..)
+                    .unwrap_or("");
+                if captured_variable_is_executed(rest, name) {
                     return true;
                 }
             }
@@ -2332,8 +2419,13 @@ fn captured_variable_is_executed(rest: &str, name: &str) -> bool {
     if !mentions_variable(rest, name) {
         return false;
     }
+    // Split on shell word separators only. Splitting on every non-identifier
+    // character made `--slug source-truth` yield the bare token `source`, so a
+    // capture followed by `br create --slug source-truth -d "$BODY"` was DENIED.
+    // That is a real filing from this fleet's own corpus, not a constructed case.
     let words: Vec<&str> = rest
-        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')'))
+        .map(|w| w.trim_matches(['"', '\'', '`']))
         .collect();
     if words.iter().any(|w| *w == "eval" || *w == "source") {
         return true;
