@@ -21,3 +21,6 @@
 pub mod db;
 pub mod fixtures;
 pub mod logging;
+/// Isolated spawning of the dcg binary. See the module docs — a harness
+/// that inherits the developer's environment measures their config, not dcg.
+pub mod spawn;

@@ -1,17 +1,11 @@
 #![allow(clippy::uninlined_format_args)]
 //! Focused coverage for `dcg test` command behavior.
 
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::path::Path;
+use std::process::Output;
 
-/// Path to the dcg binary compiled for this test run.
-fn dcg_binary() -> PathBuf {
-    let mut path = std::env::current_exe().expect("current_exe");
-    path.pop(); // test binary name
-    path.pop(); // deps/
-    path.push("dcg");
-    path
-}
+#[path = "common/spawn.rs"]
+mod spawn;
 
 fn stdout_text(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).to_string()
@@ -23,15 +17,8 @@ fn stderr_text(output: &Output) -> String {
 
 /// Run dcg with an isolated HOME/XDG config to avoid machine-specific allowlists.
 fn run_dcg_isolated(args: &[&str], cwd: Option<&Path>) -> Output {
-    let home = tempfile::tempdir().expect("temp home");
-    let xdg = home.path().join("xdg");
-    std::fs::create_dir_all(&xdg).expect("create xdg config dir");
-
-    let mut cmd = Command::new(dcg_binary());
-    cmd.args(args)
-        .env("HOME", home.path())
-        .env("XDG_CONFIG_HOME", &xdg)
-        .env("DCG_ALLOWLIST_SYSTEM_PATH", "");
+    let (mut cmd, _sandbox) = spawn::dcg();
+    cmd.args(args);
 
     if let Some(dir) = cwd {
         cmd.current_dir(dir);

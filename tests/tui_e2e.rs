@@ -25,6 +25,9 @@
 
 use std::process::{Command, Stdio};
 
+#[path = "common/spawn.rs"]
+mod spawn;
+
 /// Path to the dcg binary (built in debug mode for tests).
 fn dcg_binary() -> std::path::PathBuf {
     let mut path = std::env::current_exe().unwrap();
@@ -86,14 +89,8 @@ fn run_hook_with_env(command: &str, env_vars: &[(&str, &str)]) -> (String, Strin
 
 /// Run dcg with CLI arguments and environment variables.
 fn run_dcg_with_env(args: &[&str], env_vars: &[(&str, &str)]) -> (String, String, i32) {
-    let temp = tempfile::tempdir().expect("failed to create temp dir");
-
-    let mut cmd = Command::new(dcg_binary());
+    let (mut cmd, _sandbox) = spawn::dcg();
     cmd.args(args)
-        .env_clear()
-        .env("HOME", temp.path())
-        .env("DCG_ALLOWLIST_SYSTEM_PATH", "")
-        .current_dir(temp.path())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 

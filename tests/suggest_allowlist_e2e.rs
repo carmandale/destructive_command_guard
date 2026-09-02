@@ -472,7 +472,8 @@ fn test_suggest_allowlist_invalid_since_format() {
 fn test_suggest_allowlist_help() {
     eprintln!("=== Testing suggest-allowlist --help ===");
 
-    let output = Command::new(dcg_binary())
+    let (mut cmd, _sandbox) = common::spawn::dcg();
+    let output = cmd
         .args(["suggest-allowlist", "--help"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

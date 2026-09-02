@@ -4,20 +4,15 @@
 //! These tests verify that all CLI commands with --format json
 //! produce valid, well-structured JSON output suitable for AI agent parsing.
 
-use std::process::Command;
+
+#[path = "common/spawn.rs"]
+mod spawn;
 
 /// Path to the DCG binary (uses same target directory as the test binary).
-fn dcg_binary() -> std::path::PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // Remove test binary name
-    path.pop(); // Remove deps/
-    path.push("dcg");
-    path
-}
-
 /// Run a dcg command and return stdout, stderr, exit code.
 fn run_dcg(args: &[&str]) -> (String, String, i32) {
-    let output = Command::new(dcg_binary())
+    let (mut cmd, _sandbox) = spawn::dcg();
+    let output = cmd
         .args(args)
         .output()
         .expect("failed to run dcg");

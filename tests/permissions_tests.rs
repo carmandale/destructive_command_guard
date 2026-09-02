@@ -1,12 +1,6 @@
-use std::process::Command;
 
-fn dcg_binary() -> std::path::PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // deps
-    path.pop(); // debug
-    path.push("dcg");
-    path
-}
+#[path = "common/spawn.rs"]
+mod spawn;
 
 fn run_hook(command: &str) -> String {
     let input = serde_json::json!({
@@ -16,8 +10,8 @@ fn run_hook(command: &str) -> String {
         }
     });
 
-    let mut child = Command::new(dcg_binary())
-        .env("DCG_PACKS", "system.permissions")
+    let (mut dcg_cmd, _sandbox) = spawn::dcg_with_packs("system.permissions");
+    let mut child = dcg_cmd
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

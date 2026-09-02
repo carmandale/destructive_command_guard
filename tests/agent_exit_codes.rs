@@ -12,6 +12,9 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+#[path = "common/spawn.rs"]
+mod spawn;
+
 /// Path to the DCG binary (uses same target directory as the test binary).
 fn dcg_binary() -> std::path::PathBuf {
     let mut path = std::env::current_exe().unwrap();
@@ -272,7 +275,8 @@ fn test_exit_on_missing_command() {
 
 #[test]
 fn test_test_command_exit_0() {
-    let output = Command::new(dcg_binary())
+    let (mut cmd, _sandbox) = spawn::dcg();
+    let output = cmd
         .args(["test", "git status"])
         .output()
         .expect("failed to run dcg test");
@@ -282,7 +286,8 @@ fn test_test_command_exit_0() {
 
 #[test]
 fn test_test_command_deny_exit_1() {
-    let output = Command::new(dcg_binary())
+    let (mut cmd, _sandbox) = spawn::dcg();
+    let output = cmd
         .args(["test", "git reset --hard"])
         .output()
         .expect("failed to run dcg test");
@@ -297,7 +302,8 @@ fn test_test_command_deny_exit_1() {
 
 #[test]
 fn test_explain_command_exit_0() {
-    let output = Command::new(dcg_binary())
+    let (mut cmd, _sandbox) = spawn::dcg();
+    let output = cmd
         .args(["explain", "git reset --hard"])
         .output()
         .expect("failed to run dcg explain");
@@ -307,7 +313,8 @@ fn test_explain_command_exit_0() {
 
 #[test]
 fn test_packs_command_exit_0() {
-    let output = Command::new(dcg_binary())
+    let (mut cmd, _sandbox) = spawn::dcg();
+    let output = cmd
         .args(["packs"])
         .output()
         .expect("failed to run dcg packs");
@@ -317,7 +324,8 @@ fn test_packs_command_exit_0() {
 
 #[test]
 fn test_version_exit_0() {
-    let output = Command::new(dcg_binary())
+    let (mut cmd, _sandbox) = spawn::dcg();
+    let output = cmd
         .args(["--version"])
         .output()
         .expect("failed to run dcg --version");
@@ -327,7 +335,8 @@ fn test_version_exit_0() {
 
 #[test]
 fn test_help_exit_0() {
-    let output = Command::new(dcg_binary())
+    let (mut cmd, _sandbox) = spawn::dcg();
+    let output = cmd
         .args(["--help"])
         .output()
         .expect("failed to run dcg --help");

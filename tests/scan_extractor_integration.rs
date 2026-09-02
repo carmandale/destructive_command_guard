@@ -12,21 +12,14 @@
 //!
 //! Related bead: git_safety_guard-l9ig
 
-use std::process::Command;
+
+#[path = "common/spawn.rs"]
+mod spawn;
 
 /// Run dcg scan command and return output
 fn run_dcg_scan(args: &[&str]) -> std::process::Output {
-    let dcg_bin = std::env::var("DCG_BIN")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("target")
-                .join("debug")
-                .join("dcg")
-        });
-
-    Command::new(dcg_bin)
-        .args(["scan"])
+    let (mut cmd, _sandbox) = spawn::dcg();
+    cmd.args(["scan"])
         .args(args)
         .output()
         .expect("Failed to execute dcg")

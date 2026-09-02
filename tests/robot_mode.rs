@@ -11,25 +11,19 @@
 //!   - 4: Parse/input error
 //!   - 5: IO error
 
-use std::process::Command;
+
+#[path = "common/spawn.rs"]
+mod spawn;
 
 /// Path to the dcg binary.
 /// Uses CARGO_TARGET_DIR if set, otherwise falls back to ./target/release/dcg
-fn dcg_binary() -> String {
-    if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
-        format!("{}/release/dcg", target_dir)
-    } else {
-        "./target/release/dcg".to_string()
-    }
-}
-
 /// Run a dcg command and return stdout, stderr, exit code.
 fn run_dcg(args: &[&str]) -> (String, String, i32) {
-    let binary = dcg_binary();
-    let output = Command::new(&binary)
+    let (mut cmd, _sandbox) = spawn::dcg();
+    let output = cmd
         .args(args)
         .output()
-        .unwrap_or_else(|e| panic!("failed to run dcg at {}: {}", binary, e));
+        .unwrap_or_else(|e| panic!("failed to run dcg: {e}"));
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -40,12 +34,12 @@ fn run_dcg(args: &[&str]) -> (String, String, i32) {
 
 /// Run a dcg command with environment variable set.
 fn run_dcg_with_env(args: &[&str], key: &str, value: &str) -> (String, String, i32) {
-    let binary = dcg_binary();
-    let output = Command::new(&binary)
+    let (mut cmd, _sandbox) = spawn::dcg();
+    let output = cmd
         .args(args)
         .env(key, value)
         .output()
-        .unwrap_or_else(|e| panic!("failed to run dcg at {}: {}", binary, e));
+        .unwrap_or_else(|e| panic!("failed to run dcg: {e}"));
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();

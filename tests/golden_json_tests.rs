@@ -35,6 +35,9 @@ use e2e::framework::E2ETestContext;
 use serde_json::Value;
 use std::path::Path;
 
+#[path = "common/spawn.rs"]
+mod spawn;
+
 /// Fields that are dynamic and should be masked before comparison.
 const DYNAMIC_FIELDS: &[&str] = &["allowOnceCode", "allowOnceFullHash"];
 
@@ -377,9 +380,8 @@ fn golden_json_severity_values() {
 
 /// Run dcg in robot mode via test subcommand
 fn run_robot_mode(command: &str) -> Option<Value> {
-    use std::process::Command;
-
-    let output = Command::new(env!("CARGO_BIN_EXE_dcg"))
+    let (mut cmd, _sandbox) = spawn::dcg();
+    let output = cmd
         .args(["--robot", "test", command])
         .output()
         .expect("Failed to run dcg");

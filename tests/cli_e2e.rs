@@ -13,6 +13,9 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+#[path = "common/spawn.rs"]
+mod spawn;
+
 /// Path to the dcg binary (built in debug mode for tests).
 fn dcg_binary() -> std::path::PathBuf {
     // Use the debug binary for tests
@@ -25,8 +28,8 @@ fn dcg_binary() -> std::path::PathBuf {
 
 /// Helper to run dcg with arguments and capture output.
 fn run_dcg(args: &[&str]) -> std::process::Output {
-    Command::new(dcg_binary())
-        .args(args)
+    let (mut cmd, _sandbox) = spawn::dcg();
+    cmd.args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -1878,7 +1881,7 @@ mod simulate_tests {
         let mut args = vec!["simulate", "-f", "-"];
         args.extend_from_slice(extra_args);
 
-        let mut cmd = Command::new(dcg_binary());
+        let (mut cmd, _sandbox) = spawn::dcg();
         cmd.args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -3643,8 +3646,8 @@ mod stats_rules_tests {
         }
 
         fn run(&self, args: &[&str]) -> std::process::Output {
-            Command::new(dcg_binary())
-                .env("DCG_HISTORY_DB", &self.db_path)
+            let (mut cmd, _sandbox) = spawn::dcg();
+            cmd.env("DCG_HISTORY_DB", &self.db_path)
                 .current_dir(self.temp.path())
                 .args(args)
                 .stdout(Stdio::piped())

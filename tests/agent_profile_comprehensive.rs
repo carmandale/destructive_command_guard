@@ -18,21 +18,16 @@
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+
+#[path = "common/spawn.rs"]
+mod spawn;
 
 // =============================================================================
 // Test Utilities
 // =============================================================================
 
 /// Path to the DCG binary (uses same target directory as the test binary).
-fn dcg_binary() -> std::path::PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // Remove test binary name
-    path.pop(); // Remove deps/
-    path.push("dcg");
-    path
-}
-
 /// Run DCG in hook mode with environment variables.
 fn run_hook_mode_with_env(command: &str, env_vars: &[(&str, &str)]) -> (String, String, i32) {
     let input = format!(
@@ -40,7 +35,7 @@ fn run_hook_mode_with_env(command: &str, env_vars: &[(&str, &str)]) -> (String, 
         command.replace('\\', "\\\\").replace('"', "\\\"")
     );
 
-    let mut cmd = Command::new(dcg_binary());
+    let (mut cmd, _sandbox) = spawn::dcg();
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -70,7 +65,7 @@ fn run_hook_mode_with_env(command: &str, env_vars: &[(&str, &str)]) -> (String, 
 
 /// Run DCG in robot mode for cleaner JSON output.
 fn run_robot_mode_with_env(args: &[&str], env_vars: &[(&str, &str)]) -> (String, String, i32) {
-    let mut cmd = Command::new(dcg_binary());
+    let (mut cmd, _sandbox) = spawn::dcg();
     cmd.args(["--robot"])
         .args(args)
         .stdout(Stdio::piped())

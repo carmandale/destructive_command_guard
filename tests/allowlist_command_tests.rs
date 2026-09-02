@@ -1,24 +1,10 @@
-use std::process::Command;
 
-fn dcg_binary() -> std::path::PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // deps
-    path.pop(); // debug
-    path.push("dcg");
-    path
-}
+#[path = "common/spawn.rs"]
+mod spawn;
 
 fn run_hook_with_allowlist(command: &str, allowlist_content: &str) -> String {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let config_dir = temp_dir.path().join("dcg");
-    std::fs::create_dir_all(&config_dir).unwrap();
-    let allowlist_path = config_dir.join("allowlist.toml");
-    std::fs::write(&allowlist_path, allowlist_content).unwrap();
-
-    // Create a fake home dir for user config loading
-    let home_dir = temp_dir.path().join("home");
-    let xdg_config_dir = temp_dir.path().join("xdg_config");
-    let user_config_dir = xdg_config_dir.join("dcg");
+    let (mut dcg_cmd, sandbox) = spawn::dcg();
+    let user_config_dir = sandbox.dcg_config_dir();
     std::fs::create_dir_all(&user_config_dir).unwrap();
     std::fs::write(user_config_dir.join("allowlist.toml"), allowlist_content).unwrap();
 
@@ -29,9 +15,7 @@ fn run_hook_with_allowlist(command: &str, allowlist_content: &str) -> String {
         }
     });
 
-    let mut child = Command::new(dcg_binary())
-        .env("HOME", &home_dir)
-        .env("XDG_CONFIG_HOME", &xdg_config_dir)
+    let mut child = dcg_cmd
         // Ensure system allowlist doesn't interfere
         .env("DCG_ALLOWLIST_SYSTEM_PATH", "/nonexistent")
         .stdin(std::process::Stdio::piped())
