@@ -1479,7 +1479,18 @@ fn extract_heredoc_target_command(command: &str, heredoc_start: usize) -> Option
         return None;
     }
 
-    let before = &command[..heredoc_start];
+    // The heredoc operator binds to the simple command on its OWN physical line,
+    // so only that line can own this heredoc. Bounding here is a soundness fix:
+    // `tokenize_backwards` stops at `| ; & $ ( )` but NOT at newlines, so an
+    // unbounded scan resolves the target from an EARLIER line — e.g.
+    // `cat f\nbash <<EOF\nrm -rf /\nEOF` would resolve the target as `cat` (a data
+    // sink) and mask the executing `bash` body: a false negative. Limiting the
+    // scan to the current line risks only a false positive, never a false
+    // negative (the conservative direction for a security guard).
+    let line_start = command[..heredoc_start]
+        .rfind(['\n', '\r'])
+        .map_or(0, |i| i + 1);
+    let before = &command[line_start..heredoc_start];
 
     // Trim trailing whitespace before the heredoc operator
     let trimmed = before.trim_end();
@@ -1487,13 +1498,23 @@ fn extract_heredoc_target_command(command: &str, heredoc_start: usize) -> Option
         return None;
     }
 
-    // Parse tokens backwards to find the command
-    // This handles quoted strings, flags, and file arguments properly
+    // Parse tokens backwards, then walk them in original order so we identify
+    // the command that owns the heredoc rather than the last argument before
+    // the operator.
     let tokens = tokenize_backwards(trimmed);
 
-    for token in tokens {
+    for token in tokens.iter().rev() {
+        if is_shell_env_assignment(token) {
+            continue;
+        }
+
         // Skip flags
         if token.starts_with('-') {
+            continue;
+        }
+
+        // Skip common shell wrappers until we reach the actual target command.
+        if SHELL_WRAPPER_COMMANDS.contains(&token.as_str()) {
             continue;
         }
 
@@ -1506,7 +1527,7 @@ fn extract_heredoc_target_command(command: &str, heredoc_start: usize) -> Option
 
         // Skip if this looks like a file path argument
         if token.contains('/') {
-            let basename = token.rsplit('/').next().unwrap_or(&token);
+            let basename = token.rsplit('/').next().unwrap_or(token);
 
             // Check if this looks like a command path (/bin/cat, /usr/bin/bash)
             // vs a file argument (/tmp/file, /path/to/data)
@@ -1543,10 +1564,26 @@ fn extract_heredoc_target_command(command: &str, heredoc_start: usize) -> Option
             continue;
         }
 
-        return Some(token);
+        return Some(token.clone());
     }
 
     None
+}
+
+fn is_shell_env_assignment(token: &str) -> bool {
+    let Some((name, _value)) = token.split_once('=') else {
+        return false;
+    };
+
+    !name.is_empty()
+        && name
+            .bytes()
+            .enumerate()
+            .all(|(idx, byte)| match byte {
+                b'a'..=b'z' | b'A'..=b'Z' | b'_' => true,
+                b'0'..=b'9' => idx > 0,
+                _ => false,
+            })
 }
 
 /// Tokenize a command string backwards, respecting quotes.
@@ -1676,6 +1713,8 @@ const NON_EXECUTING_HEREDOC_COMMANDS: &[&str] = &[
     "read",
 ];
 
+const SHELL_WRAPPER_COMMANDS: &[&str] = &["sudo", "env", "command", "builtin", "nohup"];
+
 /// Check if a command executes its heredoc/stdin content as code.
 ///
 /// Returns `true` if the command is known to NOT execute its input,
@@ -1685,6 +1724,91 @@ pub fn is_non_executing_heredoc_command(cmd: &str) -> bool {
     // Normalize: strip path prefix if present
     let cmd_name = cmd.rsplit('/').next().unwrap_or(cmd);
     NON_EXECUTING_HEREDOC_COMMANDS.contains(&cmd_name)
+}
+
+/// Check whether the command owning the heredoc at `heredoc_start` is a `git`
+/// invocation that reads the heredoc body as DATA from stdin — a commit/tag/note
+/// *message* (`-F -`, `-F-`, `--file=-`, `--file -`) or blob/index/object
+/// *content* (`--stdin`).
+///
+/// For these targets git consumes stdin as data (a commit message, blob content,
+/// an index path list, …) and NEVER executes it as shell, so the body is masked
+/// out of the raw-shell rescan exactly like `cat`/`tee` (#109). Without this, a
+/// commit message that merely contains the words "restore" or "reset --hard"
+/// trips the `core.git:*` rules (#136) even though nothing in that message is
+/// ever executed.
+///
+/// Soundness (zero false negatives): this is an *additional* allow-to-mask gate,
+/// so the fail-safe direction is correct — when the parse is ambiguous it returns
+/// `false` and the body keeps flowing through the scan (a false positive at
+/// worst). It requires program `git` plus an EXPLICIT stdin sentinel; it does not
+/// fire on a bare `git commit <<EOF` (no `-F -`). Only the heredoc body is masked
+/// by the caller: the `git …` line itself and everything after the terminator are
+/// still scanned, so a real destructive command chained after the heredoc still
+/// blocks. `--stdin-paths` is deliberately NOT matched (kept conservative).
+/// The scan is bounded to the heredoc's own physical line (see below) and
+/// `tokenize_backwards` additionally stops at shell separators (`| ; & $ ( )`),
+/// so it never reads tokens across a command boundary; quoted args (e.g. a
+/// `-m "…-F -…"` message) are single tokens and cannot be mistaken for real flags.
+fn is_git_stdin_data_sink(command: &str, heredoc_start: usize) -> bool {
+    if heredoc_start == 0 {
+        return false;
+    }
+    // A heredoc operator binds to the simple command on its OWN physical line, so
+    // only that line can own this heredoc. Bounding the scan to the current line
+    // is essential for soundness: `tokenize_backwards` stops at `| ; & $ ( )` but
+    // NOT at newlines, so without this a `git … -F -` on an EARLIER line would
+    // leak its stdin sentinel onto a later, genuinely-executing heredoc and mask
+    // its body — e.g. `git commit -F - f\nbash <<EOF\nrm -rf /\nEOF` would wrongly
+    // be allowed (a false negative). Trimming to the last line risks only a false
+    // positive (an exotic backslash-continued invocation no longer matched),
+    // never a false negative.
+    let prefix = &command[..heredoc_start];
+    let line_start = prefix.rfind(['\n', '\r']).map_or(0, |i| i + 1);
+    let before = prefix[line_start..].trim_end();
+    if before.is_empty() {
+        return false;
+    }
+
+    // Tokens of the current command in original (left-to-right) order.
+    let mut tokens = tokenize_backwards(before);
+    tokens.reverse();
+
+    // Resolve the program word, skipping env-assignments and shell wrappers
+    // (sudo/env/command/builtin/nohup) the same way target extraction does.
+    let mut idx = 0;
+    while let Some(t) = tokens.get(idx) {
+        if is_shell_env_assignment(t) || SHELL_WRAPPER_COMMANDS.contains(&t.as_str()) {
+            idx += 1;
+        } else {
+            break;
+        }
+    }
+    let Some(program) = tokens.get(idx) else {
+        return false;
+    };
+    if program.rsplit('/').next().unwrap_or(program) != "git" {
+        return false;
+    }
+
+    // Look for an explicit stdin-data sentinel among git's arguments.
+    let args = &tokens[idx + 1..];
+    for (i, arg) in args.iter().enumerate() {
+        match arg.as_str() {
+            // `-F -` / `--file -`: message read from stdin (commit/tag/notes).
+            "-F" | "--file" => {
+                if args.get(i + 1).map(String::as_str) == Some("-") {
+                    return true;
+                }
+            }
+            // Glued / `=-` forms of the same.
+            "-F-" | "--file=-" => return true,
+            // Blob/index/object content from stdin (NOT --stdin-paths).
+            "--stdin" => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Mask heredoc content when the target command doesn't execute it.
@@ -3775,5 +3899,146 @@ fi"#;
         let content = "print('hello')"; // ambiguous content
         let (lang, _) = ScriptLanguage::detect(cmd, content);
         assert_eq!(lang, ScriptLanguage::Python);
+    }
+
+    #[test]
+    fn extract_heredoc_target_command_prefers_command_over_arguments() {
+        let cat_cmd = "cat bash <<EOF\nrm -rf /\nEOF";
+        let cat_start = cat_cmd.find("<<").expect("cat heredoc");
+        assert_eq!(
+            extract_heredoc_target_command(cat_cmd, cat_start).as_deref(),
+            Some("cat")
+        );
+
+        let grep_cmd = "grep pattern . <<EOF\nrm -rf /\nEOF";
+        let grep_start = grep_cmd.find("<<").expect("grep heredoc");
+        assert_eq!(
+            extract_heredoc_target_command(grep_cmd, grep_start).as_deref(),
+            Some("grep")
+        );
+    }
+
+    #[test]
+    fn extract_heredoc_target_command_skips_assignments_and_wrappers() {
+        let env_cmd = "FOO=1 env -i /bin/cat <<EOF\npayload\nEOF";
+        let env_start = env_cmd.find("<<").expect("env heredoc");
+        assert_eq!(
+            extract_heredoc_target_command(env_cmd, env_start).as_deref(),
+            Some("cat")
+        );
+
+        let sudo_cmd = "sudo bash <<EOF\necho hi\nEOF";
+        let sudo_start = sudo_cmd.find("<<").expect("sudo heredoc");
+        assert_eq!(
+            extract_heredoc_target_command(sudo_cmd, sudo_start).as_deref(),
+            Some("bash")
+        );
+    }
+
+    /// #136 data-sink half: `git commit -F -` / `--file=-` / `git hash-object
+    /// --stdin` read the heredoc body as DATA (a commit message / object
+    /// content) that git never executes, so the body is masked like cat/tee. A
+    /// bare `git commit <<EOF` (no stdin sentinel) is NOT masked, and anything
+    /// after the terminator stays scannable.
+    #[test]
+    fn mask_git_stdin_data_sink_136() {
+        let reset_hard = format!("{}{}", "reset --", "hard");
+
+        // `git commit -F -`: message from stdin → body masked.
+        let c1 = format!("git commit -F - <<EOF\ndocs: {reset_hard} notes\nEOF");
+        let m1 = mask_non_executing_heredocs(&c1);
+        assert!(
+            !m1.contains(&reset_hard),
+            "commit-message body via `-F -` should be masked: {m1:?}"
+        );
+        // The git invocation line itself must be preserved (not masked away).
+        assert!(
+            m1.contains("git commit -F -"),
+            "the git invocation line must be preserved: {m1:?}"
+        );
+
+        // `--file=-` glued form.
+        let c2 = "git commit --file=- <<EOF\ndocs: restore the worktree\nEOF";
+        let m2 = mask_non_executing_heredocs(c2);
+        assert!(
+            !m2.contains("restore"),
+            "commit-message body via `--file=-` should be masked: {m2:?}"
+        );
+
+        // `git hash-object --stdin`: object content from stdin → masked.
+        let c3 = "git hash-object --stdin <<EOF\ngit restore --worktree .\nEOF";
+        let m3 = mask_non_executing_heredocs(c3);
+        assert!(
+            !m3.contains("restore"),
+            "hash-object --stdin body should be masked: {m3:?}"
+        );
+
+        // Conservative: a bare `git commit <<EOF` (no stdin sentinel) is NOT masked.
+        let c4 = "git commit <<EOF\nrestore\nEOF";
+        let m4 = mask_non_executing_heredocs(c4);
+        assert!(
+            m4.contains("restore"),
+            "bare `git commit <<EOF` must NOT be masked (no stdin sentinel): {m4:?}"
+        );
+
+        // Soundness: a destructive command AFTER the terminator stays scannable.
+        let rmrf = format!("{}{}{}", "rm", " -", "rf");
+        let c5 = format!("git commit -F - <<EOF\nmsg\nEOF\n{rmrf} /etc");
+        let m5 = mask_non_executing_heredocs(&c5);
+        assert!(
+            m5.contains(&rmrf),
+            "command after the heredoc terminator must remain scannable: {m5:?}"
+        );
+
+        // A quoted `-m` message that merely contains the text "-F -" must not be
+        // mistaken for a real stdin sentinel (quoted args are single tokens).
+        let c6 = format!("git commit -m \"mentions -F - here\" <<EOF\n{reset_hard}\nEOF");
+        let m6 = mask_non_executing_heredocs(&c6);
+        assert!(
+            m6.contains(&reset_hard),
+            "quoted text '-F -' must not be treated as a stdin sentinel: {m6:?}"
+        );
+
+        // CRITICAL soundness (no cross-line leak): a `git … -F -` on an EARLIER
+        // line must NOT mask a LATER interpreter heredoc whose body genuinely
+        // executes. The heredoc binds to the command on its own physical line.
+        let c7 = format!("git commit -F - msg.txt\nbash <<EOF\n{rmrf} /important\nEOF");
+        let m7 = mask_non_executing_heredocs(&c7);
+        assert!(
+            m7.contains(&rmrf),
+            "git stdin sentinel on a prior line must NOT mask a later bash heredoc body: {m7:?}"
+        );
+
+        // Same line, here-string form on a later interpreter: still no leak.
+        let c8 = format!("git commit -F - msg.txt\nbash <<<'{rmrf} /important'");
+        let m8 = mask_non_executing_heredocs(&c8);
+        assert!(
+            m8.contains(&rmrf),
+            "git sentinel on a prior line must NOT mask a later bash here-string: {m8:?}"
+        );
+    }
+
+    /// Cross-line soundness for the existing #109 data-sink path: a `cat`/`tee`
+    /// data sink on a PRIOR line must not mask a later executing `bash` heredoc
+    /// body. Heredoc target resolution is bounded to the heredoc's own physical
+    /// line, so the target here is `bash` (executing), not `cat` (data sink).
+    #[test]
+    fn data_sink_mask_does_not_leak_across_lines() {
+        let rmrf = format!("{}{}{}", "rm", " -", "rf");
+
+        let c = format!("cat notes.txt\nbash <<EOF\n{rmrf} /important\nEOF");
+        let m = mask_non_executing_heredocs(&c);
+        assert!(
+            m.contains(&rmrf),
+            "cat on a prior line must NOT mask a later bash heredoc body: {m:?}"
+        );
+
+        // Control: cat with its OWN heredoc on the same line is still masked.
+        let c2 = format!("cat <<EOF\n{rmrf} /important\nEOF");
+        let m2 = mask_non_executing_heredocs(&c2);
+        assert!(
+            !m2.contains(&rmrf),
+            "cat's own same-line heredoc body should still be masked: {m2:?}"
+        );
     }
 }
