@@ -48,7 +48,12 @@ impl Sandbox {
 }
 
 /// Path to the dcg binary built alongside this test.
-pub fn dcg_binary() -> PathBuf {
+///
+/// Private on purpose. A harness that can name the binary can spawn it
+/// un-isolated, so the only thing that leaves this file is a `Command` that
+/// already carries the isolation. `tests/spawn_isolation.rs` refuses the
+/// other spellings of the path.
+fn dcg_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_dcg"))
 }
 
@@ -60,6 +65,17 @@ pub fn dcg_binary() -> PathBuf {
 /// depends on dcg and the test alone.
 pub fn dcg() -> (Command, Sandbox) {
     let sandbox = sandbox();
+    let cmd = dcg_in(&sandbox);
+    (cmd, sandbox)
+}
+
+/// The same isolated `Command`, against a sandbox the caller already holds.
+///
+/// For a harness that writes a config, a pack, or a `.git` into the sandbox
+/// before spawning, or spawns more than once against the same state. Layer
+/// what the test needs on top with `.env(..)`; a test that measures dcg's own
+/// default pack selection says so with `.env_remove("DCG_PACKS")`.
+pub fn dcg_in(sandbox: &Sandbox) -> Command {
     let mut cmd = Command::new(dcg_binary());
     cmd.env_clear()
         .env("HOME", &sandbox.home)
@@ -67,7 +83,7 @@ pub fn dcg() -> (Command, Sandbox) {
         .env("DCG_ALLOWLIST_SYSTEM_PATH", "")
         .env("DCG_PACKS", "core.git,core.filesystem")
         .current_dir(sandbox.root());
-    (cmd, sandbox)
+    cmd
 }
 
 /// Like [`dcg`], but with the caller's pack selection instead of the default.

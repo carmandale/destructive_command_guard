@@ -23,30 +23,16 @@
 //! - TERM=dumb is set
 //! - stdout/stderr is not a TTY (default in tests)
 
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 #[path = "common/spawn.rs"]
 mod spawn;
 
-/// Path to the dcg binary (built in debug mode for tests).
-fn dcg_binary() -> std::path::PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // Remove test binary name
-    path.pop(); // Remove deps/
-    path.push("dcg");
-    path
-}
-
 /// Run dcg in hook mode with the given command and environment variables.
 /// Returns (stdout, stderr, exit_code).
 fn run_hook_with_env(command: &str, env_vars: &[(&str, &str)]) -> (String, String, i32) {
-    let temp = tempfile::tempdir().expect("failed to create temp dir");
-    std::fs::create_dir_all(temp.path().join(".git")).expect("failed to create .git dir");
-
-    let home_dir = temp.path().join("home");
-    let xdg_config_dir = temp.path().join("xdg_config");
-    std::fs::create_dir_all(&home_dir).expect("failed to create HOME dir");
-    std::fs::create_dir_all(&xdg_config_dir).expect("failed to create XDG_CONFIG_HOME dir");
+    let (mut cmd, sandbox) = spawn::dcg();
+    std::fs::create_dir_all(sandbox.root().join(".git")).expect("failed to create .git dir");
 
     let input = serde_json::json!({
         "tool_name": "Bash",
@@ -55,14 +41,7 @@ fn run_hook_with_env(command: &str, env_vars: &[(&str, &str)]) -> (String, Strin
         }
     });
 
-    let mut cmd = Command::new(dcg_binary());
-    cmd.env_clear()
-        .env("HOME", &home_dir)
-        .env("XDG_CONFIG_HOME", &xdg_config_dir)
-        .env("DCG_ALLOWLIST_SYSTEM_PATH", "")
-        .env("DCG_PACKS", "core.git,core.filesystem")
-        .current_dir(temp.path())
-        .stdin(Stdio::piped())
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -90,9 +69,7 @@ fn run_hook_with_env(command: &str, env_vars: &[(&str, &str)]) -> (String, Strin
 /// Run dcg with CLI arguments and environment variables.
 fn run_dcg_with_env(args: &[&str], env_vars: &[(&str, &str)]) -> (String, String, i32) {
     let (mut cmd, _sandbox) = spawn::dcg();
-    cmd.args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
 
     for (key, value) in env_vars {
         cmd.env(key, value);

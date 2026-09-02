@@ -1,12 +1,5 @@
-use std::process::Command;
-
-fn dcg_binary() -> std::path::PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // deps
-    path.pop(); // debug
-    path.push("dcg");
-    path
-}
+#[path = "common/spawn.rs"]
+mod spawn;
 
 fn run_hook(command: &str) -> String {
     let input = serde_json::json!({
@@ -19,19 +12,8 @@ fn run_hook(command: &str) -> String {
     // Cleared for the same reason as `cli_e2e.rs`: without it these tests read
     // the developer's real dcg config, and a local `"core.git:reset-hard" =
     // "warn"` downgrade turns a genuine bypass finding into an unrelated red.
-    let temp = tempfile::tempdir().expect("temp dir");
-    let home_dir = temp.path().join("home");
-    let xdg_config_dir = temp.path().join("xdg_config");
-    std::fs::create_dir_all(&home_dir).expect("HOME dir");
-    std::fs::create_dir_all(&xdg_config_dir).expect("XDG_CONFIG_HOME dir");
-
-    let mut child = Command::new(dcg_binary())
-        .env_clear()
-        .env("HOME", &home_dir)
-        .env("XDG_CONFIG_HOME", &xdg_config_dir)
-        .env("DCG_ALLOWLIST_SYSTEM_PATH", "")
-        .env("DCG_PACKS", "core.git,core.filesystem")
-        .current_dir(temp.path())
+    let (mut cmd, _sandbox) = spawn::dcg();
+    let mut child = cmd
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

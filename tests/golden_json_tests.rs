@@ -35,8 +35,7 @@ use e2e::framework::E2ETestContext;
 use serde_json::Value;
 use std::path::Path;
 
-#[path = "common/spawn.rs"]
-mod spawn;
+use e2e::spawn;
 
 /// Fields that are dynamic and should be masked before comparison.
 const DYNAMIC_FIELDS: &[&str] = &["allowOnceCode", "allowOnceFullHash"];

@@ -10,19 +10,10 @@
 //! - Exit 2 for errors that should block the agent from proceeding
 
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 #[path = "common/spawn.rs"]
 mod spawn;
-
-/// Path to the DCG binary (uses same target directory as the test binary).
-fn dcg_binary() -> std::path::PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // Remove test binary name
-    path.pop(); // Remove deps/
-    path.push("dcg");
-    path
-}
 
 /// Run dcg in hook mode with JSON input.
 ///
@@ -32,19 +23,8 @@ fn dcg_binary() -> std::path::PathBuf {
 /// failed on a machine whose config sets `"core.git:reset-hard" = "warn"`,
 /// which is a deliberate local downgrade and not a dcg regression at all.
 fn run_hook_mode_raw(input: &str) -> (String, String, i32) {
-    let temp = tempfile::tempdir().expect("failed to create temp dir");
-    let home_dir = temp.path().join("home");
-    let xdg_config_dir = temp.path().join("xdg_config");
-    std::fs::create_dir_all(&home_dir).expect("failed to create HOME dir");
-    std::fs::create_dir_all(&xdg_config_dir).expect("failed to create XDG_CONFIG_HOME dir");
-
-    let mut child = Command::new(dcg_binary())
-        .env_clear()
-        .env("HOME", &home_dir)
-        .env("XDG_CONFIG_HOME", &xdg_config_dir)
-        .env("DCG_ALLOWLIST_SYSTEM_PATH", "")
-        .env("DCG_PACKS", "core.git,core.filesystem")
-        .current_dir(temp.path())
+    let (mut cmd, _sandbox) = spawn::dcg();
+    let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

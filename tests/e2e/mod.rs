@@ -84,6 +84,10 @@
 
 pub mod framework;
 pub mod logging;
+/// Isolated spawning of the dcg binary, included once here so a root that
+/// declares `mod e2e;` gets it as `e2e::spawn` and never loads the file twice.
+#[path = "../common/spawn.rs"]
+pub mod spawn;
 
 // Re-export commonly used types for convenience
 #[allow(unused_imports)]

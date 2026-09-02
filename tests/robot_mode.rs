@@ -11,12 +11,9 @@
 //!   - 4: Parse/input error
 //!   - 5: IO error
 
-
 #[path = "common/spawn.rs"]
 mod spawn;
 
-/// Path to the dcg binary.
-/// Uses CARGO_TARGET_DIR if set, otherwise falls back to ./target/release/dcg
 /// Run a dcg command and return stdout, stderr, exit code.
 fn run_dcg(args: &[&str]) -> (String, String, i32) {
     let (mut cmd, _sandbox) = spawn::dcg();

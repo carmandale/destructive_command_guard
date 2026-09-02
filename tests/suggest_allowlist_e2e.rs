@@ -24,22 +24,11 @@ use destructive_command_guard::history::{HistoryDb, Outcome};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
-
-/// Path to the dcg binary (built in debug mode for tests).
-fn dcg_binary() -> PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // Remove test binary name
-    path.pop(); // Remove deps/
-    path.push("dcg");
-    path
-}
+use std::process::Stdio;
 
 /// Test environment with isolated history and config.
 struct TestEnv {
-    temp_dir: tempfile::TempDir,
-    home_dir: PathBuf,
-    xdg_config_dir: PathBuf,
+    sandbox: common::spawn::Sandbox,
     #[allow(dead_code)]
     dcg_dir: PathBuf,
     config_path: PathBuf,
@@ -50,12 +39,8 @@ struct TestEnv {
 impl TestEnv {
     /// Create a new empty test environment.
     fn new() -> Self {
-        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
-        let home_dir = temp_dir.path().join("home");
-        let xdg_config_dir = temp_dir.path().join("xdg_config");
-        let dcg_dir = xdg_config_dir.join("dcg");
-
-        fs::create_dir_all(&home_dir).expect("failed to create HOME dir");
+        let sandbox = common::spawn::sandbox();
+        let dcg_dir = sandbox.dcg_config_dir();
         fs::create_dir_all(&dcg_dir).expect("failed to create XDG_CONFIG_HOME/dcg dir");
 
         let config_path = dcg_dir.join("config.toml");
@@ -63,12 +48,10 @@ impl TestEnv {
         let allowlist_path = dcg_dir.join("allowlist.toml");
 
         // Create a git repo in the temp dir so project detection works
-        fs::create_dir_all(temp_dir.path().join(".git")).expect("failed to create .git dir");
+        fs::create_dir_all(sandbox.root().join(".git")).expect("failed to create .git dir");
 
         Self {
-            temp_dir,
-            home_dir,
-            xdg_config_dir,
+            sandbox,
             dcg_dir,
             config_path,
             history_path,
@@ -116,13 +99,9 @@ database_path = "{}"
         args: &[&str],
         extra_env: &[(&str, &str)],
     ) -> std::process::Output {
-        let mut cmd = Command::new(dcg_binary());
-        cmd.env_clear()
-            .env("HOME", &self.home_dir)
-            .env("XDG_CONFIG_HOME", &self.xdg_config_dir)
-            .env("DCG_CONFIG", &self.config_path)
+        let mut cmd = common::spawn::dcg_in(&self.sandbox);
+        cmd.env("DCG_CONFIG", &self.config_path)
             .env("DCG_PACKS", "core.git,core.filesystem,containers.docker")
-            .current_dir(self.temp_dir.path())
             .arg("suggest-allowlist")
             .args(args)
             .stdout(Stdio::piped())
@@ -142,13 +121,9 @@ database_path = "{}"
         args: &[&str],
         stdin_input: &str,
     ) -> std::process::Output {
-        let mut cmd = Command::new(dcg_binary());
-        cmd.env_clear()
-            .env("HOME", &self.home_dir)
-            .env("XDG_CONFIG_HOME", &self.xdg_config_dir)
-            .env("DCG_CONFIG", &self.config_path)
+        let mut cmd = common::spawn::dcg_in(&self.sandbox);
+        cmd.env("DCG_CONFIG", &self.config_path)
             .env("DCG_PACKS", "core.git,core.filesystem,containers.docker")
-            .current_dir(self.temp_dir.path())
             .arg("suggest-allowlist")
             .args(args)
             .stdin(Stdio::piped())

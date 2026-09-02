@@ -11,16 +11,10 @@
 
 use std::fmt::Write as _;
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
-/// Path to the dcg binary (built in debug mode for tests).
-fn dcg_binary() -> std::path::PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // Remove test binary name
-    path.pop(); // Remove deps/
-    path.push("dcg");
-    path
-}
+#[path = "common/spawn.rs"]
+mod spawn;
 
 /// Run dcg in batch hook mode with the given JSONL input.
 fn run_dcg_batch(input: &str) -> std::process::Output {
@@ -29,25 +23,13 @@ fn run_dcg_batch(input: &str) -> std::process::Output {
 
 /// Run dcg in batch hook mode with additional CLI arguments.
 fn run_dcg_batch_with_args(input: &str, extra_args: &[&str]) -> std::process::Output {
-    let temp = tempfile::tempdir().expect("failed to create temp dir");
-    std::fs::create_dir_all(temp.path().join(".git")).expect("failed to create .git dir");
-
-    let home_dir = temp.path().join("home");
-    let xdg_config_dir = temp.path().join("xdg_config");
-    std::fs::create_dir_all(&home_dir).expect("failed to create HOME dir");
-    std::fs::create_dir_all(&xdg_config_dir).expect("failed to create XDG_CONFIG_HOME dir");
+    let (mut cmd, sandbox) = spawn::dcg();
+    std::fs::create_dir_all(sandbox.root().join(".git")).expect("failed to create .git dir");
 
     let mut args = vec!["hook", "--batch"];
     args.extend(extra_args);
 
-    let mut cmd = Command::new(dcg_binary());
-    cmd.env_clear()
-        .env("HOME", &home_dir)
-        .env("XDG_CONFIG_HOME", &xdg_config_dir)
-        .env("DCG_ALLOWLIST_SYSTEM_PATH", "")
-        .env("DCG_PACKS", "core.git,core.filesystem")
-        .current_dir(temp.path())
-        .args(&args)
+    cmd.args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

@@ -11,7 +11,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
-use tempfile::TempDir;
+
+use super::spawn;
 
 /// Result of a DCG command execution.
 #[derive(Debug, Clone)]
@@ -235,8 +236,8 @@ impl E2ETestContextBuilder {
     /// Build the E2ETestContext.
     #[must_use]
     pub fn build(self) -> E2ETestContext {
-        let temp_dir = TempDir::new().expect("Failed to create temp directory");
-        let temp_path = temp_dir.path().to_path_buf();
+        let sandbox = spawn::sandbox();
+        let temp_path = sandbox.root().to_path_buf();
 
         // Create .dcg directory
         let dcg_dir = temp_path.join(".dcg");
@@ -262,20 +263,9 @@ impl E2ETestContextBuilder {
             init_git_repo(&temp_path, branch);
         }
 
-        // Create hermetic home and config directories
-        let test_home = temp_path.join("home");
-        let test_xdg_config = temp_path.join("xdg_config");
-        std::fs::create_dir_all(&test_home).expect("Failed to create test home");
-        std::fs::create_dir_all(&test_xdg_config).expect("Failed to create test xdg config");
-
-        // Set up environment variables
+        // HOME, XDG_CONFIG_HOME and the system allowlist are the sandbox's;
+        // `spawn::dcg_in` sets them on every run.
         let mut env_vars = self.env_vars;
-        env_vars.insert("HOME".to_string(), test_home.to_string_lossy().to_string());
-        env_vars.insert(
-            "XDG_CONFIG_HOME".to_string(),
-            test_xdg_config.to_string_lossy().to_string(),
-        );
-        env_vars.insert("DCG_ALLOWLIST_SYSTEM_PATH".to_string(), String::new());
 
         if let Some(packs) = &self.packs {
             env_vars.insert("DCG_PACKS".to_string(), packs.clone());
@@ -285,23 +275,19 @@ impl E2ETestContextBuilder {
             env_vars.insert("DCG_AGENT_TYPE".to_string(), agent.clone());
         }
 
-        // Find the DCG binary
-        let binary_path = find_dcg_binary();
-
         // Create log directory
         let log_dir = temp_path.join("logs");
         std::fs::create_dir_all(&log_dir).expect("Failed to create log directory");
 
         E2ETestContext {
             test_name: self.test_name,
-            temp_dir,
+            sandbox,
             config_path: if config_path.exists() {
                 Some(config_path)
             } else {
                 None
             },
             env_vars,
-            binary_path,
             log_dir,
         }
     }
@@ -310,10 +296,9 @@ impl E2ETestContextBuilder {
 /// Isolated test environment for E2E tests.
 pub struct E2ETestContext {
     test_name: String,
-    temp_dir: TempDir,
+    sandbox: spawn::Sandbox,
     config_path: Option<PathBuf>,
     env_vars: HashMap<String, String>,
-    binary_path: PathBuf,
     log_dir: PathBuf,
 }
 
@@ -333,7 +318,7 @@ impl E2ETestContext {
     /// Get the temp directory path.
     #[must_use]
     pub fn temp_dir(&self) -> &Path {
-        self.temp_dir.path()
+        self.sandbox.root()
     }
 
     /// Get the config path if set.
@@ -372,13 +357,17 @@ impl E2ETestContext {
     pub fn run_dcg_with_stdin(&self, stdin: &str, args: &[&str]) -> DcgOutput {
         let start = Instant::now();
 
-        let mut cmd = Command::new(&self.binary_path);
+        let mut cmd = spawn::dcg_in(&self.sandbox);
         cmd.args(args)
-            .current_dir(self.temp_dir.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .env_clear();
+            .stderr(Stdio::piped());
+
+        // The builder sets DCG_PACKS only through `with_packs`; without it
+        // these tests measure dcg's own default pack selection.
+        if !self.env_vars.contains_key("DCG_PACKS") {
+            cmd.env_remove("DCG_PACKS");
+        }
 
         // Apply environment variables
         for (key, value) in &self.env_vars {
@@ -456,7 +445,7 @@ impl E2ETestContext {
 
     /// Write a file to the temp directory.
     pub fn write_file(&self, relative_path: &str, content: &str) {
-        let path = self.temp_dir.path().join(relative_path);
+        let path = self.sandbox.root().join(relative_path);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).expect("Failed to create parent directories");
         }
@@ -465,39 +454,9 @@ impl E2ETestContext {
 
     /// Create a directory in the temp directory.
     pub fn create_dir(&self, relative_path: &str) {
-        let path = self.temp_dir.path().join(relative_path);
+        let path = self.sandbox.root().join(relative_path);
         std::fs::create_dir_all(&path).expect("Failed to create directory");
     }
-}
-
-/// Find the DCG binary, preferring local build artifacts.
-fn find_dcg_binary() -> PathBuf {
-    // Cargo integration tests expose built binaries via CARGO_BIN_EXE_* env vars.
-    for env_var in [
-        "CARGO_BIN_EXE_dcg",
-        "CARGO_BIN_EXE_destructive_command_guard",
-    ] {
-        if let Some(path) = std::env::var_os(env_var)
-            .map(PathBuf::from)
-            .filter(|p| p.exists())
-        {
-            return std::fs::canonicalize(&path).unwrap_or(path);
-        }
-    }
-
-    // Check for local build artifacts first
-    let release_path = PathBuf::from("./target/release/dcg");
-    if release_path.exists() {
-        return std::fs::canonicalize(&release_path).unwrap_or(release_path);
-    }
-
-    let debug_path = PathBuf::from("./target/debug/dcg");
-    if debug_path.exists() {
-        return std::fs::canonicalize(&debug_path).unwrap_or(debug_path);
-    }
-
-    // Fall back to PATH
-    which::which("dcg").unwrap_or_else(|_| PathBuf::from("dcg"))
 }
 
 /// Initialize a git repository in the given directory.

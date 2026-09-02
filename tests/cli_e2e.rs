@@ -11,20 +11,10 @@
 //! ```
 
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 #[path = "common/spawn.rs"]
 mod spawn;
-
-/// Path to the dcg binary (built in debug mode for tests).
-fn dcg_binary() -> std::path::PathBuf {
-    // Use the debug binary for tests
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // Remove test binary name
-    path.pop(); // Remove deps/
-    path.push("dcg");
-    path
-}
 
 /// Helper to run dcg with arguments and capture output.
 fn run_dcg(args: &[&str]) -> std::process::Output {
@@ -57,13 +47,8 @@ impl HookRunOutput {
 /// This runs with a cleared environment and a temp CWD to ensure tests don't
 /// depend on user/system configs or allowlists.
 fn run_dcg_hook_with_env(command: &str, extra_env: &[(&str, &std::ffi::OsStr)]) -> HookRunOutput {
-    let temp = tempfile::tempdir().expect("failed to create temp dir");
-    std::fs::create_dir_all(temp.path().join(".git")).expect("failed to create .git dir");
-
-    let home_dir = temp.path().join("home");
-    let xdg_config_dir = temp.path().join("xdg_config");
-    std::fs::create_dir_all(&home_dir).expect("failed to create HOME dir");
-    std::fs::create_dir_all(&xdg_config_dir).expect("failed to create XDG_CONFIG_HOME dir");
+    let (mut cmd, sandbox) = spawn::dcg();
+    std::fs::create_dir_all(sandbox.root().join(".git")).expect("failed to create .git dir");
 
     let input = serde_json::json!({
         "tool_name": "Bash",
@@ -72,14 +57,7 @@ fn run_dcg_hook_with_env(command: &str, extra_env: &[(&str, &std::ffi::OsStr)]) 
         }
     });
 
-    let mut cmd = Command::new(dcg_binary());
-    cmd.env_clear()
-        .env("HOME", &home_dir)
-        .env("XDG_CONFIG_HOME", &xdg_config_dir)
-        .env("DCG_ALLOWLIST_SYSTEM_PATH", "")
-        .env("DCG_PACKS", "core.git,core.filesystem")
-        .current_dir(temp.path())
-        .stdin(Stdio::piped())
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     for (key, value) in extra_env {
@@ -206,28 +184,19 @@ mod allow_once_management_tests {
     };
 
     struct AllowOnceEnv {
-        temp: tempfile::TempDir,
-        home_dir: std::path::PathBuf,
-        xdg_config_dir: std::path::PathBuf,
+        sandbox: spawn::Sandbox,
         pending_path: std::path::PathBuf,
         allow_once_path: std::path::PathBuf,
     }
 
     impl AllowOnceEnv {
         fn new() -> Self {
-            let temp = tempfile::tempdir().expect("tempdir");
-            let home_dir = temp.path().join("home");
-            let xdg_config_dir = temp.path().join("xdg_config");
-            std::fs::create_dir_all(&home_dir).expect("HOME dir");
-            std::fs::create_dir_all(&xdg_config_dir).expect("XDG_CONFIG_HOME dir");
-
-            let pending_path = temp.path().join("pending_exceptions.jsonl");
-            let allow_once_path = temp.path().join("allow_once.jsonl");
+            let sandbox = spawn::sandbox();
+            let pending_path = sandbox.root().join("pending_exceptions.jsonl");
+            let allow_once_path = sandbox.root().join("allow_once.jsonl");
 
             Self {
-                temp,
-                home_dir,
-                xdg_config_dir,
+                sandbox,
                 pending_path,
                 allow_once_path,
             }
@@ -244,14 +213,10 @@ mod allow_once_management_tests {
         }
 
         fn run(&self, args: &[&str]) -> std::process::Output {
-            Command::new(dcg_binary())
-                .env_clear()
-                .env("HOME", &self.home_dir)
-                .env("XDG_CONFIG_HOME", &self.xdg_config_dir)
-                .env("DCG_ALLOWLIST_SYSTEM_PATH", "")
+            spawn::dcg_in(&self.sandbox)
+                .env_remove("DCG_PACKS")
                 .env("DCG_PENDING_EXCEPTIONS_PATH", &self.pending_path)
                 .env("DCG_ALLOW_ONCE_PATH", &self.allow_once_path)
-                .current_dir(self.temp.path())
                 .args(args)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -284,7 +249,7 @@ mod allow_once_management_tests {
         let command_raw = r#"echo "0123456789""#;
         let pending = PendingExceptionRecord::new(
             now,
-            env.temp.path().to_string_lossy().as_ref(),
+            env.sandbox.root().to_string_lossy().as_ref(),
             command_raw,
             "test pending",
             &redaction,
@@ -295,7 +260,7 @@ mod allow_once_management_tests {
             &pending,
             now,
             AllowOnceScopeKind::Cwd,
-            env.temp.path().to_string_lossy().as_ref(),
+            env.sandbox.root().to_string_lossy().as_ref(),
             false,
             false,
             &redaction,
@@ -334,7 +299,7 @@ mod allow_once_management_tests {
         let command_raw = r#"echo "abcdefghijklmnopqrstuvwxyz""#;
         let pending = PendingExceptionRecord::new(
             now,
-            env.temp.path().to_string_lossy().as_ref(),
+            env.sandbox.root().to_string_lossy().as_ref(),
             command_raw,
             "test revoke",
             &redaction,
@@ -345,7 +310,7 @@ mod allow_once_management_tests {
             &pending,
             now,
             AllowOnceScopeKind::Cwd,
-            env.temp.path().to_string_lossy().as_ref(),
+            env.sandbox.root().to_string_lossy().as_ref(),
             false,
             false,
             &redaction,
@@ -381,7 +346,7 @@ mod allow_once_management_tests {
         let command_raw = r#"echo "abcdefghijklmnopqrstuvwxyz""#;
         let pending = PendingExceptionRecord::new(
             now,
-            env.temp.path().to_string_lossy().as_ref(),
+            env.sandbox.root().to_string_lossy().as_ref(),
             command_raw,
             "test clear",
             &redaction,
@@ -392,7 +357,7 @@ mod allow_once_management_tests {
             &pending,
             now,
             AllowOnceScopeKind::Cwd,
-            env.temp.path().to_string_lossy().as_ref(),
+            env.sandbox.root().to_string_lossy().as_ref(),
             false,
             false,
             &redaction,
@@ -428,30 +393,22 @@ mod allow_once_flow_tests {
 
     /// Dedicated test environment with control over all file paths.
     struct FlowTestEnv {
-        temp: tempfile::TempDir,
-        home_dir: std::path::PathBuf,
-        xdg_config_dir: std::path::PathBuf,
+        sandbox: spawn::Sandbox,
         pending_path: std::path::PathBuf,
         allow_once_path: std::path::PathBuf,
     }
 
     impl FlowTestEnv {
         fn new() -> Self {
-            let temp = tempfile::tempdir().expect("tempdir");
-            let home_dir = temp.path().join("home");
-            let xdg_config_dir = temp.path().join("xdg_config");
-            std::fs::create_dir_all(&home_dir).expect("HOME dir");
-            std::fs::create_dir_all(&xdg_config_dir).expect("XDG_CONFIG_HOME dir");
+            let sandbox = spawn::sandbox();
             // Create a .git directory so it's recognized as a repo
-            std::fs::create_dir_all(temp.path().join(".git")).expect(".git dir");
+            std::fs::create_dir_all(sandbox.root().join(".git")).expect(".git dir");
 
-            let pending_path = temp.path().join("pending_exceptions.jsonl");
-            let allow_once_path = temp.path().join("allow_once.jsonl");
+            let pending_path = sandbox.root().join("pending_exceptions.jsonl");
+            let allow_once_path = sandbox.root().join("allow_once.jsonl");
 
             Self {
-                temp,
-                home_dir,
-                xdg_config_dir,
+                sandbox,
                 pending_path,
                 allow_once_path,
             }
@@ -466,15 +423,9 @@ mod allow_once_flow_tests {
                 }
             });
 
-            let mut cmd = Command::new(dcg_binary());
-            cmd.env_clear()
-                .env("HOME", &self.home_dir)
-                .env("XDG_CONFIG_HOME", &self.xdg_config_dir)
-                .env("DCG_ALLOWLIST_SYSTEM_PATH", "")
-                .env("DCG_PACKS", "core.git,core.filesystem")
-                .env("DCG_PENDING_EXCEPTIONS_PATH", &self.pending_path)
+            let mut cmd = spawn::dcg_in(&self.sandbox);
+            cmd.env("DCG_PENDING_EXCEPTIONS_PATH", &self.pending_path)
                 .env("DCG_ALLOW_ONCE_PATH", &self.allow_once_path)
-                .current_dir(self.temp.path())
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
@@ -496,14 +447,10 @@ mod allow_once_flow_tests {
 
         /// Run dcg CLI commands (not hook mode).
         fn run_cli(&self, args: &[&str]) -> std::process::Output {
-            Command::new(dcg_binary())
-                .env_clear()
-                .env("HOME", &self.home_dir)
-                .env("XDG_CONFIG_HOME", &self.xdg_config_dir)
-                .env("DCG_ALLOWLIST_SYSTEM_PATH", "")
+            spawn::dcg_in(&self.sandbox)
+                .env_remove("DCG_PACKS")
                 .env("DCG_PENDING_EXCEPTIONS_PATH", &self.pending_path)
                 .env("DCG_ALLOW_ONCE_PATH", &self.allow_once_path)
-                .current_dir(self.temp.path())
                 .args(args)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -520,13 +467,8 @@ mod allow_once_flow_tests {
                 }
             });
 
-            let mut cmd = Command::new(dcg_binary());
-            cmd.env_clear()
-                .env("HOME", &self.home_dir)
-                .env("XDG_CONFIG_HOME", &self.xdg_config_dir)
-                .env("DCG_ALLOWLIST_SYSTEM_PATH", "")
-                .env("DCG_PACKS", "core.git,core.filesystem")
-                .env("DCG_PENDING_EXCEPTIONS_PATH", &self.pending_path)
+            let mut cmd = spawn::dcg_in(&self.sandbox);
+            cmd.env("DCG_PENDING_EXCEPTIONS_PATH", &self.pending_path)
                 .env("DCG_ALLOW_ONCE_PATH", &self.allow_once_path)
                 .current_dir(cwd)
                 .stdin(Stdio::piped())
@@ -756,7 +698,7 @@ mod allow_once_flow_tests {
         let command = "git reset --hard";
 
         // Create a config that explicitly blocks git reset --hard
-        let config_path = env.temp.path().join("dcg.toml");
+        let config_path = env.sandbox.root().join("dcg.toml");
         std::fs::write(
             &config_path,
             r"
@@ -776,16 +718,10 @@ block = [
             }
         });
 
-        let mut cmd = Command::new(dcg_binary());
-        cmd.env_clear()
-            .env("HOME", &env.home_dir)
-            .env("XDG_CONFIG_HOME", &env.xdg_config_dir)
-            .env("DCG_ALLOWLIST_SYSTEM_PATH", "")
-            .env("DCG_PACKS", "core.git,core.filesystem")
-            .env("DCG_PENDING_EXCEPTIONS_PATH", &env.pending_path)
+        let mut cmd = spawn::dcg_in(&env.sandbox);
+        cmd.env("DCG_PENDING_EXCEPTIONS_PATH", &env.pending_path)
             .env("DCG_ALLOW_ONCE_PATH", &env.allow_once_path)
             .env("DCG_CONFIG", &config_path)
-            .current_dir(env.temp.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -801,15 +737,11 @@ block = [
         let code = extract_code_from_denial(&stdout).expect("should emit code for config block");
 
         // Step 2: Try to allow without --force - should fail
-        let allow_no_force = Command::new(dcg_binary())
-            .env_clear()
-            .env("HOME", &env.home_dir)
-            .env("XDG_CONFIG_HOME", &env.xdg_config_dir)
-            .env("DCG_ALLOWLIST_SYSTEM_PATH", "")
+        let allow_no_force = spawn::dcg_in(&env.sandbox)
+            .env_remove("DCG_PACKS")
             .env("DCG_PENDING_EXCEPTIONS_PATH", &env.pending_path)
             .env("DCG_ALLOW_ONCE_PATH", &env.allow_once_path)
             .env("DCG_CONFIG", &config_path)
-            .current_dir(env.temp.path())
             .args(["allow-once", &code, "--yes"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1196,22 +1128,17 @@ mod test_command_tests {
 mod config_tests {
     use super::*;
 
-    fn setup_doctor_env(
-        temp: &tempfile::TempDir,
-    ) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
-        let home_dir = temp.path().join("home");
-        let xdg_config_dir = temp.path().join("xdg_config");
-        let bin_dir = temp.path().join("bin");
-
-        std::fs::create_dir_all(&home_dir).expect("HOME dir");
-        std::fs::create_dir_all(&xdg_config_dir).expect("XDG_CONFIG_HOME dir");
+    /// A `bin/` in the sandbox holding an empty `dcg` stub for doctor's PATH
+    /// check, plus a `.git` so the sandbox reads as a project.
+    fn setup_doctor_env(sandbox: &spawn::Sandbox) -> std::path::PathBuf {
+        let bin_dir = sandbox.root().join("bin");
         std::fs::create_dir_all(&bin_dir).expect("bin dir");
-        std::fs::create_dir_all(temp.path().join(".git")).expect(".git dir");
+        std::fs::create_dir_all(sandbox.root().join(".git")).expect(".git dir");
 
         let dcg_stub = bin_dir.join("dcg");
         std::fs::write(&dcg_stub, b"").expect("write dcg stub");
 
-        (home_dir, xdg_config_dir, bin_dir)
+        bin_dir
     }
 
     #[test]
@@ -1228,21 +1155,13 @@ mod config_tests {
 
     #[test]
     fn config_honors_dcg_config_override() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let home_dir = temp.path().join("home");
-        let xdg_config_dir = temp.path().join("xdg_config");
-        std::fs::create_dir_all(&home_dir).expect("HOME dir");
-        std::fs::create_dir_all(&xdg_config_dir).expect("XDG_CONFIG_HOME dir");
-
-        let cfg_path = temp.path().join("explicit_config.toml");
+        let (mut cmd, sandbox) = spawn::dcg();
+        let cfg_path = sandbox.root().join("explicit_config.toml");
         std::fs::write(&cfg_path, "[general]\nverbose = true\n").expect("write config");
 
-        let output = Command::new(dcg_binary())
-            .env_clear()
-            .env("HOME", &home_dir)
-            .env("XDG_CONFIG_HOME", &xdg_config_dir)
+        let output = cmd
+            .env_remove("DCG_PACKS")
             .env("DCG_CONFIG", &cfg_path)
-            .current_dir(temp.path())
             .arg("config")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1263,20 +1182,12 @@ mod config_tests {
 
     #[test]
     fn doctor_reports_missing_dcg_config_override() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let home_dir = temp.path().join("home");
-        let xdg_config_dir = temp.path().join("xdg_config");
-        std::fs::create_dir_all(&home_dir).expect("HOME dir");
-        std::fs::create_dir_all(&xdg_config_dir).expect("XDG_CONFIG_HOME dir");
+        let (mut cmd, sandbox) = spawn::dcg();
+        let missing = sandbox.root().join("missing_config.toml");
 
-        let missing = temp.path().join("missing_config.toml");
-
-        let output = Command::new(dcg_binary())
-            .env_clear()
-            .env("HOME", &home_dir)
-            .env("XDG_CONFIG_HOME", &xdg_config_dir)
+        let output = cmd
+            .env_remove("DCG_PACKS")
             .env("DCG_CONFIG", &missing)
-            .current_dir(temp.path())
             .arg("doctor")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1297,17 +1208,13 @@ mod config_tests {
 
     #[test]
     fn doctor_pretty_output_basics() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (home_dir, xdg_config_dir, bin_dir) = setup_doctor_env(&temp);
+        let (mut cmd, sandbox) = spawn::dcg();
+        let bin_dir = setup_doctor_env(&sandbox);
 
-        let output = Command::new(dcg_binary())
-            .env_clear()
-            .env("HOME", &home_dir)
-            .env("XDG_CONFIG_HOME", &xdg_config_dir)
+        let output = cmd
+            .env_remove("DCG_PACKS")
             .env("PATH", &bin_dir)
             .env("NO_COLOR", "1")
-            .env("DCG_ALLOWLIST_SYSTEM_PATH", "")
-            .current_dir(temp.path())
             .arg("doctor")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1336,22 +1243,18 @@ mod config_tests {
 
     #[test]
     fn doctor_fix_installs_hook_and_config() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (home_dir, xdg_config_dir, bin_dir) = setup_doctor_env(&temp);
+        let (mut cmd, sandbox) = spawn::dcg();
+        let bin_dir = setup_doctor_env(&sandbox);
 
-        let claude_dir = home_dir.join(".claude");
+        let claude_dir = sandbox.home.join(".claude");
         std::fs::create_dir_all(&claude_dir).expect("claude dir");
         let settings_path = claude_dir.join("settings.json");
         std::fs::write(&settings_path, "{}").expect("write settings");
 
-        let output = Command::new(dcg_binary())
-            .env_clear()
-            .env("HOME", &home_dir)
-            .env("XDG_CONFIG_HOME", &xdg_config_dir)
+        let output = cmd
+            .env_remove("DCG_PACKS")
             .env("PATH", &bin_dir)
             .env("NO_COLOR", "1")
-            .env("DCG_ALLOWLIST_SYSTEM_PATH", "")
-            .current_dir(temp.path())
             .args(["doctor", "--fix"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1383,7 +1286,7 @@ mod config_tests {
         });
         assert!(has_dcg, "expected dcg hook to be installed");
 
-        let config_path = xdg_config_dir.join("dcg").join("config.toml");
+        let config_path = sandbox.dcg_config_dir().join("config.toml");
         let config_contents = std::fs::read_to_string(&config_path).expect("read config.toml");
         assert!(
             !config_contents.trim().is_empty(),
@@ -1393,16 +1296,12 @@ mod config_tests {
 
     #[test]
     fn doctor_json_output_is_valid() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (home_dir, xdg_config_dir, bin_dir) = setup_doctor_env(&temp);
+        let (mut cmd, sandbox) = spawn::dcg();
+        let bin_dir = setup_doctor_env(&sandbox);
 
-        let output = Command::new(dcg_binary())
-            .env_clear()
-            .env("HOME", &home_dir)
-            .env("XDG_CONFIG_HOME", &xdg_config_dir)
+        let output = cmd
+            .env_remove("DCG_PACKS")
             .env("PATH", &bin_dir)
-            .env("DCG_ALLOWLIST_SYSTEM_PATH", "")
-            .current_dir(temp.path())
             .args(["doctor", "--format", "json"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1537,11 +1436,6 @@ mod hook_mode_tests {
     ) -> HookRunOutput {
         std::fs::create_dir_all(cwd.join(".git")).expect("failed to create .git dir");
 
-        let home_dir = cwd.join("home");
-        let xdg_config_dir = cwd.join("xdg_config");
-        std::fs::create_dir_all(&home_dir).expect("failed to create HOME dir");
-        std::fs::create_dir_all(&xdg_config_dir).expect("failed to create XDG_CONFIG_HOME dir");
-
         let input = serde_json::json!({
             "tool_name": "Bash",
             "tool_input": {
@@ -1549,13 +1443,8 @@ mod hook_mode_tests {
             }
         });
 
-        let mut cmd = Command::new(dcg_binary());
-        cmd.env_clear()
-            .env("HOME", &home_dir)
-            .env("XDG_CONFIG_HOME", &xdg_config_dir)
-            .env("DCG_ALLOWLIST_SYSTEM_PATH", "")
-            .env("DCG_PACKS", "core.git,core.filesystem")
-            .current_dir(cwd)
+        let (mut cmd, _sandbox) = spawn::dcg();
+        cmd.current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -3382,17 +3271,13 @@ mod custom_pack_loading_tests {
     fn setup_custom_pack_env(
         pack_content: &str,
         command: &str,
-    ) -> (tempfile::TempDir, std::process::Output) {
-        let temp = tempfile::tempdir().expect("failed to create temp dir");
+    ) -> (spawn::Sandbox, std::process::Output) {
+        let (mut cmd, sandbox) = spawn::dcg();
 
         // Create .git dir to make it a valid project root
-        std::fs::create_dir_all(temp.path().join(".git")).expect("failed to create .git dir");
+        std::fs::create_dir_all(sandbox.root().join(".git")).expect("failed to create .git dir");
 
-        // Create home and xdg dirs
-        let home_dir = temp.path().join("home");
-        let xdg_config_dir = temp.path().join("xdg_config");
-        let packs_dir = xdg_config_dir.join("dcg").join("packs");
-        std::fs::create_dir_all(&home_dir).expect("failed to create HOME dir");
+        let packs_dir = sandbox.dcg_config_dir().join("packs");
         std::fs::create_dir_all(&packs_dir).expect("failed to create packs dir");
 
         // Write custom pack
@@ -3403,8 +3288,7 @@ mod custom_pack_loading_tests {
             .expect("failed to write pack");
 
         // Write config that loads the custom pack
-        let config_dir = xdg_config_dir.join("dcg");
-        let config_path = config_dir.join("config.toml");
+        let config_path = sandbox.dcg_config_dir().join("config.toml");
         let config_content = format!(
             r#"
 [packs]
@@ -3427,12 +3311,8 @@ custom_paths = ["{}"]
             }
         });
 
-        let mut cmd = Command::new(dcg_binary());
-        cmd.env_clear()
-            .env("HOME", &home_dir)
-            .env("XDG_CONFIG_HOME", &xdg_config_dir)
-            .env("DCG_ALLOWLIST_SYSTEM_PATH", "")
-            .current_dir(temp.path())
+        // The config's `[packs]` table selects the packs here, so the env must not.
+        cmd.env_remove("DCG_PACKS")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -3446,7 +3326,7 @@ custom_paths = ["{}"]
 
         let output = child.wait_with_output().expect("failed to wait for dcg");
 
-        (temp, output)
+        (sandbox, output)
     }
 
     #[test]
@@ -4307,30 +4187,19 @@ mod claude_protocol_tests {
     /// which on the wire is indistinguishable from an allow.
     #[test]
     fn real_claude_payload_gets_hook_specific_output() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let home_dir = temp.path().join("home");
-        let xdg_config_dir = temp.path().join("xdg_config");
-        std::fs::create_dir_all(&home_dir).expect("HOME dir");
-        std::fs::create_dir_all(&xdg_config_dir).expect("XDG dir");
+        let (mut cmd, sandbox) = spawn::dcg();
 
         // The full envelope a real PreToolUse hook receives.
         let input = serde_json::json!({
             "session_id": "9a02fa0e-5133-42",
             "transcript_path": "/dev/null",
-            "cwd": temp.path().to_string_lossy(),
+            "cwd": sandbox.root().to_string_lossy(),
             "hook_event_name": "PreToolUse",
             "tool_name": "Bash",
             "tool_input": { "command": "git reset --hard" }
         });
 
-        let mut cmd = Command::new(dcg_binary());
-        cmd.env_clear()
-            .env("HOME", &home_dir)
-            .env("XDG_CONFIG_HOME", &xdg_config_dir)
-            .env("DCG_ALLOWLIST_SYSTEM_PATH", "")
-            .env("DCG_PACKS", "core.git,core.filesystem")
-            .current_dir(temp.path())
-            .stdin(Stdio::piped())
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let mut child = cmd.spawn().expect("spawn dcg");

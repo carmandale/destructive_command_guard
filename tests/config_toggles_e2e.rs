@@ -19,45 +19,31 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
-/// Path to the dcg binary (built in debug mode for tests).
-fn dcg_binary() -> PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // Remove test binary name
-    path.pop(); // Remove deps/
-    path.push("dcg");
-    path
-}
+#[path = "common/spawn.rs"]
+mod spawn;
 
 /// Test environment with isolated config.
 struct TestEnv {
-    temp_dir: tempfile::TempDir,
-    home_dir: PathBuf,
-    xdg_config_dir: PathBuf,
+    sandbox: spawn::Sandbox,
     config_path: PathBuf,
 }
 
 impl TestEnv {
     /// Create a new empty test environment.
     fn new() -> Self {
-        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
-        let home_dir = temp_dir.path().join("home");
-        let xdg_config_dir = temp_dir.path().join("xdg_config");
-        let dcg_dir = xdg_config_dir.join("dcg");
-
-        fs::create_dir_all(&home_dir).expect("failed to create HOME dir");
+        let sandbox = spawn::sandbox();
+        let dcg_dir = sandbox.dcg_config_dir();
         fs::create_dir_all(&dcg_dir).expect("failed to create XDG_CONFIG_HOME/dcg dir");
 
         // Create a git repo in the temp dir so project detection works
-        fs::create_dir_all(temp_dir.path().join(".git")).expect("failed to create .git dir");
+        fs::create_dir_all(sandbox.root().join(".git")).expect("failed to create .git dir");
 
         let config_path = dcg_dir.join("config.toml");
 
         Self {
-            temp_dir,
-            home_dir,
-            xdg_config_dir,
+            sandbox,
             config_path,
         }
     }
@@ -90,14 +76,8 @@ impl TestEnv {
             }
         });
 
-        let mut cmd = Command::new(dcg_binary());
-        cmd.env_clear()
-            .env("HOME", &self.home_dir)
-            .env("XDG_CONFIG_HOME", &self.xdg_config_dir)
-            .env("DCG_CONFIG", &self.config_path)
-            .env("DCG_PACKS", "core.git,core.filesystem")
-            .env("DCG_ALLOWLIST_SYSTEM_PATH", "")
-            .current_dir(self.temp_dir.path())
+        let mut cmd = spawn::dcg_in(&self.sandbox);
+        cmd.env("DCG_CONFIG", &self.config_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -120,14 +100,8 @@ impl TestEnv {
 
     /// Run dcg test command (non-hook mode).
     fn run_test_command(&self, command: &str) -> HookOutput {
-        let mut cmd = Command::new(dcg_binary());
-        cmd.env_clear()
-            .env("HOME", &self.home_dir)
-            .env("XDG_CONFIG_HOME", &self.xdg_config_dir)
-            .env("DCG_CONFIG", &self.config_path)
-            .env("DCG_PACKS", "core.git,core.filesystem")
-            .env("DCG_ALLOWLIST_SYSTEM_PATH", "")
-            .current_dir(self.temp_dir.path())
+        let mut cmd = spawn::dcg_in(&self.sandbox);
+        cmd.env("DCG_CONFIG", &self.config_path)
             .args(["test", command])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -463,13 +437,8 @@ fn test_config_toggle_defaults_without_config() {
     eprintln!("=== Testing default behavior without config file ===");
 
     // Create env without writing config file
-    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
-    let home_dir = temp_dir.path().join("home");
-    let xdg_config_dir = temp_dir.path().join("xdg_config");
-
-    fs::create_dir_all(&home_dir).expect("failed to create HOME dir");
-    fs::create_dir_all(&xdg_config_dir).expect("failed to create XDG_CONFIG_HOME dir");
-    fs::create_dir_all(temp_dir.path().join(".git")).expect("failed to create .git dir");
+    let (mut cmd, sandbox) = spawn::dcg_with_packs("core.git");
+    fs::create_dir_all(sandbox.root().join(".git")).expect("failed to create .git dir");
 
     let input = serde_json::json!({
         "tool_name": "Bash",
@@ -478,14 +447,7 @@ fn test_config_toggle_defaults_without_config() {
         }
     });
 
-    let mut cmd = Command::new(dcg_binary());
-    cmd.env_clear()
-        .env("HOME", &home_dir)
-        .env("XDG_CONFIG_HOME", &xdg_config_dir)
-        .env("DCG_PACKS", "core.git")
-        .env("DCG_ALLOWLIST_SYSTEM_PATH", "")
-        .current_dir(temp_dir.path())
-        .stdin(Stdio::piped())
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
