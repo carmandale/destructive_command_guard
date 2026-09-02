@@ -140,6 +140,33 @@ fn a_variable_captured_then_evaluated_is_code() {
 }
 
 #[test]
+fn an_expansion_with_a_modifier_still_names_the_capture() {
+    // Substring matching on `$V` missed every modified expansion. `${V:-}` was
+    // the one row that survived the cold review's re-measurement of the round-2
+    // fix, dispositioned there as an accepted cost; it is not a cost any more.
+    for tail in [
+        "eval \"${V:-}\"",
+        "eval \"${V^^}\"",
+        "eval \"${V// /}\"",
+        "eval \"${V#x}\"",
+    ] {
+        let cmd = format!("V=$({}); {tail}", sink("cat"));
+        assert_body_visible(&cmd, "a modifier does not make it a different variable");
+        assert_denied(&cmd, "a modifier does not make it a different variable");
+    }
+}
+
+#[test]
+fn a_longer_variable_name_is_a_different_variable() {
+    // The other direction of the same defect: `$VERBOSE` contains `$V` as a
+    // substring and is not this capture.
+    for tail in ["eval \"$VERBOSE\"", "eval \"${V2}\"", "eval \"$V_X\""] {
+        let cmd = format!("V=$({}); {tail}", sink("cat"));
+        assert_body_masked(&cmd, "a longer name is not this capture");
+    }
+}
+
+#[test]
 fn an_env_assignment_does_not_hide_the_executing_word() {
     let cmd = format!("LC_ALL=C eval \"$({})\"", sink("cat"));
     assert_body_visible(&cmd, "NAME=value is not the command word");

@@ -2302,8 +2302,34 @@ pub fn heredoc_substitution_result_is_executed(command: &str, heredoc_start: usi
 /// `. "$V"` is not covered here: a bare `.` is too common a token in a
 /// remainder full of file names to test for this way. It is covered in the
 /// direct spelling, `. <(cat <<'EOF' ...)`.
+/// Is `name` referenced as a variable anywhere in `rest`?
+///
+/// Substring matching on `$NAME` was wrong in both directions. It missed every
+/// expansion with a modifier -- `${V:-}`, `${V^^}`, `${V// /}` -- which the cold
+/// review found as a surviving row, and it also matched `$VERBOSE` for a
+/// variable named `V`, which is a different variable and a false positive.
+///
+/// So: find a `$`, step over an optional `{`, and require the name to be
+/// followed by something that cannot continue an identifier.
+fn mentions_variable(rest: &str, name: &str) -> bool {
+    let b = rest.as_bytes();
+    let mut i = 0usize;
+    while let Some(pos) = rest[i..].find('$') {
+        let at = i + pos + 1;
+        let start = if b.get(at) == Some(&b'{') { at + 1 } else { at };
+        if rest[start..].starts_with(name) {
+            let after = b.get(start + name.len()).copied();
+            if !matches!(after, Some(c) if c.is_ascii_alphanumeric() || c == b'_') {
+                return true;
+            }
+        }
+        i = at;
+    }
+    false
+}
+
 fn captured_variable_is_executed(rest: &str, name: &str) -> bool {
-    if !rest.contains(&format!("${name}")) && !rest.contains(&format!("${{{name}}}")) {
+    if !mentions_variable(rest, name) {
         return false;
     }
     let words: Vec<&str> = rest
