@@ -1723,8 +1723,17 @@ pub fn mask_non_executing_heredocs(command: &str) -> std::borrow::Cow<'_, str> {
 
                 if should_mask_herestring {
                     // Mask here-string content for non-executing targets
-                    if let Some((content_start, content_end)) =
+                    // GATE - spec 333 / .agent-config-u06z, sibling of the
+                    // heredoc gate below. Mask here-string content ONLY when it
+                    // is single-quoted. `<<< "$(...)"` and bare `<<< $(...)`
+                    // are both expanded by the outer shell before the data sink
+                    // receives them, so their bytes must stay visible to the
+                    // matcher. Candidate B's receiver fix is what makes this
+                    // path reachable, so without this gate the fix silently
+                    // converts a real deny into an allow (arm U4).
+                    if let Some((content_start, content_end, _single_quoted)) =
                         find_herestring_content_bounds(command, heredoc_start + 3)
+                            .filter(|bounds| bounds.2)
                     {
                         // Copy up to the content start (includes <<<)
                         if result.is_empty() {
@@ -1758,8 +1767,19 @@ pub fn mask_non_executing_heredocs(command: &str) -> std::borrow::Cow<'_, str> {
             if should_mask {
                 // Parse the heredoc delimiter
                 let after_op = &command[heredoc_start + 2..];
-                if let Some((delimiter, body_start_offset, heredoc_type)) =
-                    parse_heredoc_delimiter(after_op)
+                // GATE - spec 333 / .agent-config-u06z. Mask the body ONLY
+                // when the delimiter is quoted (`<<'EOF'`, `<<"EOF"`). A quoted
+                // delimiter suppresses expansion, so the body reaches the data
+                // sink as literal bytes and cannot execute. An UNQUOTED
+                // delimiter lets the outer shell expand the body *before* the
+                // sink receives it, so a command substitution in the body
+                // really runs; leaving those bodies visible to the matcher is
+                // the whole point of the gate. Gating on the delimiter covers
+                // every substitution spelling by construction -- dollar-paren
+                // and backtick alike. Upstream v0.13.9 enumerated spellings
+                // instead and missed backticks.
+                if let Some((delimiter, body_start_offset, heredoc_type, _quoted)) =
+                    parse_heredoc_delimiter(after_op).filter(|parsed| parsed.3)
                 {
                     // Find the heredoc body end (terminating delimiter)
                     let body_start = heredoc_start + 2 + body_start_offset;
@@ -1825,8 +1845,13 @@ fn mask_preserve_newlines(input: &str) -> String {
 }
 
 /// Parse a heredoc delimiter after the << operator.
-/// Returns (delimiter, `body_start_offset`, `heredoc_type`) if successful.
-fn parse_heredoc_delimiter(after_op: &str) -> Option<(String, usize, HeredocType)> {
+///
+/// The fourth tuple element reports whether the delimiter was QUOTED
+/// (`<<'EOF'` or `<<"EOF"`). Bash suppresses every expansion inside a
+/// quoted-delimiter body; an unquoted delimiter is expanded by the outer
+/// shell before the receiving command ever sees the bytes. v0.3.0 parsed
+/// this fact and then threw it away. Spec 333 / .agent-config-u06z.
+fn parse_heredoc_delimiter(after_op: &str) -> Option<(String, usize, HeredocType, bool)> {
     let trimmed = after_op.trim_start_matches([' ', '\t']);
     let skip_whitespace = after_op.len() - trimmed.len();
 
@@ -1843,11 +1868,11 @@ fn parse_heredoc_delimiter(after_op: &str) -> Option<(String, usize, HeredocType
     let delim_chars = &trimmed[delim_start..];
 
     // Handle quoted delimiters
-    let (delimiter, delim_len) = if let Some(stripped) = delim_chars.strip_prefix('"') {
+    let (delimiter, delim_len, quoted) = if let Some(stripped) = delim_chars.strip_prefix('"') {
         // Find closing quote
         if let Some(end) = stripped.find('"') {
             let (body, _) = stripped.split_at(end);
-            (body.to_string(), end + 2)
+            (body.to_string(), end + 2, true)
         } else {
             return None;
         }
@@ -1855,19 +1880,19 @@ fn parse_heredoc_delimiter(after_op: &str) -> Option<(String, usize, HeredocType
         // Find closing quote
         if let Some(end) = stripped.find('\'') {
             let (body, _) = stripped.split_at(end);
-            (body.to_string(), end + 2)
+            (body.to_string(), end + 2, true)
         } else {
             return None;
         }
     } else {
-        // Unquoted - extract word
+        // Unquoted - extract word. The outer shell EXPANDS this body.
         let end = delim_chars
             .find(|c: char| c.is_whitespace() || c == '\n' || c == ';' || c == '&' || c == '|')
             .unwrap_or(delim_chars.len());
         if end == 0 {
             return None;
         }
-        (delim_chars[..end].to_string(), end)
+        (delim_chars[..end].to_string(), end, false)
     };
 
     // Calculate total offset to body start (skip to newline)
@@ -1877,7 +1902,12 @@ fn parse_heredoc_delimiter(after_op: &str) -> Option<(String, usize, HeredocType
     // Find the newline that starts the body
     let newline_offset = remaining.find('\n').map_or(remaining.len(), |i| i + 1);
 
-    Some((delimiter, total_delim_offset + newline_offset, heredoc_type))
+    Some((
+        delimiter,
+        total_delim_offset + newline_offset,
+        heredoc_type,
+        quoted,
+    ))
 }
 
 /// Find the end of a heredoc body (position after the terminating delimiter line).
@@ -1917,7 +1947,16 @@ fn find_heredoc_terminator(
 /// Find the bounds of a here-string's content (start and end byte positions).
 /// Returns `(content_start, content_end)` where `content_start` is after any opening quote
 /// and `content_end` is before any closing quote or at whitespace/end for unquoted.
-fn find_herestring_content_bounds(command: &str, after_operator: usize) -> Option<(usize, usize)> {
+/// Find the bounds of a here-string's content.
+///
+/// The third tuple element is true only when the content is SINGLE-quoted.
+/// Unlike a heredoc delimiter, a double-quoted here-string is still
+/// expanded by the shell, so `"` cannot be treated as safe here.
+/// Spec 333 / .agent-config-u06z.
+fn find_herestring_content_bounds(
+    command: &str,
+    after_operator: usize,
+) -> Option<(usize, usize, bool)> {
     if after_operator >= command.len() {
         return None;
     }
@@ -1950,10 +1989,12 @@ fn find_herestring_content_bounds(command: &str, after_operator: usize) -> Optio
             }
         }
         if i < bytes.len() && bytes[i] == quote {
-            // Include the quotes in the masked region
+            // Include the quotes in the masked region. Only single quotes
+            // suppress expansion; double quotes still expand.
             return Some((
                 after_operator + quote_start,
                 after_operator + i + 1, // after closing quote
+                quote == b'\'',
             ));
         }
         // No closing quote found - treat as unquoted
@@ -1970,7 +2011,8 @@ fn find_herestring_content_bounds(command: &str, after_operator: usize) -> Optio
     }
 
     if i > word_start {
-        Some((after_operator + word_start, after_operator + i))
+        // Unquoted here-string content is expanded by the outer shell.
+        Some((after_operator + word_start, after_operator + i, false))
     } else {
         None
     }
