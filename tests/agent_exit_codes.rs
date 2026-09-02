@@ -22,8 +22,26 @@ fn dcg_binary() -> std::path::PathBuf {
 }
 
 /// Run dcg in hook mode with JSON input.
+///
+/// The environment is cleared, as in `cli_e2e.rs`. Without that these tests
+/// read the developer's real `~/.config/dcg/config.toml`, so their verdicts
+/// depend on local policy rather than on dcg: `test_exit_0_on_deny_with_json`
+/// failed on a machine whose config sets `"core.git:reset-hard" = "warn"`,
+/// which is a deliberate local downgrade and not a dcg regression at all.
 fn run_hook_mode_raw(input: &str) -> (String, String, i32) {
+    let temp = tempfile::tempdir().expect("failed to create temp dir");
+    let home_dir = temp.path().join("home");
+    let xdg_config_dir = temp.path().join("xdg_config");
+    std::fs::create_dir_all(&home_dir).expect("failed to create HOME dir");
+    std::fs::create_dir_all(&xdg_config_dir).expect("failed to create XDG_CONFIG_HOME dir");
+
     let mut child = Command::new(dcg_binary())
+        .env_clear()
+        .env("HOME", &home_dir)
+        .env("XDG_CONFIG_HOME", &xdg_config_dir)
+        .env("DCG_ALLOWLIST_SYSTEM_PATH", "")
+        .env("DCG_PACKS", "core.git,core.filesystem")
+        .current_dir(temp.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

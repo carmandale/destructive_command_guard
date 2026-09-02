@@ -4010,3 +4010,278 @@ mod stats_rules_tests {
         }
     }
 }
+
+// ============================================================================
+// Budget overrun must fail CLOSED
+// ============================================================================
+
+mod fail_closed_tests {
+    use super::*;
+
+    fn write_config(dir: &std::path::Path, timeout_ms: u64) -> std::path::PathBuf {
+        let path = dir.join("dcg-config.toml");
+        std::fs::write(
+            &path,
+            format!("[general]\nhook_timeout_ms = {timeout_ms}\n"),
+        )
+        .expect("write config");
+        path
+    }
+
+    /// A command dcg could not finish judging must be denied, not allowed.
+    ///
+    /// Both budget checks used to `return` silently, and silence at exit 0 is
+    /// how the hook protocol spells "allow". Evaluation latency scales with
+    /// command length, so a long enough command bought an unconditional pass:
+    /// measured 2026-09-02 over 1185 known-destructive commands, the single row
+    /// whose evaluation exceeded the 200ms default budget was the single row
+    /// that came back allowed.
+    #[test]
+    fn budget_overrun_denies_instead_of_allowing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = write_config(temp.path(), 0);
+
+        let run = run_dcg_hook_with_env("echo hello", &[("DCG_CONFIG", config.as_os_str())]);
+        let stdout = run.stdout_str();
+
+        assert!(
+            !stdout.trim().is_empty(),
+            "budget overrun produced no output, which the hook protocol reads as ALLOW \
+             (command={}, stderr={})",
+            run.command,
+            run.stderr_str()
+        );
+
+        let json: serde_json::Value =
+            serde_json::from_str(stdout.trim()).expect("denial must be valid JSON");
+        assert_eq!(
+            json["hookSpecificOutput"]["permissionDecision"]
+                .as_str()
+                .unwrap_or_default(),
+            "deny"
+        );
+        let reason = json["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            reason.contains("could not finish evaluating"),
+            "denial reason did not name the budget: {reason}"
+        );
+    }
+
+    /// Control for the test above: prove the deny came from the budget.
+    ///
+    /// Without this, a dcg that denied every command would pass the fail-closed
+    /// test while being useless.
+    #[test]
+    fn benign_command_is_still_allowed_under_a_real_budget() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = write_config(temp.path(), 5000);
+
+        let run = run_dcg_hook_with_env("echo hello", &[("DCG_CONFIG", config.as_os_str())]);
+        assert!(
+            run.stdout_str().trim().is_empty(),
+            "expected a benign command to be allowed, got: {}",
+            run.stdout_str()
+        );
+    }
+
+    /// Build a command that is expensive enough to evaluate to blow a small
+    /// budget, and that a full budget genuinely denies on its merits.
+    ///
+    /// The destructive token is assembled at runtime, not written literally:
+    /// dcg is installed as a hook on the machines where this repo is edited,
+    /// so a literal here blocks the agent authoring the test.
+    fn slow_to_evaluate_command() -> String {
+        let keyword = format!("{}{}{}", "sh", "util.rmt", "ree");
+        let body: Vec<String> = (0..200)
+            .map(|i| format!("{keyword}(target_{i})  # padding padding padding {i}"))
+            .collect();
+        format!("python3 <<'EOF'\n{}\nEOF\n", body.join("\n"))
+    }
+
+    /// The overrun that actually bit in production is the one INSIDE
+    /// evaluation, not the pre-evaluation check.
+    ///
+    /// `evaluate_command_with_pack_order_deadline_at_path` returns
+    /// `skipped_due_to_budget` and main.rs used to turn that into a silent
+    /// allow. This is the path that let a long destructive command through.
+    #[test]
+    fn evaluation_stage_overrun_denies() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = write_config(temp.path(), 5);
+
+        let run = run_dcg_hook_with_env(
+            &slow_to_evaluate_command(),
+            &[("DCG_CONFIG", config.as_os_str())],
+        );
+        let stdout = run.stdout_str();
+        assert!(
+            !stdout.trim().is_empty(),
+            "evaluation-stage overrun produced no output, which reads as ALLOW (stderr={})",
+            run.stderr_str()
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(stdout.trim()).expect("denial must be valid JSON");
+        assert_eq!(
+            json["hookSpecificOutput"]["permissionDecision"]
+                .as_str()
+                .unwrap_or_default(),
+            "deny"
+        );
+        let reason = json["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            reason.contains("stage 'evaluation'"),
+            "expected the in-evaluation budget check to fire, got: {reason}"
+        );
+    }
+
+    /// Control for the test above.
+    ///
+    /// Given room to finish, the same command must be denied on its merits.
+    /// Without this, `evaluation_stage_overrun_denies` would still pass if the
+    /// command were harmless and the deny were pure timeout noise.
+    #[test]
+    fn the_same_command_is_denied_on_its_merits_with_a_full_budget() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = write_config(temp.path(), 20_000);
+
+        let run = run_dcg_hook_with_env(
+            &slow_to_evaluate_command(),
+            &[("DCG_CONFIG", config.as_os_str())],
+        );
+        let stdout = run.stdout_str();
+        let json: serde_json::Value =
+            serde_json::from_str(stdout.trim()).expect("denial must be valid JSON");
+        assert_eq!(
+            json["hookSpecificOutput"]["permissionDecision"]
+                .as_str()
+                .unwrap_or_default(),
+            "deny"
+        );
+        let reason = json["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            !reason.contains("could not finish evaluating"),
+            "with a full budget this must be a real pattern match, not a timeout: {reason}"
+        );
+    }
+
+    /// A command too large to evaluate must be denied, not waved through.
+    ///
+    /// Measured 2026-09-02 against v0.4.2: an 86300-byte command carrying a
+    /// destructive body was allowed with only a stderr warning, while the same
+    /// body at 11200 bytes was denied. Padding was a complete bypass of the
+    /// guard, and it needed no cleverness at all.
+    ///
+    /// The body here is benign on purpose: the denial must come from the size,
+    /// which `benign_command_is_still_allowed_under_a_real_budget` pins by
+    /// showing the same shape under the limit is allowed.
+    #[test]
+    fn oversized_command_denies_instead_of_allowing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = write_config(temp.path(), 20_000);
+        let command = format!("echo {}", "a".repeat(70 * 1024));
+
+        let run = run_dcg_hook_with_env(&command, &[("DCG_CONFIG", config.as_os_str())]);
+        let stdout = run.stdout_str();
+        assert!(
+            !stdout.trim().is_empty(),
+            "oversized command produced no output, which reads as ALLOW (stderr={})",
+            run.stderr_str()
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(stdout.trim()).expect("denial must be valid JSON");
+        assert_eq!(
+            json["hookSpecificOutput"]["permissionDecision"]
+                .as_str()
+                .unwrap_or_default(),
+            "deny"
+        );
+        let reason = json["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            reason.contains("over the") && reason.contains("byte"),
+            "denial reason did not name the size limit: {reason}"
+        );
+    }
+
+    /// A hook payload too large to parse must be denied too.
+    ///
+    /// Without this, the oversized-command denial above is bypassable by
+    /// padding further: the payload check runs first and used to allow.
+    #[test]
+    fn oversized_hook_payload_denies_instead_of_allowing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = write_config(temp.path(), 20_000);
+        let command = format!("echo {}", "a".repeat(300 * 1024));
+
+        let run = run_dcg_hook_with_env(&command, &[("DCG_CONFIG", config.as_os_str())]);
+        let stdout = run.stdout_str();
+        assert!(
+            !stdout.trim().is_empty(),
+            "oversized payload produced no output, which reads as ALLOW (stderr={})",
+            run.stderr_str()
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(stdout.trim()).expect("denial must be valid JSON");
+        assert_eq!(
+            json["hookSpecificOutput"]["permissionDecision"]
+                .as_str()
+                .unwrap_or_default(),
+            "deny"
+        );
+    }
+
+    /// `XDG_CONFIG_HOME` must select the pending store.
+    ///
+    /// Resolution used to go through `dirs::home_dir()`, which ignores the
+    /// variable on macOS. Measured 2026-09-02: a run with `XDG_CONFIG_HOME`
+    /// pointed at a temp dir wrote 3422 bytes into the live store and left the
+    /// temp dir empty, so ~150k measurement invocations grew the state of the
+    /// guard they were supposed to be measuring from the outside.
+    #[test]
+    fn xdg_config_home_selects_the_pending_store() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let xdg = temp.path().join("xdg");
+        // Seed the HOME location so the old resolution order would definitely
+        // choose it — otherwise this test could pass for the wrong reason.
+        std::fs::create_dir_all(home.join(".config").join("dcg")).expect("home config dir");
+        std::fs::create_dir_all(&xdg).expect("xdg dir");
+        let config = write_config(temp.path(), 0);
+
+        let run = run_dcg_hook_with_env(
+            "echo hello",
+            &[
+                ("DCG_CONFIG", config.as_os_str()),
+                ("HOME", home.as_os_str()),
+                ("XDG_CONFIG_HOME", xdg.as_os_str()),
+            ],
+        );
+        assert!(
+            !run.stdout_str().trim().is_empty(),
+            "expected a denial, which is what writes the pending record"
+        );
+
+        let xdg_store = xdg.join("dcg").join("pending_exceptions.jsonl");
+        let home_store = home
+            .join(".config")
+            .join("dcg")
+            .join("pending_exceptions.jsonl");
+        assert!(
+            xdg_store.exists(),
+            "XDG_CONFIG_HOME was ignored; nothing was written to {}",
+            xdg_store.display()
+        );
+        assert!(
+            !home_store.exists(),
+            "the store landed under HOME at {} despite XDG_CONFIG_HOME being set",
+            home_store.display()
+        );
+    }
+}

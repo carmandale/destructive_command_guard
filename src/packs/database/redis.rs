@@ -176,7 +176,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // CONFIG SET save can disable RDB persistence
         destructive_pattern!(
             "config-set-save",
-            r#"(?i)\bCONFIG\s+SET\s+save\b"#,
+            r"(?i)\bCONFIG\s+SET\s+save\b",
             "CONFIG SET save can disable RDB persistence entirely, risking data loss on restart.",
             High,
             "CONFIG SET save \"\" disables all RDB snapshots:\n\n\

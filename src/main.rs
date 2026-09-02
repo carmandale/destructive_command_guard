@@ -47,7 +47,7 @@ use destructive_command_guard::hook::HookInput;
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::io::{self, IsTerminal};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 // Build metadata from vergen (set by build.rs)
@@ -80,6 +80,134 @@ fn history_db_path(config: &destructive_command_guard::config::HistoryConfig) ->
         return Some(PathBuf::from(path));
     }
     config.expanded_database_path()
+}
+
+/// Pack label for a denial dcg issued without completing an evaluation.
+const LIMITS_PACK: &str = "core.limits";
+/// Pattern labels, one per limit that stops dcg from reaching a verdict.
+const BUDGET_PATTERN: &str = "evaluation-timeout";
+const COMMAND_TOO_LARGE_PATTERN: &str = "command-too-large";
+const INPUT_TOO_LARGE_PATTERN: &str = "input-too-large";
+
+/// Deny a command whose evaluation could not finish inside the hook budget.
+///
+/// Both budget checks used to `return` here, and silence at exit 0 is exactly
+/// how the hook protocol spells "allow". A guard that permits the commands it
+/// could not finish judging fails in the one direction a guard must never
+/// fail, and the overrun is not rare or random: evaluation latency scales with
+/// command length, so a long enough command bought an unconditional pass.
+///
+/// Measured 2026-09-02 against v0.3.0 over 1185 known-destructive commands:
+/// p50 evaluation 31ms, p99 148ms, max 244ms. Exactly one row exceeded the
+/// 200ms default budget, and exactly that row came back allowed. Replaying the
+/// 25 slowest rows five times each: budget 40ms allowed 18/125, budget 200ms
+/// allowed 4/125, budget 5000ms allowed 0/125.
+///
+/// The denial still mints an allow-once code, so a legitimately slow command
+/// has a way through that does not require turning the guard off.
+fn deny_unevaluated(
+    hook_protocol: Option<hook::HookProtocol>,
+    command: &str,
+    working_dir: &str,
+    cwd_path: Option<&Path>,
+    config: &Config,
+    pattern: &str,
+    reason: &str,
+    explanation: &str,
+) {
+    let store = PendingExceptionStore::new(PendingExceptionStore::default_path(cwd_path));
+    let mut allow_once_info: Option<hook::AllowOnceInfo> = None;
+    if let Ok((record, maintenance)) = store.record_block(
+        command,
+        working_dir,
+        reason,
+        &config.logging.redaction,
+        false,
+        Some("Unevaluated".to_string()),
+        None,
+    ) {
+        allow_once_info = Some(hook::AllowOnceInfo {
+            code: record.short_code,
+            full_hash: record.full_hash,
+        });
+        if let Some(log_file) = config.general.log_file.as_deref() {
+            let _ = log_maintenance(log_file, maintenance, "record_block");
+        }
+    }
+
+    // A payload we could not parse leaves the client protocol unknown. dcg's
+    // primary client is Claude Code, and a denial some other client ignores is
+    // no worse than the unconditional allow this replaces.
+    match hook_protocol {
+        Some(protocol) => hook::output_denial_for_protocol(
+            protocol,
+            command,
+            reason,
+            Some(LIMITS_PACK),
+            Some(pattern),
+            Some(explanation),
+            allow_once_info.as_ref(),
+            None,
+            None,
+            None,
+            &[],
+        ),
+        None => hook::output_denial(
+            command,
+            reason,
+            Some(LIMITS_PACK),
+            Some(pattern),
+            Some(explanation),
+            allow_once_info.as_ref(),
+            None,
+            None,
+            None,
+            &[],
+        ),
+    }
+
+    if let Some(log_file) = config.general.log_file.as_deref() {
+        let _ = hook::log_blocked_command(log_file, command, reason, Some(LIMITS_PACK));
+    }
+}
+
+/// Reason and explanation for a command whose evaluation ran out of budget.
+fn budget_denial_text(stage: &str, elapsed: Duration, budget: Duration) -> (String, String) {
+    (
+        format!(
+            "dcg could not finish evaluating this command within {}ms (spent {}ms, stage \'{stage}\'). \
+             Denying rather than allowing a command it never finished judging.",
+            budget.as_millis(),
+            elapsed.as_millis(),
+        ),
+        "dcg stops evaluating at general.hook_timeout_ms and this command did not finish in time, \
+         so no rule was proven safe OR unsafe. Evaluation cost grows with command length, so this \
+         is usually a very long command or a heavily loaded machine.\n\n\
+         Ways through, in order of preference:\n\
+         - Split the command into smaller commands and run them separately.\n\
+         - Approve this one command with the allow-once code below.\n\
+         - Raise general.hook_timeout_ms in your dcg config if the budget is genuinely too tight."
+            .to_string(),
+    )
+}
+
+/// Reason and explanation for input dcg refused to evaluate on size alone.
+fn size_denial_text(what: &str, actual: usize, limit: usize, knob: &str) -> (String, String) {
+    (
+        format!(
+            "dcg did not evaluate this command: {what} is {actual} bytes, over the {limit}-byte \
+             limit. Denying rather than allowing an unevaluated command."
+        ),
+        format!(
+            "dcg refuses to scan input past {knob} so a pathological payload cannot stall every \
+             shell command on the machine. It used to allow oversized input instead, which meant \
+             padding a command past the limit turned the guard off for that command.\n\n\
+             Ways through, in order of preference:\n\
+             - Split the command into smaller commands, or write the long body to a file first.\n\
+             - Approve this one command with the allow-once code below.\n\
+             - Raise {knob} in your dcg config if the limit is genuinely too tight."
+        ),
+    )
 }
 
 fn build_history_entry(
@@ -313,8 +441,26 @@ fn main() {
     let hook_input = match hook::read_hook_input(max_input_bytes) {
         Ok(input) => input,
         Err(hook::HookReadError::InputTooLarge(len)) => {
-            eprintln!(
-                "[dcg] Warning: stdin input ({len} bytes) exceeds limit ({max_input_bytes} bytes); allowing command (fail-open)"
+            // The payload never parsed, so neither the command nor the client
+            // protocol is known. Deny anyway: allowing here meant padding a
+            // command past max_hook_input_bytes disabled the guard for it.
+            let placeholder = format!("<hook input of {len} bytes, over the limit; not evaluated>");
+            let (reason, explanation) =
+                size_denial_text("the hook payload", len, max_input_bytes, "general.max_hook_input_bytes");
+            let cwd_path = std::env::current_dir().ok();
+            let working_dir = cwd_path.as_ref().map_or_else(
+                || "<unknown>".to_string(),
+                |path| path.to_string_lossy().to_string(),
+            );
+            deny_unevaluated(
+                None,
+                &placeholder,
+                &working_dir,
+                cwd_path.as_deref(),
+                &config,
+                INPUT_TOO_LARGE_PATTERN,
+                &reason,
+                &explanation,
             );
             return;
         }
@@ -336,10 +482,29 @@ fn main() {
     // Check command size limit (fail-open: allow and warn)
     let max_command_bytes = config.general.max_command_bytes();
     if command.len() > max_command_bytes {
-        eprintln!(
-            "[dcg] Warning: command ({} bytes) exceeds limit ({} bytes); allowing command (fail-open)",
+        // Measured 2026-09-02 against v0.4.2: an 86300-byte command carrying a
+        // destructive body was allowed with only a stderr warning, while the
+        // same body at 11200 bytes was denied. Padding was a complete bypass.
+        let (reason, explanation) = size_denial_text(
+            "the command",
             command.len(),
-            max_command_bytes
+            max_command_bytes,
+            "general.max_command_bytes",
+        );
+        let cwd_path = std::env::current_dir().ok();
+        let working_dir = cwd_path.as_ref().map_or_else(
+            || "<unknown>".to_string(),
+            |path| path.to_string_lossy().to_string(),
+        );
+        deny_unevaluated(
+            Some(hook_protocol),
+            &command,
+            &working_dir,
+            cwd_path.as_deref(),
+            &config,
+            COMMAND_TOO_LARGE_PATTERN,
+            &reason,
+            &explanation,
         );
         return;
     }
@@ -366,15 +531,33 @@ fn main() {
     }
 
     if deadline.is_exceeded() {
-        if let Some(log_file) = config.general.log_file.as_deref() {
-            let _ = hook::log_budget_skip(
-                log_file,
+        if let Some(writer) = history_writer.as_ref() {
+            let entry = build_history_entry(
                 &command,
-                "pre_evaluation",
-                deadline.elapsed(),
-                HOOK_EVALUATION_BUDGET,
+                &working_dir,
+                HistoryOutcome::Deny,
+                Duration::ZERO,
+                Some(LIMITS_PACK),
+                Some(BUDGET_PATTERN),
+                None,
             );
+            writer.log(entry);
         }
+        let (reason, explanation) = budget_denial_text(
+            "pre_evaluation",
+            deadline.elapsed(),
+            deadline.max_duration(),
+        );
+        deny_unevaluated(
+            Some(hook_protocol),
+            &command,
+            &working_dir,
+            cwd_path.as_deref(),
+            &config,
+            BUDGET_PATTERN,
+            &reason,
+            &explanation,
+        );
         return;
     }
 
@@ -403,23 +586,26 @@ fn main() {
             let entry = build_history_entry(
                 &command,
                 &working_dir,
-                HistoryOutcome::Allow,
+                HistoryOutcome::Deny,
                 eval_duration,
-                None,
-                None,
+                Some(LIMITS_PACK),
+                Some(BUDGET_PATTERN),
                 None,
             );
             writer.log(entry);
         }
-        if let Some(log_file) = config.general.log_file.as_deref() {
-            let _ = hook::log_budget_skip(
-                log_file,
-                &command,
-                "evaluation",
-                deadline.elapsed(),
-                HOOK_EVALUATION_BUDGET,
-            );
-        }
+        let (reason, explanation) =
+            budget_denial_text("evaluation", deadline.elapsed(), deadline.max_duration());
+        deny_unevaluated(
+            Some(hook_protocol),
+            &command,
+            &working_dir,
+            cwd_path.as_deref(),
+            &config,
+            BUDGET_PATTERN,
+            &reason,
+            &explanation,
+        );
         return;
     }
 

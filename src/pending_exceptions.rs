@@ -27,10 +27,46 @@ pub const ENV_ALLOW_ONCE_PATH: &str = "DCG_ALLOW_ONCE_PATH";
 /// When set, codes cannot be forged without knowing the secret.
 pub const ENV_ALLOW_ONCE_SECRET: &str = "DCG_ALLOW_ONCE_SECRET";
 
+/// Alternate config root. Honoured by [`config_dir_override`].
+pub const ENV_XDG_CONFIG_HOME: &str = "XDG_CONFIG_HOME";
+
 const PENDING_EXCEPTIONS_FILE: &str = "pending_exceptions.jsonl";
 const ALLOW_ONCE_FILE: &str = "allow_once.jsonl";
 const SCHEMA_VERSION: u32 = 1;
 const EXPIRY_HOURS: i64 = 24;
+
+/// Size above which [`PendingExceptionStore::record_block`] prunes before appending.
+///
+/// `record_block` used to parse and rewrite the whole store on every denial.
+/// That is O(N) work per denial with N unbounded inside the 24h expiry window,
+/// so a burst of denials costs O(N^2) and the store reached 78MB in a single
+/// day. Below this threshold an append is a plain seek-to-end write, and the
+/// parse is paid once per threshold-worth of records instead of once each time.
+const PRUNE_THRESHOLD_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Hard cap on records retained when the store is pruned.
+///
+/// Expiry alone does not bound the file: a burst inside the 24h window leaves
+/// every record active, so pruning frees nothing and the O(N) cost returns.
+/// The newest records are the ones an operator is about to quote back as an
+/// allow-once code, so the oldest are dropped first.
+const MAX_RETAINED_RECORDS: usize = 1000;
+
+/// Config directory selected by `XDG_CONFIG_HOME`, when it is set.
+///
+/// Resolution used to go straight to `dirs::home_dir()`, which ignores this
+/// variable on macOS. A harness that set it believed it had isolated the store
+/// while every write still landed in the live one: measured 2026-09-02, a run
+/// with `XDG_CONFIG_HOME` pointed at a temp dir wrote 3422 bytes into the live
+/// `~/.config/dcg/pending_exceptions.jsonl` and left the temp dir empty. That
+/// is how ~150k measurement invocations grew the guard's own state file.
+fn config_dir_override() -> Option<PathBuf> {
+    let value = env::var(ENV_XDG_CONFIG_HOME).ok()?;
+    if value.trim().is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(value).join("dcg"))
+}
 
 /// Scope kind for allow-once entries.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -169,12 +205,17 @@ pub struct PendingMaintenance {
     pub pruned_expired: usize,
     pub pruned_consumed: usize,
     pub parse_errors: usize,
+    /// Active records dropped because the store exceeded [`MAX_RETAINED_RECORDS`].
+    pub dropped_over_cap: usize,
 }
 
 impl PendingMaintenance {
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.pruned_expired == 0 && self.pruned_consumed == 0 && self.parse_errors == 0
+        self.pruned_expired == 0
+            && self.pruned_consumed == 0
+            && self.parse_errors == 0
+            && self.dropped_over_cap == 0
     }
 }
 
@@ -203,6 +244,10 @@ impl PendingExceptionStore {
             if let Some(path) = resolve_config_path_value(&value, cwd) {
                 return path;
             }
+        }
+
+        if let Some(dir) = config_dir_override() {
+            return dir.join(PENDING_EXCEPTIONS_FILE);
         }
 
         // Check XDG-style path first (~/.config/dcg/), then platform-native
@@ -250,11 +295,24 @@ impl PendingExceptionStore {
             PendingExceptionRecord::new(now, cwd, command, reason, redaction, single_use, source);
 
         let mut file = open_locked(&self.path)?;
-        let (active, maintenance) = load_active_from_file(&mut file, now, allow_once_audit);
 
-        if maintenance.pruned_expired > 0 || maintenance.pruned_consumed > 0 {
+        // Only pay for a full parse once the store is actually large. See
+        // PRUNE_THRESHOLD_BYTES: doing this on every denial is what made a
+        // burst of denials quadratic and let the file reach 78MB.
+        let size = file.metadata().map_or(0, |meta| meta.len());
+        let maintenance = if size > PRUNE_THRESHOLD_BYTES {
+            let (mut active, mut maintenance) =
+                load_active_from_file(&mut file, now, allow_once_audit);
+            if active.len() > MAX_RETAINED_RECORDS {
+                let overflow = active.len() - MAX_RETAINED_RECORDS;
+                active.drain(..overflow);
+                maintenance.dropped_over_cap = overflow;
+            }
             rewrite_records(&mut file, &active)?;
-        }
+            maintenance
+        } else {
+            PendingMaintenance::default()
+        };
 
         append_record(&mut file, &record)?;
 
@@ -381,6 +439,10 @@ impl AllowOnceStore {
             if let Some(path) = resolve_config_path_value(&value, cwd) {
                 return path;
             }
+        }
+
+        if let Some(dir) = config_dir_override() {
+            return dir.join(ALLOW_ONCE_FILE);
         }
 
         // Check XDG-style path first (~/.config/dcg/), then platform-native
@@ -678,8 +740,11 @@ pub fn log_maintenance(
     let timestamp = format_timestamp(Utc::now());
     writeln!(
         file,
-        "[{timestamp}] [pending-exceptions] {context}: pruned_expired={}, pruned_consumed={}, parse_errors={}",
-        maintenance.pruned_expired, maintenance.pruned_consumed, maintenance.parse_errors
+        "[{timestamp}] [pending-exceptions] {context}: pruned_expired={}, pruned_consumed={}, parse_errors={}, dropped_over_cap={}",
+        maintenance.pruned_expired,
+        maintenance.pruned_consumed,
+        maintenance.parse_errors,
+        maintenance.dropped_over_cap
     )?;
     Ok(())
 }
@@ -1350,6 +1415,115 @@ mod tests {
             mode: crate::logging::RedactionMode::Arguments,
             max_argument_len: 8,
         }
+    }
+
+    /// Below PRUNE_THRESHOLD_BYTES a denial must be a pure append.
+    ///
+    /// The old `record_block` parsed and rewrote the entire store on every
+    /// denial, which is O(N) per denial with N unbounded inside the 24h expiry
+    /// window. An expired line surviving the append is the observable proof
+    /// that the parse did not run.
+    #[test]
+    fn test_record_block_below_threshold_is_append_only() {
+        let (store, _dir) = make_store();
+        let now = Utc::now();
+        let stale = PendingExceptionRecord::new(
+            now - Duration::hours(48),
+            "/tmp/below",
+            "echo stale",
+            "synthetic",
+            &redaction_config(),
+            false,
+            None,
+        );
+        std::fs::write(
+            store.path(),
+            format!("{}\n", serde_json::to_string(&stale).expect("serialize")),
+        )
+        .expect("seed store");
+
+        let (record, maintenance) = store
+            .record_block(
+                "echo fresh",
+                "/tmp/below",
+                "synthetic",
+                &redaction_config(),
+                false,
+                None,
+                None,
+            )
+            .expect("record_block");
+
+        assert_eq!(record.command_raw, "echo fresh");
+        assert_eq!(
+            maintenance,
+            PendingMaintenance::default(),
+            "nothing was parsed, so nothing may be reported as pruned"
+        );
+
+        let raw = std::fs::read_to_string(store.path()).expect("read store");
+        assert_eq!(raw.lines().count(), 2, "expected an append, not a rewrite");
+        assert!(raw.contains("echo stale"), "the expired line was rewritten away");
+
+        // Consumers are unaffected: the read path still filters expired records.
+        let (active, _) = store.preview_active(Utc::now()).expect("preview");
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].command_raw, "echo fresh");
+    }
+
+    /// Above the threshold the store is pruned AND hard-capped.
+    ///
+    /// Expiry alone cannot bound the file: every record here is live, which is
+    /// exactly the burst shape that grew the real store to 78MB in a day.
+    #[test]
+    fn test_record_block_above_threshold_prunes_and_caps() {
+        let (store, _dir) = make_store();
+        let now = Utc::now();
+        let padding = "x".repeat(2048);
+
+        let mut buf = String::new();
+        let mut seeded = 0usize;
+        while (buf.len() as u64) <= PRUNE_THRESHOLD_BYTES || seeded <= MAX_RETAINED_RECORDS {
+            let record = PendingExceptionRecord::new(
+                now,
+                "/tmp/cap",
+                &format!("echo seed{seeded} {padding}"),
+                "synthetic",
+                &redaction_config(),
+                false,
+                None,
+            );
+            buf.push_str(&serde_json::to_string(&record).expect("serialize"));
+            buf.push('\n');
+            seeded += 1;
+        }
+        std::fs::write(store.path(), &buf).expect("seed store");
+        let size_before = std::fs::metadata(store.path()).expect("stat").len();
+        assert!(size_before > PRUNE_THRESHOLD_BYTES);
+
+        let (_record, maintenance) = store
+            .record_block(
+                "echo newest",
+                "/tmp/cap",
+                "synthetic",
+                &redaction_config(),
+                false,
+                None,
+                None,
+            )
+            .expect("record_block");
+
+        assert_eq!(maintenance.dropped_over_cap, seeded - MAX_RETAINED_RECORDS);
+        assert!(!maintenance.is_empty(), "a cap drop must be reportable");
+
+        let raw = std::fs::read_to_string(store.path()).expect("read store");
+        assert_eq!(raw.lines().count(), MAX_RETAINED_RECORDS + 1);
+        assert!(raw.contains("echo newest"), "the new record must survive");
+        assert!(!raw.contains("echo seed0 "), "the oldest record must be dropped");
+        assert!(
+            std::fs::metadata(store.path()).expect("stat").len() < size_before,
+            "the store must shrink once it crosses the threshold"
+        );
     }
 
     #[test]

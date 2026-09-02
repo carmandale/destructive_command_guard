@@ -153,12 +153,23 @@ impl Deadline {
     /// Check if the deadline has been exceeded.
     #[must_use]
     pub fn is_exceeded(&self) -> bool {
-        self.start.elapsed() > self.max_duration
+        // A zero budget is exceeded by definition. Without this the check is a
+        // strict `>` against an elapsed time that can still read as zero, so
+        // `Deadline::new(Duration::ZERO)` was only *usually* exceeded — which
+        // made `deadline_exceeded_with_zero_duration` flake under parallel
+        // test load. `evaluator::deadline_exceeded` already special-cased this;
+        // the two disagreed, and the hook's own budget check used this one.
+        self.max_duration.is_zero() || self.start.elapsed() > self.max_duration
     }
 
     /// Get the remaining time before the deadline, or None if exceeded.
     #[must_use]
     pub fn remaining(&self) -> Option<Duration> {
+        // Same reasoning as `is_exceeded`: a zero budget has no time left, and
+        // `0.checked_sub(0)` is `Some(0)` whenever elapsed still reads as zero.
+        if self.max_duration.is_zero() {
+            return None;
+        }
         self.max_duration.checked_sub(self.start.elapsed())
     }
 
