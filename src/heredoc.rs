@@ -2188,7 +2188,11 @@ pub fn heredoc_substitution_result_is_executed(command: &str, heredoc_start: usi
             && b.get(i + 2) != Some(&b'<')
             && !levels[top].in_single
         {
-            if let Some((delim, off, ty)) = parse_heredoc_delimiter(&command[i + 2..]) {
+            // MERGE RESOLUTION, union only. `e542679` widened this to a
+            // 4-tuple with a `quoted` flag; main still returns 3. git merged
+            // both sides cleanly and the result did not compile, which is the
+            // kind of conflict only building the merge finds.
+            if let Some((delim, off, ty, _quoted)) = parse_heredoc_delimiter(&command[i + 2..]) {
                 let body_start = i + 2 + off;
                 if let Some(end) = find_heredoc_terminator(command, body_start, &delim, ty) {
                     i = next_char_boundary(command, end);
