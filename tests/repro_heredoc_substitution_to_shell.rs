@@ -140,6 +140,9 @@ fn a_variable_captured_then_evaluated_is_code() {
 }
 
 #[test]
+// `${V:-}` and friends are SHELL expansions in a plain string literal, not Rust
+// formatting arguments. clippy cannot tell the two apart from the outside.
+#[allow(clippy::literal_string_with_formatting_args)]
 fn an_expansion_with_a_modifier_still_names_the_capture() {
     // Substring matching on `$V` missed every modified expansion. `${V:-}` was
     // the one row that survived the cold review's re-measurement of the round-2
@@ -157,6 +160,7 @@ fn an_expansion_with_a_modifier_still_names_the_capture() {
 }
 
 #[test]
+#[allow(clippy::literal_string_with_formatting_args)]
 fn a_longer_variable_name_is_a_different_variable() {
     // The other direction of the same defect: `$VERBOSE` contains `$V` as a
     // substring and is not this capture.
