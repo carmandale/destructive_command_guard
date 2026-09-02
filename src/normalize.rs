@@ -1380,6 +1380,29 @@ fn normalize_subcommand_token(token: &str) -> Option<String> {
 /// `/tmp/...` or `$TMPDIR/...`) keep their quoting, because stripping it can
 /// change semantics for downstream parsers (notably `rm`).
 #[must_use]
+/// Is the token starting at `token_start` a heredoc (or here-string) delimiter?
+///
+/// True when the bytes immediately before it, ignoring blanks, end in `<<`, `<<-`
+/// or `<<<`. Blanks only: a newline ends the heredoc's own line, so a quoted word
+/// on the following line is an ordinary token, not this operator's delimiter.
+///
+/// Deliberately textual. The tokenizer does not mark operators, and inferring the
+/// relationship from token adjacency would depend on how `<<` happens to be split
+/// today (`.agent-config-1vfil`).
+fn is_heredoc_delimiter_token(command: &str, token_start: usize) -> bool {
+    let before = &command.as_bytes()[..token_start];
+    let end = before
+        .iter()
+        .rposition(|b| !matches!(b, b' ' | b'\t'))
+        .map_or(0, |i| i + 1);
+    let head = &before[..end];
+
+    // `<<-` is the tab-stripping form; the `-` sits between the operator and the
+    // delimiter, so step over it before looking for the operator itself.
+    let head = head.strip_suffix(b"-").unwrap_or(head);
+    head.ends_with(b"<<")
+}
+
 pub fn dequote_segment_command_words(command: &str) -> Cow<'_, str> {
     // Fast path: most commands contain no quotes, backslashes, or .exe extensions
     // that need normalization. Check for these special cases to enable normalization.
@@ -1422,6 +1445,17 @@ pub fn dequote_segment_command_words(command: &str) -> Cow<'_, str> {
                 if crate::context::SAFE_STRING_REGISTRY.is_all_args_data(cmd) {
                     continue;
                 }
+            }
+
+            // A heredoc delimiter's quotes are not decoration: they decide whether the
+            // shell expands the body before the receiver ever sees it. Dequoting
+            // `cat << 'EOF'` into `cat << EOF` changes what the command MEANS, and
+            // downstream masking then reads an unquoted delimiter the user never wrote
+            // (.agent-config-1vfil). Only the spaced spellings were affected — with no
+            // space, `<<'EOF'` is a single token and never reached this branch — which
+            // is why every arm table in spec 333 missed it.
+            if is_heredoc_delimiter_token(command, tok.byte_range.start) {
+                continue;
             }
 
             // Normalize subcommand-like words (e.g. git "reset" -> git reset), but do NOT strip

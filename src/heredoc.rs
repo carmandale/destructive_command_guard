@@ -2568,7 +2568,15 @@ fn parse_heredoc_delimiter(after_op: &str) -> Option<(String, usize, HeredocType
         (HeredocType::Standard, 0)
     };
 
-    let delim_chars = &trimmed[delim_start..];
+    // bash allows blanks between the operator and the delimiter word, and that is
+    // true of `<<-` too. `trimmed` skipped the blanks BEFORE the `-`; without this
+    // second skip, `<<- 'EOF'` leaves `delim_chars` starting with a space, misses
+    // both quoted branches, reaches the unquoted branch, finds whitespace at offset
+    // 0 and parses as nothing at all — so the heredoc is never recognised and its
+    // body is never masked (`.agent-config-1vfil`).
+    let after_dash = &trimmed[delim_start..];
+    let delim_chars = after_dash.trim_start_matches([' ', '\t']);
+    let skip_after_dash = after_dash.len() - delim_chars.len();
 
     // Handle quoted delimiters
     let (delimiter, delim_len, quoted) = if let Some(stripped) = delim_chars.strip_prefix('"') {
@@ -2599,7 +2607,7 @@ fn parse_heredoc_delimiter(after_op: &str) -> Option<(String, usize, HeredocType
     };
 
     // Calculate total offset to body start (skip to newline)
-    let total_delim_offset = skip_whitespace + delim_start + delim_len;
+    let total_delim_offset = skip_whitespace + delim_start + skip_after_dash + delim_len;
     let remaining = &after_op[total_delim_offset..];
 
     // Find the newline that starts the body
