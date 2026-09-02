@@ -167,6 +167,85 @@ fn a_herestring_into_an_executed_substitution_is_code() {
 }
 
 // ---------------------------------------------------------------------------
+// Round 2 — the blind cold review's confirmed bypasses (`baqrr-coldrev-*`).
+//
+// The first version of this gate read the enclosing command word as "the first
+// whitespace token", balanced `)` against pushes it never made, honoured an
+// apostrophe inside double quotes, and matched only a BARE `NAME=$( )`. Each of
+// those is a prefix or a spelling that switches the whole gate off, and the
+// suite was green because every case it pinned happened to use the one spelling
+// that worked.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_redirection_prefix_does_not_hide_the_command_word() {
+    for prefix in [">/dev/null", "2>/dev/null", "&>/dev/null", "<in.txt"] {
+        let cmd = format!("{prefix} eval \"$({})\"", sink("cat"));
+        assert_body_visible(&cmd, "a redirection is not a command word");
+        assert_denied(&cmd, "a redirection is not a command word");
+    }
+}
+
+#[test]
+fn a_keyword_prefix_does_not_hide_the_command_word() {
+    for cmd in [
+        format!("if true; then eval \"$({})\"; fi", sink("cat")),
+        format!("! eval \"$({})\"", sink("cat")),
+        format!("time eval \"$({})\"", sink("cat")),
+        format!("for f in x; do eval \"$({})\"; done", sink("cat")),
+        format!("while true; do eval \"$({})\"; done", sink("cat")),
+        format!("{{ eval \"$({})\"; }}", sink("cat")),
+        format!("( eval \"$({})\" )", sink("cat")),
+    ] {
+        assert_body_visible(&cmd, "a reserved word is not the command word");
+        assert_denied(&cmd, "a reserved word is not the command word");
+    }
+}
+
+#[test]
+fn a_group_inside_a_substitution_does_not_close_it() {
+    // `(` and `{` open a level that the matching `)`/`}` must close. Without
+    // that, the group's `)` pops the `$(` and the heredoc looks top-level.
+    for cmd in [
+        format!("eval \"$( (true) ; {})\"", sink("cat")),
+        format!("eval \"$(sleep $((0)); {})\"", sink("cat")),
+        format!("eval \"$({{ true; }}; {})\"", sink("cat")),
+        format!("eval \"$(f() {{ true; }}; {})\"", sink("cat")),
+    ] {
+        assert_body_visible(&cmd, "a group's close is not the substitution's close");
+        assert_denied(&cmd, "a group's close is not the substitution's close");
+    }
+}
+
+#[test]
+fn an_apostrophe_inside_double_quotes_is_not_a_quote() {
+    // Inside `" "`, a `'` is an ordinary character. Treating it as opening a
+    // literal span swallows the rest of the command, including the heredoc.
+    let cmd = format!("eval \"it's fine ; $({})\"", sink("cat"));
+    assert_body_visible(&cmd, "an apostrophe in double quotes opens nothing");
+    assert_denied(&cmd, "an apostrophe in double quotes opens nothing");
+}
+
+#[test]
+fn every_spelling_of_the_capture_is_code() {
+    // The bare `V=$( )` was the one spelling the first suite pinned, and the
+    // only one that worked. `V="$( )"` is what shellcheck pushes people toward.
+    for head in [
+        "V=$",
+        "V=\"$",
+        "export V=$",
+        "local V=$",
+        "declare V=$",
+        "readonly V=$",
+    ] {
+        let close = if head.contains('"') { "\"" } else { "" };
+        let cmd = format!("{head}({}){close}; eval \"$V\"", sink("cat"));
+        assert_body_visible(&cmd, "the capture is executed regardless of spelling");
+        assert_denied(&cmd, "the capture is executed regardless of spelling");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The cost: what spec 333 exists to protect must still be masked.
 //
 // These are not hypotheticals. `baqrr-census.py` counted, across spec 333's two
@@ -239,14 +318,29 @@ fn a_bare_heredoc_is_untouched_by_this_gate() {
 }
 
 #[test]
-fn arithmetic_expansion_is_not_a_substitution() {
+fn arithmetic_expansion_does_not_leave_a_level_open() {
+    // Named for what it actually pins. `baqrr-mutants.py` M9 deletes the `$((`
+    // guard and this stays green, because the mutated scanner pushes a level at
+    // `$(` and pops it at the first `)` of `))` -- so the heredoc sees no open
+    // substitution either way. The guard encodes a true fact about bash and is
+    // kept, but no case in this file can observe it, and claiming otherwise in
+    // the test's name would be a false label.
     let cmd = format!("echo $((1 + 2)) && cat <<'EOF'\n{}\nEOF\n", trigger());
-    assert_body_masked(&cmd, "$(( is arithmetic, and it closes before the heredoc");
+    assert_body_masked(&cmd, "arithmetic leaves nothing open at the heredoc");
 }
 
 #[test]
 fn a_single_quoted_dollar_paren_opens_nothing() {
-    let cmd = format!("echo 'eval $(' && cat <<'EOF'\n{}\nEOF\n", trigger());
+    // The enclosing word has to be an EXECUTOR for this to assert anything. The
+    // first version of this test used `echo`, which passes whether or not single
+    // quotes are honoured -- `baqrr-mutants.py` M8 deleted the in_single skip and
+    // the test stayed green. A separator before the heredoc would break it the
+    // same way, because the enclosing command word is read at the heredoc, not at
+    // the moment the substitution opens.
+    let cmd = format!(
+        "eval 'this $( is literal text' cat <<'EOF'\n{}\nEOF\n",
+        trigger()
+    );
     assert_body_masked(&cmd, "a substitution cannot open inside single quotes");
 }
 

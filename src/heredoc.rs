@@ -1952,6 +1952,39 @@ const EXECUTES_STRING_ARGUMENT: &[&str] = &["eval", "source", "."];
 /// hands them, and a string argument when `-c` is present.
 const SHELL_INTERPRETERS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "mksh", "ash"];
 
+/// Reserved words a COMMAND follows. They occupy the first token of a simple
+/// command without being its command word, so reading the first token blindly
+/// reports `then` where the answer is `eval` — and any of these as a prefix
+/// switched this whole gate off.
+///
+/// `for`, `select` and `case` are deliberately absent: a NAME follows those, not
+/// a command, so `case $(cat <<'EOF' ...) in` must NOT be read as command
+/// position. Skipping them would turn an argument into an executed command.
+const COMMAND_FOLLOWS: &[&str] = &[
+    "if", "then", "elif", "else", "while", "until", "do", "!", "time",
+];
+
+/// Declaration builtins. `export V=$( )` is still an assignment, so the capture
+/// route has to see through them — but `export $( )` is not command
+/// position, so they cannot simply be skipped either.
+const DECLARATION_BUILTINS: &[&str] = &["export", "local", "declare", "readonly", "typeset"];
+
+/// A redirection, not a command word: `>out`, `2>&1`, `&>log`, `<in`, `>>log`.
+fn is_redirection_token(token: &str) -> bool {
+    let rest = token.trim_start_matches(|c: char| c.is_ascii_digit());
+    rest.starts_with(['<', '>']) || rest.starts_with("&>")
+}
+
+/// A bare redirection OPERATOR, whose target is the NEXT token: `>`, `2>`, `&>`,
+/// `>>`. `>out` carries its own target and does not consume the next token.
+fn is_bare_redirection_operator(token: &str) -> bool {
+    is_redirection_token(token)
+        && token
+            .trim_start_matches(|c: char| c.is_ascii_digit())
+            .chars()
+            .all(|c| matches!(c, '<' | '>' | '&' | '|' | '-'))
+}
+
 fn word_matches(list: &[&str], word: &str) -> bool {
     list.contains(&word.rsplit('/').next().unwrap_or(word))
 }
@@ -1963,6 +1996,11 @@ enum SubstitutionKind {
     Command,
     /// `<( )` or `>( )` — the result is a file path the enclosing command opens.
     Process,
+    /// `( )` or `{ }` — not a substitution at all, but it MUST be pushed so
+    /// its close does not pop a live one. Without this, the `)` of
+    /// `eval "$( (true); cat <<'EOF' ... )"` closes the `$(` and the heredoc
+    /// looks top-level.
+    Group,
 }
 
 /// One nesting level: the top of the stack is the context being scanned, and
@@ -1980,6 +2018,11 @@ struct SubstitutionLevel {
     has_dash_c: bool,
     /// Byte offset where the word currently being built began, if any.
     pending_from: Option<usize>,
+    /// The previous token was a bare redirection operator, so this one is its
+    /// target and is not a command word either.
+    expect_redirect_target: bool,
+    /// A declaration builtin (`export`, `local`, ...) led this simple command.
+    saw_declaration: bool,
     in_single: bool,
     in_double: bool,
 }
@@ -1992,6 +2035,8 @@ impl SubstitutionLevel {
             first_word: None,
             has_dash_c: false,
             pending_from: None,
+            expect_redirect_target: false,
+            saw_declaration: false,
             in_single: false,
             in_double: false,
         }
@@ -2002,6 +2047,8 @@ impl SubstitutionLevel {
         self.first_word = None;
         self.has_dash_c = false;
         self.pending_from = None;
+        self.expect_redirect_target = false;
+        self.saw_declaration = false;
     }
 }
 
@@ -2059,7 +2106,10 @@ pub fn heredoc_substitution_result_is_executed(command: &str, heredoc_start: usi
                 i += 2;
                 continue;
             }
-            b'\'' => {
+            // Inside `" "` an apostrophe is an ordinary character. Opening a
+            // literal span on it swallowed the rest of the command, heredoc
+            // included, so `eval "it's fine ; $(...)"` was an allow.
+            b'\'' if !levels[top].in_double => {
                 levels[top].in_single = true;
                 i += 1;
                 continue;
@@ -2099,9 +2149,18 @@ pub fn heredoc_substitution_result_is_executed(command: &str, heredoc_start: usi
                 i += 2;
                 continue;
             }
-            b')' if !levels[top].in_double
-                && levels[top].kind.is_some()
-                && b.get(levels[top].open_at) != Some(&b'`') =>
+            // A group is not a substitution, but its close must be matched
+            // against its own open. Pushing it is what stops `(true)` inside
+            // `$( )` from closing the substitution.
+            b'(' | b'{' if !levels[top].in_double => {
+                levels.push(SubstitutionLevel::new(Some(SubstitutionKind::Group), i));
+                i += 1;
+                continue;
+            }
+            b')' | b'}'
+                if !levels[top].in_double
+                    && levels[top].kind.is_some()
+                    && b.get(levels[top].open_at) != Some(&b'`') =>
             {
                 levels.pop();
                 i += 1;
@@ -2118,7 +2177,7 @@ pub fn heredoc_substitution_result_is_executed(command: &str, heredoc_start: usi
         }
 
         let level = &mut levels[top];
-        if matches!(c, b';' | b'&' | b'|' | b'\n' | b'(' | b'{') {
+        if matches!(c, b';' | b'&' | b'|' | b'\n') {
             level.reset_command();
         } else if c.is_ascii_whitespace() {
             if let Some(from) = level.pending_from.take() {
@@ -2126,7 +2185,18 @@ pub fn heredoc_substitution_result_is_executed(command: &str, heredoc_start: usi
                 if word == "-c" {
                     level.has_dash_c = true;
                 }
-                if level.first_word.is_none() && !is_env_assignment(word) {
+                // Four kinds of token sit in front of a command word without
+                // being one. Reading the first token blindly meant any of them
+                // as a prefix turned this gate off entirely.
+                let skip = level.expect_redirect_target
+                    || is_redirection_token(word)
+                    || is_env_assignment(word)
+                    || word_matches(COMMAND_FOLLOWS, word);
+                level.expect_redirect_target = is_bare_redirection_operator(word);
+                if word_matches(DECLARATION_BUILTINS, word) {
+                    level.saw_declaration = true;
+                }
+                if level.first_word.is_none() && !skip {
                     level.first_word = Some(word.to_string());
                 }
             }
@@ -2139,7 +2209,17 @@ pub fn heredoc_substitution_result_is_executed(command: &str, heredoc_start: usi
     // Every substitution still open at the heredoc is a route the body can take.
     for idx in 1..levels.len() {
         let level = &levels[idx];
-        let parent = &levels[idx - 1];
+        // A group is a nesting level, not a route the body can take.
+        if level.kind == Some(SubstitutionKind::Group) {
+            continue;
+        }
+        // The enclosing simple command may sit on a group's level:
+        // `{ eval "$( ... )"; }` puts `eval` there, not on the level below it.
+        let parent = levels[..idx]
+            .iter()
+            .rev()
+            .find(|l| l.kind != Some(SubstitutionKind::Group) || l.first_word.is_some())
+            .unwrap_or(&levels[idx - 1]);
         let enclosing = parent.first_word.as_deref().unwrap_or("");
 
         if level.kind == Some(SubstitutionKind::Process) {
@@ -2159,7 +2239,10 @@ pub fn heredoc_substitution_result_is_executed(command: &str, heredoc_start: usi
         if word_matches(SHELL_INTERPRETERS, enclosing) && parent.has_dash_c {
             return true;
         }
-        if !enclosing.is_empty() {
+        // `export V=$( )` is still an assignment, so a declaration builtin does
+        // not end the search the way an ordinary command word does.
+        let declared = parent.saw_declaration;
+        if !enclosing.is_empty() && !declared {
             continue;
         }
 
@@ -2175,11 +2258,15 @@ pub fn heredoc_substitution_result_is_executed(command: &str, heredoc_start: usi
             .filter(|from| *from < dollar)
             .map_or("", |from| &command[from..dollar]);
 
-        if partial.is_empty() {
+        if partial.is_empty() && !declared {
             // `$(cat <<'EOF' ... EOF)` standing alone: the body becomes the
-            // command word and the shell runs it.
+            // command word and the shell runs it. `export $( )` is NOT that:
+            // its result is an argument list, so a declaration excludes it.
             return true;
         }
+        // `V="$( )"` is the spelling shellcheck pushes people toward, and the
+        // capture route matched only the bare `V=$( )` until this trim.
+        let partial = partial.trim_end_matches(['"', '\'']);
         if let Some(name) = partial.strip_suffix('=') {
             if is_env_assignment(partial) {
                 let close = if b.get(level.open_at) == Some(&b'`') {
