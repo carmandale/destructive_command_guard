@@ -425,6 +425,21 @@ fn a_backslash_before_a_multibyte_character_does_not_panic() {
     // This fleet writes em dashes constantly. `.agent-config-dnsgm` (P0).
     //
     // Calling it IS the assertion: before the fix these panicked.
+    //
+    // WHICH MUTANT KILLS THESE, measured rather than asserted. The fix is
+    // defence in depth -- a boundary-safe backslash advance AND `get` on every
+    // slice -- and EITHER HALF ALONE still prevents the abort:
+    //
+    //   revert the backslash arm only            32 pass  (get() catches it)
+    //   revert `let word = &command[from..i]`    32 pass  (the arm catches it)
+    //   revert all three protections             RED, both positions
+    //
+    // So no single-line mutant kills these rows, and a sweep that only ever
+    // reverts one line at a time would report them as vacuous when they are
+    // not. Both positions were confirmed to go red independently against the
+    // all-three revert -- position 1 at byte index 7, position 2 at byte 12.
+    //
+    // Position 1 of 2 -- the UNQUOTED REGION, where the scan is reading shell.
     for cmd in [
         format!("echo \\\u{2014} x && cat <<'EOF'\n{}\nEOF\n", trigger()),
         format!("eval \"$(cat <<'EOF'\n{}\nEOF\n)\" \\\u{2014}", trigger()),
@@ -440,6 +455,36 @@ fn a_backslash_before_a_multibyte_character_does_not_panic() {
         let _ = mask_non_executing_heredocs(&cmd);
         let at = cmd.find("<<").expect("the heredoc operator");
         let _ = heredoc_substitution_result_is_executed(&cmd, at);
+    }
+
+    // Position 2 of 2 -- an EARLIER HEREDOC BODY. Measured separately because it
+    // is a different route to the same abort: the scan walked earlier bodies as
+    // shell, so the backslash arm stepped into a multibyte character from inside
+    // data. On the live guard this row was ALLOW on 1e113950 and CRASH sig 6 on
+    // the installed 19aa74b2 -- the union install GREW the surface.
+    //
+    // `heredoc_start` is where the scan STOPS, so these aim it at the SECOND
+    // heredoc. Aimed at the first, the body is never walked and the rows pass on
+    // the crashing build: a vacuous guard, not a regression test.
+    for cmd in [
+        format!("cat <<'A'\n\\\u{2014} x\nA\ncat <<'B'\n{}\nB\n", trigger()),
+        format!("cat <<A\n\\\u{2014} x\nA\ncat <<B\n{}\nB\n", trigger()),
+        format!(
+            "cat <<'A'\n\\\u{00e9}\\\u{4e2d} x\nA\ncat <<'B'\n{}\nB\n",
+            trigger()
+        ),
+        // The first heredoc never terminates, so the whole-body skip cannot
+        // fire and the backslash arm walks the body itself, rather than the
+        // skip jumping over it.
+        format!("cat <<'A'\n\\\u{2014} x\ncat <<'B'\n{}\nB\n", trigger()),
+    ] {
+        let first = cmd.find("<<").expect("the first heredoc operator");
+        let second = cmd[first + 2..]
+            .find("<<")
+            .map(|off| first + 2 + off)
+            .expect("the second heredoc operator");
+        let _ = mask_non_executing_heredocs(&cmd);
+        let _ = heredoc_substitution_result_is_executed(&cmd, second);
     }
 }
 
