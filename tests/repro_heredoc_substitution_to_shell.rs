@@ -22,7 +22,9 @@
 //! second group is not decoration, it is the shape the census found 56 times in real
 //! traffic.
 
-use destructive_command_guard::heredoc::mask_non_executing_heredocs;
+use destructive_command_guard::heredoc::{
+    heredoc_substitution_result_is_executed, mask_non_executing_heredocs,
+};
 use destructive_command_guard::{Config, LayeredAllowlist, evaluate_command, packs::REGISTRY};
 
 /// The trigger every case carries. Identical across cases so a verdict difference
@@ -362,17 +364,29 @@ fn arithmetic_expansion_does_not_leave_a_level_open() {
 
 #[test]
 fn a_single_quoted_dollar_paren_opens_nothing() {
-    // The enclosing word has to be an EXECUTOR for this to assert anything. The
-    // first version of this test used `echo`, which passes whether or not single
-    // quotes are honoured -- `baqrr-mutants.py` M8 deleted the in_single skip and
-    // the test stayed green. A separator before the heredoc would break it the
-    // same way, because the enclosing command word is read at the heredoc, not at
-    // the moment the substitution opens.
+    // Asserted on the PREDICATE, not on the masking, and the difference matters.
+    //
+    // The property needs an executor as the enclosing command word with no
+    // separator before the heredoc -- `echo` there passes whether or not single
+    // quotes are honoured, which is how `baqrr-mutants.py` M8 survived the first
+    // version of this test. But that same shape makes `eval` the heredoc's
+    // OWNING command, and dcg's receiver resolution is being fixed separately
+    // (`d45752f` on the union branch, `.agent-config-n8u79`). Under the better
+    // resolution `eval` owns the body, it is correctly not masked, and a
+    // masking assertion here would fail for a reason that has nothing to do with
+    // quoting.
+    //
+    // So this asserts what it is actually about. The predicate must not see an
+    // open substitution, whoever ends up owning the heredoc.
     let cmd = format!(
         "eval 'this $( is literal text' cat <<'EOF'\n{}\nEOF\n",
         trigger()
     );
-    assert_body_masked(&cmd, "a substitution cannot open inside single quotes");
+    let at = cmd.find("<<").expect("the heredoc operator");
+    assert!(
+        !heredoc_substitution_result_is_executed(&cmd, at),
+        "a substitution cannot open inside single quotes: {cmd:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
