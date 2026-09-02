@@ -1955,6 +1955,318 @@ fn is_env_assignment(token: &str) -> bool {
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// Commands that execute a STRING ARGUMENT as shell code.
+///
+/// This is a denylist, and that is the opposite shape from
+/// `NON_EXECUTING_HEREDOC_COMMANDS`. The direction is not a preference; it is
+/// forced by which side of each question carries the long tail, and the two
+/// questions are not the same question:
+///
+/// * A pipeline stage's whole job is to consume stdin. Data sinks are
+///   enumerable (`cat`, `jq`, `less`); the executors are the open set
+///   (`bash`, `perl`, `ssh host sh`, a spelling nobody listed). So
+///   `heredoc_output_reaches_executor` allowlists the sinks and treats the
+///   unknown as executing.
+/// * A substitution's result arrives as an ARGUMENT. Commands that accept a
+///   here-doc'd argument are the open set — `git commit -m`, `br create -d`,
+///   `gh pr create --body`, `curl -d`, every program with a text flag. The
+///   commands that EXECUTE an argument are enumerable: `eval`, `source`, `.`,
+///   and a shell under `-c`.
+///
+/// Measured before it was chosen, not asserted after: across spec 333's two
+/// populations (1,191 heredoc rows and 18,723 real bash invocations) there are
+/// 77 heredocs lexically inside a substitution, and 69 of them sit under an
+/// enclosing command outside any generous data-sink set — 41 of those are
+/// `git commit -m "$(cat <<'EOF' ...)"` and 15 are `br create -d "$(cat ...)"`.
+/// Treating the unknown as executing here would unmask the body of very nearly
+/// every commit message this fleet writes. `baqrr-census.py` in spec 333's
+/// artifacts is that count and prints the rows.
+///
+/// The cost of this direction is stated rather than hidden: an executing
+/// context absent from these two lists is a miss, and a miss leaves the
+/// behaviour exactly as it was before this gate existed.
+const EXECUTES_STRING_ARGUMENT: &[&str] = &["eval", "source", "."];
+
+/// Shells. They execute a FILE argument, which is what a process substitution
+/// hands them, and a string argument when `-c` is present.
+const SHELL_INTERPRETERS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "mksh", "ash"];
+
+fn word_matches(list: &[&str], word: &str) -> bool {
+    list.contains(&word.rsplit('/').next().unwrap_or(word))
+}
+
+/// What a substitution hands its enclosing command.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SubstitutionKind {
+    /// `$( )` or `` ` ` `` — the result is spliced in as text.
+    Command,
+    /// `<( )` or `>( )` — the result is a file path the enclosing command opens.
+    Process,
+}
+
+/// One nesting level: the top of the stack is the context being scanned, and
+/// every level below it is a substitution still open around it.
+///
+/// Quoting state is per level because `$( )` opens a fresh quoting context:
+/// the `"` inside `echo "$(grep "x" f)"` does not close the outer one.
+struct SubstitutionLevel {
+    kind: Option<SubstitutionKind>,
+    /// Index of the `(` for `$(`/`<(`/`>(`, or of the opening backtick.
+    open_at: usize,
+    /// First non-assignment word of the simple command in progress at this level.
+    first_word: Option<String>,
+    /// `-c` seen in that simple command, which is what makes a shell execute a string.
+    has_dash_c: bool,
+    /// Byte offset where the word currently being built began, if any.
+    pending_from: Option<usize>,
+    in_single: bool,
+    in_double: bool,
+}
+
+impl SubstitutionLevel {
+    fn new(kind: Option<SubstitutionKind>, open_at: usize) -> Self {
+        Self {
+            kind,
+            open_at,
+            first_word: None,
+            has_dash_c: false,
+            pending_from: None,
+            in_single: false,
+            in_double: false,
+        }
+    }
+
+    /// A new simple command begins here.
+    fn reset_command(&mut self) {
+        self.first_word = None;
+        self.has_dash_c = false;
+        self.pending_from = None;
+    }
+}
+
+/// Does this heredoc's body reach an interpreter through a SUBSTITUTION?
+///
+/// `heredoc_output_reaches_executor` answers the pipeline question: whose stdin
+/// does the body land on. It cannot see any of these, because none of them
+/// involves a pipe — the body never travels on stdout at all. It travels as the
+/// value of a substitution:
+///
+/// ```text
+/// eval "$(cat <<'EOF' ... EOF)"        the substitution's text is executed
+/// bash <(cat <<'EOF' ... EOF)          the substitution names a file bash runs
+/// V=$(cat <<'EOF' ... EOF); eval "$V"  captured first, executed after
+/// $(cat <<'EOF' ... EOF)               the result IS the command word
+/// ```
+///
+/// The heredoc's receiver is `cat` in every one of them, so the receiver-only
+/// decision masks the body out of the matcher and every rule in every pack is
+/// unreachable through those four spellings. Measured ALLOW on the live v0.4.2
+/// build 2026-09-02, including on the pipeline gate — see `baqrr-*` in spec
+/// 333's artifacts.
+///
+/// The scan walks the command once, keeping a stack of the substitutions open
+/// at `heredoc_start` and, for each, the enclosing simple command it will be
+/// spliced into. A body has more than one route out when substitutions nest, so
+/// every open level is consulted rather than only the innermost.
+///
+/// What this deliberately does NOT do: return true for any `$(`. That would
+/// unmask `V=$(cat <<'EOF' ... EOF)`, which the census above shows is the
+/// common and harmless shape, and it is why the pipeline gate was not simply
+/// widened.
+#[must_use]
+pub fn heredoc_substitution_result_is_executed(command: &str, heredoc_start: usize) -> bool {
+    let b = command.as_bytes();
+    let mut levels: Vec<SubstitutionLevel> = vec![SubstitutionLevel::new(None, 0)];
+    let mut i = 0usize;
+    let stop = heredoc_start.min(b.len());
+
+    while i < stop {
+        let top = levels.len() - 1;
+        let c = b[i];
+
+        // A single-quoted span is literal: no substitution can open inside it.
+        if levels[top].in_single {
+            if c == b'\'' {
+                levels[top].in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        match c {
+            b'\\' => {
+                i += 2;
+                continue;
+            }
+            b'\'' => {
+                levels[top].in_single = true;
+                i += 1;
+                continue;
+            }
+            b'"' => {
+                levels[top].in_double = !levels[top].in_double;
+                i += 1;
+                continue;
+            }
+            // `$((` is arithmetic, not a command substitution.
+            b'$' if b.get(i + 1) == Some(&b'(') && b.get(i + 2) != Some(&b'(') => {
+                levels.push(SubstitutionLevel::new(
+                    Some(SubstitutionKind::Command),
+                    i + 1,
+                ));
+                i += 2;
+                continue;
+            }
+            // A backtick toggles rather than nests.
+            b'`' => {
+                if levels[top].kind == Some(SubstitutionKind::Command)
+                    && b.get(levels[top].open_at) == Some(&b'`')
+                {
+                    levels.pop();
+                } else {
+                    levels.push(SubstitutionLevel::new(Some(SubstitutionKind::Command), i));
+                }
+                i += 1;
+                continue;
+            }
+            // Process substitution is inert inside double quotes.
+            b'<' | b'>' if b.get(i + 1) == Some(&b'(') && !levels[top].in_double => {
+                levels.push(SubstitutionLevel::new(
+                    Some(SubstitutionKind::Process),
+                    i + 1,
+                ));
+                i += 2;
+                continue;
+            }
+            b')' if !levels[top].in_double
+                && levels[top].kind.is_some()
+                && b.get(levels[top].open_at) != Some(&b'`') =>
+            {
+                levels.pop();
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+
+        // Inside double quotes only the cases above are special; everything
+        // else is part of one argument and cannot start a new simple command.
+        if levels[top].in_double {
+            i += 1;
+            continue;
+        }
+
+        let level = &mut levels[top];
+        if matches!(c, b';' | b'&' | b'|' | b'\n' | b'(' | b'{') {
+            level.reset_command();
+        } else if c.is_ascii_whitespace() {
+            if let Some(from) = level.pending_from.take() {
+                let word = &command[from..i];
+                if word == "-c" {
+                    level.has_dash_c = true;
+                }
+                if level.first_word.is_none() && !is_env_assignment(word) {
+                    level.first_word = Some(word.to_string());
+                }
+            }
+        } else if level.pending_from.is_none() {
+            level.pending_from = Some(i);
+        }
+        i += 1;
+    }
+
+    // Every substitution still open at the heredoc is a route the body can take.
+    for idx in 1..levels.len() {
+        let level = &levels[idx];
+        let parent = &levels[idx - 1];
+        let enclosing = parent.first_word.as_deref().unwrap_or("");
+
+        if level.kind == Some(SubstitutionKind::Process) {
+            // `bash <(...)`, `source <(...)`: the enclosing command opens the
+            // substitution's file and runs it.
+            if word_matches(SHELL_INTERPRETERS, enclosing)
+                || word_matches(EXECUTES_STRING_ARGUMENT, enclosing)
+            {
+                return true;
+            }
+            continue;
+        }
+
+        if word_matches(EXECUTES_STRING_ARGUMENT, enclosing) {
+            return true;
+        }
+        if word_matches(SHELL_INTERPRETERS, enclosing) && parent.has_dash_c {
+            return true;
+        }
+        if !enclosing.is_empty() {
+            continue;
+        }
+
+        // No command word yet: the substitution is either the command itself or
+        // the right-hand side of an assignment.
+        let dollar = if b.get(level.open_at) == Some(&b'`') {
+            level.open_at
+        } else {
+            level.open_at.saturating_sub(1)
+        };
+        let partial = parent
+            .pending_from
+            .filter(|from| *from < dollar)
+            .map_or("", |from| &command[from..dollar]);
+
+        if partial.is_empty() {
+            // `$(cat <<'EOF' ... EOF)` standing alone: the body becomes the
+            // command word and the shell runs it.
+            return true;
+        }
+        if let Some(name) = partial.strip_suffix('=') {
+            if is_env_assignment(partial) {
+                let close = if b.get(level.open_at) == Some(&b'`') {
+                    skip_backticks(b, level.open_at)
+                } else {
+                    skip_balanced_paren(b, level.open_at)
+                };
+                if captured_variable_is_executed(&command[close.min(command.len())..], name) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Is a variable holding a heredoc body executed later in the same command?
+///
+/// `V=$(cat <<'EOF' ... EOF); eval "$V"` splits the capture from the execution,
+/// so no single substitution carries the body into an interpreter. Both halves
+/// are in one command string, which is the only place this guard can see.
+///
+/// Deliberately coarse, and the coarseness is the point: it asks whether the
+/// remainder mentions the variable AND contains an executing word, not which
+/// simple command each belongs to. Segmenting the remainder properly would cost
+/// a second scanner to separate `eval "$V"` from `echo eval; echo "$V"`, and the
+/// census found three rows of the whole `V=$(cat <<'EOF' ...)` shape in 19,914 —
+/// far too thin a population to buy precision for. The residual imprecision can
+/// only ever produce a DENY on a command that both captures a heredoc into a
+/// variable and later names `eval`, `source`, or a shell with `-c`.
+///
+/// `. "$V"` is not covered here: a bare `.` is too common a token in a
+/// remainder full of file names to test for this way. It is covered in the
+/// direct spelling, `. <(cat <<'EOF' ...)`.
+fn captured_variable_is_executed(rest: &str, name: &str) -> bool {
+    if !rest.contains(&format!("${name}")) && !rest.contains(&format!("${{{name}}}")) {
+        return false;
+    }
+    let words: Vec<&str> = rest
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .collect();
+    if words.iter().any(|w| *w == "eval" || *w == "source") {
+        return true;
+    }
+    words.iter().any(|w| SHELL_INTERPRETERS.contains(w)) && rest.contains("-c")
+}
+
 /// Mask heredoc content when the target command doesn't execute it.
 ///
 /// This prevents false positives where dangerous patterns in DATA (not CODE)
@@ -1988,7 +2300,8 @@ pub fn mask_non_executing_heredocs(command: &str) -> std::borrow::Cow<'_, str> {
                 let should_mask_herestring = target_cmd
                     .as_ref()
                     .is_some_and(|cmd| is_non_executing_heredoc_command(cmd))
-                    && !heredoc_output_reaches_executor(command, heredoc_start);
+                    && !heredoc_output_reaches_executor(command, heredoc_start)
+                    && !heredoc_substitution_result_is_executed(command, heredoc_start);
 
                 if should_mask_herestring {
                     // Mask here-string content for non-executing targets
@@ -2032,10 +2345,14 @@ pub fn mask_non_executing_heredocs(command: &str) -> std::borrow::Cow<'_, str> {
             // The receiver is only half of the data flow: `cat <<'EOF' | bash`
             // hands the body straight to a shell. Mask only when nothing
             // downstream can execute it.
+            // Two ways the body still reaches an interpreter with a
+            // non-executing receiver: through a pipe, and through a
+            // substitution. Neither can see the other, so both veto.
             let should_mask = target_cmd
                 .as_ref()
                 .is_some_and(|cmd| is_non_executing_heredoc_command(cmd))
-                && !heredoc_output_reaches_executor(command, heredoc_start);
+                && !heredoc_output_reaches_executor(command, heredoc_start)
+                && !heredoc_substitution_result_is_executed(command, heredoc_start);
 
             if should_mask {
                 // Parse the heredoc delimiter

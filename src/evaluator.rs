@@ -2000,6 +2000,10 @@ fn evaluate_heredoc(
             .as_ref()
             .is_some_and(|cmd| crate::heredoc::is_non_executing_heredoc_command(cmd))
             && !crate::heredoc::heredoc_output_reaches_executor(command, content.byte_range.start)
+            && !crate::heredoc::heredoc_substitution_result_is_executed(
+                command,
+                content.byte_range.start,
+            )
         {
             tracing::trace!(
                 target_command = ?content.target_command,
