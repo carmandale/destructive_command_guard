@@ -2188,7 +2188,12 @@ pub fn heredoc_substitution_result_is_executed(command: &str, heredoc_start: usi
             && b.get(i + 2) != Some(&b'<')
             && !levels[top].in_single
         {
-            if let Some((delim, off, ty)) = parse_heredoc_delimiter(&command[i + 2..]) {
+            // The 4th element is the delimiter's quoting. This site only wants to
+            // step over the body, so it does not care -- but it must still
+            // destructure it: `main` added this call while the union branch was
+            // widening the return type, and the text merge of the two compiled
+            // cleanly as a conflict-free merge while being a type error.
+            if let Some((delim, off, ty, _quoted)) = parse_heredoc_delimiter(&command[i + 2..]) {
                 let body_start = i + 2 + off;
                 if let Some(end) = find_heredoc_terminator(command, body_start, &delim, ty) {
                     i = next_char_boundary(command, end);
