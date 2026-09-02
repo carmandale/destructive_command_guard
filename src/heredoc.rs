@@ -1674,6 +1674,46 @@ const NON_EXECUTING_HEREDOC_COMMANDS: &[&str] = &[
     "sendmail",
     // Variable assignment (read into variable, don't execute)
     "read",
+    // ---- added with the pipeline-sink gate (.agent-config-j6ha9) ----------
+    // Membership means one thing: this command does not execute its stdin as
+    // code. Everything below is a data sink already in a family this list
+    // carries, and each was measured as a false positive or is its direct
+    // sibling. `sqlite3`, `psql` and `git` are deliberately absent: they do
+    // execute what they are handed.
+    // Search and filter (the grep family, modern spellings)
+    "rg",
+    "ag",
+    "ack",
+    "jq",
+    "yq",
+    // Pagers and viewers
+    "less",
+    "more",
+    "bat",
+    // Clipboard
+    "pbcopy",
+    "pbpaste",
+    "xclip",
+    "xsel",
+    // Further text transforms (the sort/uniq/tr family)
+    "tac",
+    "shuf",
+    "pr",
+    "split",
+    "csplit",
+    "strings",
+    "iconv",
+    "sponge",
+    "pv",
+    // Further encodings and checksums (the base64 / sha256sum families)
+    "base32",
+    "basenc",
+    "shasum",
+    "md5",
+    "b2sum",
+    "zstd",
+    "unzstd",
+    "zstdcat",
 ];
 
 /// Check if a command executes its heredoc/stdin content as code.
@@ -1685,6 +1725,195 @@ pub fn is_non_executing_heredoc_command(cmd: &str) -> bool {
     // Normalize: strip path prefix if present
     let cmd_name = cmd.rsplit('/').next().unwrap_or(cmd);
     NON_EXECUTING_HEREDOC_COMMANDS.contains(&cmd_name)
+}
+
+/// Does this heredoc's output flow into something that can execute it?
+///
+/// `is_non_executing_heredoc_command` answers a question about the command that
+/// RECEIVES the heredoc, and that is only half of the data flow. In
+/// `cat <<'EOF' | bash` the receiver is `cat`, which executes nothing, and the
+/// body is executed anyway -- by the shell on the right of the pipe. Deciding
+/// from the receiver alone masks the body out of the matcher, which is an
+/// unconditional bypass of every rule in every pack.
+///
+/// The heredoc body starts on the next line, so everything from the operator to
+/// the end of the logical command line is the pipeline the body is fed into.
+/// This walks that line and reports whether any downstream stage of the pipeline
+/// is something other than a known non-executing command.
+///
+/// An unknown downstream command counts as executing. An allowlist of data sinks
+/// cannot be defeated by a spelling nobody thought of, the way a denylist of
+/// interpreters can: `| bash`, `| /bin/sh`, `| python3 -`, `| ssh host bash`,
+/// `| xargs -0 sh -c` are all one entry short of each other.
+///
+/// The three things that are easy to get wrong here, all measured:
+/// `2>&1 | bash` (the `&` of a redirection does not end a pipeline),
+/// `$(true;) | bash` (a `;` inside a substitution is the inner list's), and a
+/// line ending in `|` (which continues, so the stage is on the next line).
+#[must_use]
+pub fn heredoc_output_reaches_executor(command: &str, heredoc_start: usize) -> bool {
+    let b = command.as_bytes();
+    if heredoc_start >= b.len() {
+        return false;
+    }
+
+    let mut i = heredoc_start;
+    while i < b.len() {
+        match b[i] {
+            // A quoted span cannot hold an operator: skip it whole.
+            b'\'' | b'"' => {
+                let quote = b[i];
+                i += 1;
+                while i < b.len() && b[i] != quote {
+                    i += 1;
+                }
+                i += 1;
+            }
+            // A substitution is its own command list. The `;` in `$(true;)` and
+            // the `|` in `` `a | b` `` belong to that inner list, not to this
+            // pipeline; reading them as this pipeline's separators ends the scan
+            // early, and an early end is an allow.
+            b'$' if b.get(i + 1) == Some(&b'(') => i = skip_balanced_paren(b, i + 1),
+            b'`' => i = skip_backticks(b, i),
+            // `>(cmd)` and `<(cmd)` are process substitutions, and the command
+            // inside receives the stream. `tee >(bash)` is a data sink in
+            // pipeline position handing the body to a shell beside it, so the
+            // stage's command word is not enough to clear the stage. Scanning
+            // continues INTO the substitution rather than over it, so an inner
+            // pipeline is still seen.
+            b'>' | b'<' if b.get(i + 1) == Some(&b'(') => {
+                match next_pipeline_stage(command, i + 2) {
+                    Some((word, _)) if is_non_executing_heredoc_command(&word) => i += 2,
+                    _ => return true,
+                }
+            }
+            // An escaped character is literal -- including an escaped newline,
+            // which continues the logical command line.
+            b'\\' => i += 2,
+            // Any other newline ends the line: the heredoc body starts here.
+            b'\n' => return false,
+            b'|' => {
+                // `||` is an or-list, not a pipe: nothing downstream reads stdin.
+                if b.get(i + 1) == Some(&b'|') {
+                    return false;
+                }
+                // `|&` pipes stderr as well; the stage still reads stdin.
+                let mut stage = i + 1;
+                if b.get(stage) == Some(&b'&') {
+                    stage += 1;
+                }
+                match next_pipeline_stage(command, stage) {
+                    Some((word, end)) => {
+                        if !is_non_executing_heredoc_command(&word) {
+                            return true;
+                        }
+                        i = end;
+                    }
+                    // A pipe into something with no command word is not a data
+                    // sink by any evidence this function has.
+                    None => return true,
+                }
+            }
+            // `2>&1`, `>&2`, `<&3`, `&>log`: this `&` is part of a redirection
+            // operator and ends nothing.
+            b'&' if i > 0 && matches!(b[i - 1], b'>' | b'<') => i += 1,
+            b'&' if b.get(i + 1) == Some(&b'>') => i += 2,
+            // `;`, `&&` and a bare `&` end the pipeline this heredoc feeds.
+            b';' | b'&' => return false,
+            _ => i += 1,
+        }
+    }
+
+    false
+}
+
+/// Index just past the `)` matching the `(` at `open`, or the end of input.
+fn skip_balanced_paren(b: &[u8], open: usize) -> usize {
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 1,
+            b'\'' | b'"' => {
+                let quote = b[i];
+                i += 1;
+                while i < b.len() && b[i] != quote {
+                    i += 1;
+                }
+            }
+            b'(' => depth += 1,
+            b')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return i + 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    b.len()
+}
+
+/// Index just past the backtick closing the span that opens at `open`.
+fn skip_backticks(b: &[u8], open: usize) -> usize {
+    let mut i = open + 1;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 1,
+            b'`' => return i + 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    b.len()
+}
+
+/// The command word of the pipeline stage beginning at `from`, and the index
+/// just past that word.
+///
+/// Crosses newlines on purpose: a line ending in `|` continues, so in
+/// `cat <<EOF |` + newline + `wc -l` the stage is `wc`, not the empty string.
+/// Skips `NAME=value`, the one token bash allows before a stage's command word.
+fn next_pipeline_stage(command: &str, from: usize) -> Option<(String, usize)> {
+    let b = command.as_bytes();
+    let mut i = from;
+    loop {
+        while i < b.len() && (b[i].is_ascii_whitespace() || b[i] == b'\\') {
+            i += 1;
+        }
+        if i >= b.len() {
+            return None;
+        }
+        let start = i;
+        while i < b.len()
+            && !b[i].is_ascii_whitespace()
+            && !matches!(b[i], b'|' | b';' | b'&' | b'<' | b'>' | b'(' | b')')
+        {
+            i += 1;
+        }
+        if i == start {
+            return None; // an operator where a command word should be
+        }
+        let word = command[start..i].trim_matches(['\'', '"']);
+        if is_env_assignment(word) {
+            continue;
+        }
+        return Some((word.to_string(), i));
+    }
+}
+
+/// `NAME=value`, the only token bash allows before a pipeline stage's command word.
+fn is_env_assignment(token: &str) -> bool {
+    let Some(eq) = token.find('=') else {
+        return false;
+    };
+    if eq == 0 {
+        return false;
+    }
+    let name = &token[..eq];
+    name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Mask heredoc content when the target command doesn't execute it.
@@ -1719,7 +1948,8 @@ pub fn mask_non_executing_heredocs(command: &str) -> std::borrow::Cow<'_, str> {
                 let target_cmd = extract_heredoc_target_command(command, heredoc_start);
                 let should_mask_herestring = target_cmd
                     .as_ref()
-                    .is_some_and(|cmd| is_non_executing_heredoc_command(cmd));
+                    .is_some_and(|cmd| is_non_executing_heredoc_command(cmd))
+                    && !heredoc_output_reaches_executor(command, heredoc_start);
 
                 if should_mask_herestring {
                     // Mask here-string content for non-executing targets
@@ -1751,9 +1981,13 @@ pub fn mask_non_executing_heredocs(command: &str) -> std::borrow::Cow<'_, str> {
             let target_cmd = extract_heredoc_target_command(command, heredoc_start);
 
             // Check if target is non-executing
+            // The receiver is only half of the data flow: `cat <<'EOF' | bash`
+            // hands the body straight to a shell. Mask only when nothing
+            // downstream can execute it.
             let should_mask = target_cmd
                 .as_ref()
-                .is_some_and(|cmd| is_non_executing_heredoc_command(cmd));
+                .is_some_and(|cmd| is_non_executing_heredoc_command(cmd))
+                && !heredoc_output_reaches_executor(command, heredoc_start);
 
             if should_mask {
                 // Parse the heredoc delimiter
