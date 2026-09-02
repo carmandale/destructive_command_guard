@@ -4285,3 +4285,76 @@ mod fail_closed_tests {
         );
     }
 }
+
+// ============================================================================
+// Real Claude Code payload -> Claude protocol
+// ============================================================================
+
+mod claude_protocol_tests {
+    use super::*;
+
+    /// dcg must answer a real Claude Code PreToolUse payload in Claude's shape.
+    ///
+    /// Every other harness in this file sends a minimal `{tool_name, tool_input}`
+    /// payload, and that is exactly why this went unnoticed: the minimal payload
+    /// happened to route to the Claude branch. A real invocation also carries
+    /// session_id, transcript_path and cwd, which `detect_protocol` read as
+    /// "Gemini context" and tested first — so dcg replied `{"decision":"deny"}`,
+    /// which Claude Code does not read. The verdict was correct and unreadable,
+    /// which on the wire is indistinguishable from an allow.
+    #[test]
+    fn real_claude_payload_gets_hook_specific_output() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home_dir = temp.path().join("home");
+        let xdg_config_dir = temp.path().join("xdg_config");
+        std::fs::create_dir_all(&home_dir).expect("HOME dir");
+        std::fs::create_dir_all(&xdg_config_dir).expect("XDG dir");
+
+        // The full envelope a real PreToolUse hook receives.
+        let input = serde_json::json!({
+            "session_id": "9a02fa0e-5133-42",
+            "transcript_path": "/dev/null",
+            "cwd": temp.path().to_string_lossy(),
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": { "command": "git reset --hard" }
+        });
+
+        let mut cmd = Command::new(dcg_binary());
+        cmd.env_clear()
+            .env("HOME", &home_dir)
+            .env("XDG_CONFIG_HOME", &xdg_config_dir)
+            .env("DCG_ALLOWLIST_SYSTEM_PATH", "")
+            .env("DCG_PACKS", "core.git,core.filesystem")
+            .current_dir(temp.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn().expect("spawn dcg");
+        {
+            let stdin = child.stdin.as_mut().expect("stdin");
+            serde_json::to_writer(stdin, &input).expect("write payload");
+        }
+        let out = child.wait_with_output().expect("wait");
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+
+        assert!(
+            !stdout.trim().is_empty(),
+            "expected a denial for a real Claude payload; stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(stdout.trim()).expect("denial must be valid JSON");
+        assert!(
+            json.get("hookSpecificOutput").is_some(),
+            "Claude Code reads hookSpecificOutput.permissionDecision and nothing else; got: {}",
+            serde_json::to_string(&json).unwrap_or_default()
+        );
+        assert_eq!(
+            json["hookSpecificOutput"]["permissionDecision"]
+                .as_str()
+                .unwrap_or_default(),
+            "deny"
+        );
+    }
+}

@@ -331,6 +331,21 @@ pub fn detect_protocol(input: &HookInput) -> HookProtocol {
             "run_shell_command" | "run-shell-command"
         );
 
+    // Claude Code sends session_id, transcript_path AND cwd on every PreToolUse
+    // invocation, so `has_gemini_context` below is true for every real Claude
+    // payload — and it was tested first, so dcg answered Claude Code in Gemini's
+    // shape. Claude Code reads hookSpecificOutput.permissionDecision and ignores
+    // {"decision": ...}, so a denial it could not parse became an effective
+    // ALLOW. Measured 2026-09-02: against this binary the guard-liveness suite
+    // saw all three of its deny cases come back "allow" while dcg was in fact
+    // denying all three internally — the verdict was right and unreadable.
+    //
+    // hook_event_name is the unambiguous marker. Claude sends PascalCase event
+    // names ("PreToolUse"); Gemini sends "BeforeTool".
+    if hook_event_name.eq_ignore_ascii_case("PreToolUse") {
+        return HookProtocol::ClaudeCompatible;
+    }
+
     // Gemini hooks usually include session envelope fields, but some integrations
     // only provide the event marker + tool payload.
     if has_gemini_context || has_gemini_before_tool_marker {
@@ -1084,6 +1099,48 @@ mod tests {
         let input: HookInput = serde_json::from_str(json).unwrap();
         assert_eq!(extract_command(&input), Some("git status".to_string()));
         assert_eq!(detect_protocol(&input), HookProtocol::Gemini);
+    }
+
+    /// The real Claude Code PreToolUse payload must be answered in Claude's shape.
+    ///
+    /// Claude Code sends session_id, transcript_path and cwd on every call, and
+    /// those were read as "Gemini context" and tested first. dcg then replied
+    /// {"decision":"deny"}, which Claude Code does not read — so the guard
+    /// denied and the command ran anyway. Every field below is present in a
+    /// real invocation; dropping any one of them hides the bug.
+    #[test]
+    fn test_real_claude_code_payload_is_claude_protocol() {
+        let json = r#"{
+            "session_id":"9a02fa0e-5133-42",
+            "transcript_path":"/dev/null",
+            "cwd":"/Users/someone",
+            "hook_event_name":"PreToolUse",
+            "tool_name":"Bash",
+            "tool_input":{"command":"git status"}
+        }"#;
+        let input: HookInput = serde_json::from_str(json).unwrap();
+        assert_eq!(extract_command(&input), Some("git status".to_string()));
+        assert_eq!(detect_protocol(&input), HookProtocol::ClaudeCompatible);
+    }
+
+    /// Each envelope field alone must not flip Claude Code into Gemini either.
+    #[test]
+    fn test_claude_envelope_fields_do_not_flip_protocol() {
+        for field in [
+            r#""session_id":"s""#,
+            r#""transcript_path":"/dev/null""#,
+            r#""cwd":"/tmp""#,
+        ] {
+            let json = format!(
+                r#"{{{field},"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{{"command":"git status"}}}}"#
+            );
+            let input: HookInput = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                detect_protocol(&input),
+                HookProtocol::ClaudeCompatible,
+                "field {field} flipped a PreToolUse payload away from Claude"
+            );
+        }
     }
 
     #[test]
