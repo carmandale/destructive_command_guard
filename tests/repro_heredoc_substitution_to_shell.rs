@@ -66,6 +66,15 @@ fn assert_body_visible(cmd: &str, why: &str) {
     );
 }
 
+fn assert_allowed(cmd: &str, why: &str) {
+    let result = evaluate(cmd);
+    assert!(
+        !result.is_denied(),
+        "should be ALLOWED ({why}): {cmd:?}\nreason: {:?}",
+        result.reason()
+    );
+}
+
 fn assert_body_masked(cmd: &str, why: &str) {
     let masked = mask_non_executing_heredocs(cmd);
     assert!(
@@ -212,7 +221,19 @@ fn a_herestring_into_an_executed_substitution_is_code() {
 
 #[test]
 fn a_redirection_prefix_does_not_hide_the_command_word() {
-    for prefix in [">/dev/null", "2>/dev/null", "&>/dev/null", "<in.txt"] {
+    // The SPACED forms matter separately: there the redirect operator and its
+    // target are two tokens, and skipping only the operator leaves `/dev/null`
+    // as the command word. `baqrr-mutants.py` M13 survived until these were here.
+    for prefix in [
+        ">/dev/null",
+        "2>/dev/null",
+        "&>/dev/null",
+        "<in.txt",
+        "> /dev/null",
+        "2> /dev/null",
+        ">> /dev/null",
+        "< in.txt",
+    ] {
         let cmd = format!("{prefix} eval \"$({})\"", sink("cat"));
         assert_body_visible(&cmd, "a redirection is not a command word");
         assert_denied(&cmd, "a redirection is not a command word");
@@ -387,6 +408,124 @@ fn a_single_quoted_dollar_paren_opens_nothing() {
         !heredoc_substitution_result_is_executed(&cmd, at),
         "a substitution cannot open inside single quotes: {cmd:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Round 4 — a crash, and three false positives the cold review's corpus lane
+// found by replaying 68,631 unique heredoc-bearing commands from 17,132
+// transcripts. My own two populations are 19,914 rows and contain none of them.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_backslash_before_a_multibyte_character_does_not_panic() {
+    // `i += 2` over a backslash landed INSIDE an em dash, and the next slice
+    // panicked on a non-char boundary. `panic = "abort"` means the PreToolUse
+    // hook dies, and a dead hook reads as an ALLOW -- so this crashed OPEN, on
+    // the machine-wide guard, for any backslash before any non-ASCII character.
+    // This fleet writes em dashes constantly. `.agent-config-dnsgm` (P0).
+    //
+    // Calling it IS the assertion: before the fix these panicked.
+    for cmd in [
+        format!("echo \\\u{2014} x && cat <<'EOF'\n{}\nEOF\n", trigger()),
+        format!("eval \"$(cat <<'EOF'\n{}\nEOF\n)\" \\\u{2014}", trigger()),
+        format!(
+            "echo \\\u{00e9}\\\u{4e2d} && cat <<'EOF'\n{}\nEOF\n",
+            trigger()
+        ),
+        format!(
+            "V=\\\u{2014}$(cat <<'EOF'\n{}\nEOF\n); eval \"$V\"",
+            trigger()
+        ),
+    ] {
+        let _ = mask_non_executing_heredocs(&cmd);
+        let at = cmd.find("<<").expect("the heredoc operator");
+        let _ = heredoc_substitution_result_is_executed(&cmd, at);
+    }
+}
+
+#[test]
+fn a_hyphenated_word_containing_source_is_not_an_executor() {
+    // `--slug source-truth` split into the bare token `source`, so a capture
+    // followed by an ordinary `br create` was DENIED. Corpus row 6881 is a real
+    // filing from this fleet that flipped ALLOW -> DENY.
+    let cmd = format!(
+        "BODY=$({}); br create --slug source-truth -d \"$BODY\"",
+        sink("cat")
+    );
+    assert_body_masked(&cmd, "a hyphenated word is one word");
+
+    // The control the finding came with: the same command with a slug that does
+    // not contain `source` was always allowed, so the slug is the differing token.
+    let control = format!(
+        "BODY=$({}); br create --slug truth -d \"$BODY\"",
+        sink("cat")
+    );
+    assert_body_masked(&control, "control");
+}
+
+#[test]
+fn a_markdown_fence_in_an_earlier_heredoc_body_is_not_shell() {
+    // The scan walked earlier heredoc BODIES as shell. A ``` fence leaves an odd
+    // backtick count, which pushed a phantom substitution level that never
+    // closed. 8 of the 21 real changed commands were this document-assembly
+    // shape -- how this fleet writes review packages.
+    //
+    // Asserted on the EVALUATOR, not on masking. The first version of this test
+    // checked `mask_non_executing_heredocs` and passed before the fix while the
+    // binary denied all four shapes -- the deny comes from the tier-2 heredoc
+    // content path, so the masking assertion was measuring the wrong oracle.
+    // Verified against the installed 19aa74b2: every one of these was DENY.
+    for cmd in [
+        format!(
+            "{{ cat <<'A'\n```diff\n-{}\n```\nA\ncat notes.txt; cat <<'B'\n```\nx\n```\nB\n; }} > out.md",
+            trigger()
+        ),
+        format!(
+            "{{ cat <<A\n```diff\n-{}\n```\nA\ncat notes.txt; cat <<B\n```\nx\n```\nB\n; }} > out.md",
+            trigger()
+        ),
+        format!("cat <<A\n```diff\n-{}\n```\nA\n", trigger()),
+        format!("cat <<A\n```\nx\n```\nA\ncat <<B\n{}\nB\n", trigger()),
+    ] {
+        assert_allowed(&cmd, "a fence inside a heredoc body is not a substitution");
+    }
+}
+
+#[test]
+fn a_substitution_that_is_an_argument_inside_dash_c_is_not_a_program() {
+    // `has_dash_c` fired for the whole simple command, so a substitution used as
+    // an ARGUMENT inside the `-c` string was treated as the program.
+    for cmd in [
+        format!("sh -c \"echo $({})\"", sink("cat")),
+        format!("bash -c \"printf %s $({})\"", sink("cat")),
+        format!("eval \"echo $({})\"", sink("cat")),
+        format!("eval x $({})", sink("cat")),
+    ] {
+        assert_body_masked(
+            &cmd,
+            "an argument inside the program text is not the program",
+        );
+    }
+}
+
+#[test]
+fn a_substitution_in_command_position_inside_dash_c_is_still_a_program() {
+    // The other side of the same rule, so the fix cannot be "never fire".
+    for cmd in [
+        format!("sh -c \"$({})\"", sink("cat")),
+        format!("bash -c \"$({})\"", sink("cat")),
+        format!("eval \"set -e; $({})\"", sink("cat")),
+        format!("eval \"true && $({})\"", sink("cat")),
+    ] {
+        assert_body_visible(
+            &cmd,
+            "a command position inside the program text is the program",
+        );
+        assert_denied(
+            &cmd,
+            "a command position inside the program text is the program",
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
