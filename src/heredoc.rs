@@ -2433,6 +2433,71 @@ fn captured_variable_is_executed(rest: &str, name: &str) -> bool {
     words.iter().any(|w| SHELL_INTERPRETERS.contains(w)) && rest.contains("-c")
 }
 
+/// Extensions whose file content IS shell, so a shell rule reading a line of it
+/// is reading shell rather than prose.
+///
+/// Deliberately short. `.py`, `.rb` and `.js` are absent: this fleet writes
+/// those as probe scripts constantly, their bodies are not shell, and a shell
+/// pattern matching a line inside one is a coincidence, not a finding.
+const SHELL_SCRIPT_SINK_EXTENSIONS: &[&str] = &[".sh", ".bash", ".zsh", ".ksh", ".command"];
+
+/// Is this heredoc's body being written into a shell script?
+///
+/// The two vetoes above ask where the body goes *now* -- down a pipe, out of a
+/// substitution. This one asks where it goes *later*. `cat > probe.sh <<'EOF'`
+/// hands the body to no interpreter in this command, so both of them clear it
+/// and the body is masked out of every pack. The next call runs `bash probe.sh`,
+/// and dcg cannot read a file it is told to execute -- so the write was the only
+/// place the hazard was ever visible, and masking it closed the last door.
+/// Measured 2026-09-02: `cat <<'EOF' > /private/tmp/x.sh ... EOF` followed by
+/// `bash /private/tmp/x.sh` is ALLOW end to end, in a single Bash call, on every
+/// build including the ones that predate the masking gate (`.agent-config-5xz9p`).
+///
+/// The predicate is the sink's extension and nothing cleverer. A `.sh` file's
+/// contents are shell, and dcg's packs are shell patterns, so a pack matching a
+/// line of it is a true positive by construction -- which is not true of a `.md`
+/// body, where the same match is documentation. That boundary is why this
+/// recovers the write step without reopening the 88 documentation false
+/// positives spec 333 closed: those write prose, not scripts.
+///
+/// Scoped to the heredoc's OWN simple command, both directions, and a newline is
+/// only one of the things that ends one. Backwards because the body of an earlier
+/// heredoc is prose and routinely names a `.sh` path ("run bash probe.sh to
+/// reproduce"); reading past it would let one document's text unmask the next.
+/// Forwards because the redirect is as often on the far side of the operator --
+/// `cat <<'EOF' > probe.sh` is the spelling the cold reviewer executed -- and word
+/// order is not a security boundary.
+///
+/// Stopping at the newline alone is NOT enough, and the neighbouring suite caught
+/// it: in `cat <<'EOF' ; bash /tmp/other.sh` the `.sh` belongs to a DIFFERENT
+/// command, the heredoc goes to stdout, and nothing is written anywhere. Any of
+/// `; & | newline` ends the segment, so a separator's far side cannot reach in.
+/// A separator inside quotes truncates the segment early; that direction is safe,
+/// because a shorter segment can only leave the body masked as it is today.
+#[must_use]
+pub fn heredoc_body_sinks_into_shell_script(command: &str, heredoc_start: usize) -> bool {
+    let Some(before) = command.get(..heredoc_start) else {
+        return false;
+    };
+    const ENDS_A_SIMPLE_COMMAND: [char; 4] = ['\n', ';', '|', '&'];
+    let segment_start = before.rfind(ENDS_A_SIMPLE_COMMAND).map_or(0, |i| i + 1);
+    let segment_end = command[heredoc_start..]
+        .find(ENDS_A_SIMPLE_COMMAND)
+        .map_or(command.len(), |rel| heredoc_start + rel);
+    let Some(segment) = command.get(segment_start..segment_end) else {
+        return false;
+    };
+
+    segment
+        .split(|c: char| c.is_whitespace() || matches!(c, '>' | '<' | '(' | ')' | '"' | '\'' | '`'))
+        .any(|word| {
+            let lowered = word.to_ascii_lowercase();
+            SHELL_SCRIPT_SINK_EXTENSIONS
+                .iter()
+                .any(|ext| lowered.ends_with(ext))
+        })
+}
+
 /// Mask heredoc content when the target command doesn't execute it.
 ///
 /// This prevents false positives where dangerous patterns in DATA (not CODE)
@@ -2467,7 +2532,8 @@ pub fn mask_non_executing_heredocs(command: &str) -> std::borrow::Cow<'_, str> {
                     .as_ref()
                     .is_some_and(|cmd| is_non_executing_heredoc_command(cmd))
                     && !heredoc_output_reaches_executor(command, heredoc_start)
-                    && !heredoc_substitution_result_is_executed(command, heredoc_start);
+                    && !heredoc_substitution_result_is_executed(command, heredoc_start)
+                    && !heredoc_body_sinks_into_shell_script(command, heredoc_start);
 
                 if should_mask_herestring {
                     // Mask here-string content for non-executing targets
@@ -2509,7 +2575,8 @@ pub fn mask_non_executing_heredocs(command: &str) -> std::borrow::Cow<'_, str> {
                 .as_ref()
                 .is_some_and(|cmd| is_non_executing_heredoc_command(cmd))
                 && !heredoc_output_reaches_executor(command, heredoc_start)
-                && !heredoc_substitution_result_is_executed(command, heredoc_start);
+                && !heredoc_substitution_result_is_executed(command, heredoc_start)
+                && !heredoc_body_sinks_into_shell_script(command, heredoc_start);
 
             if should_mask {
                 // Parse the heredoc delimiter

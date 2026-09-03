@@ -2004,6 +2004,10 @@ fn evaluate_heredoc(
                 command,
                 content.byte_range.start,
             )
+            && !crate::heredoc::heredoc_body_sinks_into_shell_script(
+                command,
+                content.byte_range.start,
+            )
         {
             tracing::trace!(
                 target_command = ?content.target_command,
