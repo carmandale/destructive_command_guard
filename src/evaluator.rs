@@ -2113,27 +2113,20 @@ fn evaluate_heredoc(
         // Commands like `cat`, `tee`, `grep`, etc. just output the heredoc content
         // as data - they don't execute it as code. This prevents false positives
         // where documentation text containing dangerous command examples is blocked.
-        if content
-            .target_command
-            .as_ref()
-            .is_some_and(|cmd| crate::heredoc::is_non_executing_heredoc_command(cmd))
-            && !crate::heredoc::heredoc_output_reaches_executor(command, content.byte_range.start)
-            // The THIRD reader of this predicate triple, and the one the binary
-            // actually answers with for here-strings. `mask_non_executing_heredocs`
-            // is not the oracle here: a here-string's content reaches the matcher
-            // through extraction, not through the masked command text, so a fix
-            // applied only at the masking sites left `{ cat <<<'...'; } | bash`
-            // ALLOWing while its unit test passed. `.agent-config-41wu8`.
-            && !crate::heredoc::compound_output_reaches_executor(command, content.byte_range.end)
-            && !crate::heredoc::heredoc_substitution_result_is_executed(
-                command,
-                content.byte_range.start,
-            )
-            && !crate::heredoc::heredoc_body_sinks_into_shell_script(
-                command,
-                content.byte_range.start,
-            )
-        {
+        // READER 3 of `heredoc_body_is_inert`, and the one the binary actually
+        // answers with for here-strings. `mask_non_executing_heredocs` is not
+        // the oracle here: a here-string's content reaches the matcher through
+        // extraction, not through the masked command text, so a fix applied
+        // only at the two masking sites left `{ cat <<<'...'; } | bash`
+        // ALLOWing while its unit test passed green (`.agent-config-41wu8`).
+        // That is why the veto set is one function and not three copies
+        // (`.agent-config-c29fn`).
+        if crate::heredoc::heredoc_body_is_inert(
+            command,
+            content.target_command.as_deref(),
+            content.byte_range.start,
+            content.byte_range.end,
+        ) {
             tracing::trace!(
                 target_command = ?content.target_command,
                 "Skipping heredoc content analysis for non-executing target"

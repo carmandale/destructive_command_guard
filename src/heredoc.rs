@@ -2769,6 +2769,52 @@ pub fn heredoc_body_sinks_into_shell_script(command: &str, heredoc_start: usize)
         })
 }
 
+/// Is this heredoc body DATA — nothing anywhere can execute it?
+///
+/// The one reader of the veto set (`.agent-config-c29fn`). Three places decide
+/// whether to stop looking at a heredoc body: the here-string masking site and
+/// the heredoc masking site in `mask_non_executing_heredocs`, and the tier-2
+/// extracted-content site in `evaluator.rs`, which is the one the binary answers
+/// with for here-strings. All three ask the same five questions, and until this
+/// function existed all three asked them separately.
+///
+/// That is not a hypothetical drift. The same root cause — "the first whitespace
+/// token is not the command word" — was found and fixed three times in one day,
+/// once per reader (`.agent-config-baqrr` finding 1, `.agent-config-41wu8` cause
+/// (g), and 41wu8's close). The third discovery is the instructive one: with the
+/// two masking sites fixed, `{ cat <<<'X'; } | bash` still ALLOWED on the binary
+/// while its unit test passed green, because a here-string's content reaches the
+/// matcher through extraction, not through the masked command text. A comment
+/// saying "also update the other two" is what `.claude/rules/structural-coupling.md`
+/// explicitly rejects; the only coupling that holds is the one that cannot come
+/// apart. There is now one site to add a veto to.
+///
+/// A caller passes its own two offsets and they are not interchangeable.
+/// `heredoc_start` points at the `<<` operator, because three of the four vetoes
+/// scan the heredoc's own command line from there. `body_end` points just past
+/// the terminator (or, for a here-string, past the closing quote), because
+/// `compound_output_reaches_executor` resumes AFTER the body to find the
+/// enclosing compound's pipeline. The evaluator site derives both from
+/// `ExtractedContent::byte_range`, whose ends mean the same two things.
+#[must_use]
+pub fn heredoc_body_is_inert(
+    command: &str,
+    target_command: Option<&str>,
+    heredoc_start: usize,
+    body_end: usize,
+) -> bool {
+    // The receiver is only half of the data flow, so each veto below is a way
+    // the body reaches an interpreter anyway. None of them can see the others:
+    // a pipe on the heredoc's line, a pipe on the enclosing compound's line, a
+    // substitution splicing the body into a command that runs its argument, and
+    // a redirection writing it into a file whose extension says it will be run.
+    target_command.is_some_and(is_non_executing_heredoc_command)
+        && !heredoc_output_reaches_executor(command, heredoc_start)
+        && !compound_output_reaches_executor(command, body_end)
+        && !heredoc_substitution_result_is_executed(command, heredoc_start)
+        && !heredoc_body_sinks_into_shell_script(command, heredoc_start)
+}
+
 /// Mask heredoc content when the target command doesn't execute it.
 ///
 /// This prevents false positives where dangerous patterns in DATA (not CODE)
@@ -2799,47 +2845,46 @@ pub fn mask_non_executing_heredocs(command: &str) -> std::borrow::Cow<'_, str> {
             if heredoc_start + 3 <= command.len() && bytes.get(heredoc_start + 2) == Some(&b'<') {
                 // Extract target command for here-string
                 let target_cmd = extract_heredoc_target_command(command, heredoc_start);
-                let should_mask_herestring = target_cmd
-                    .as_ref()
-                    .is_some_and(|cmd| is_non_executing_heredoc_command(cmd))
-                    && !heredoc_output_reaches_executor(command, heredoc_start)
-                    && !heredoc_substitution_result_is_executed(command, heredoc_start)
-                    && !heredoc_body_sinks_into_shell_script(command, heredoc_start);
 
-                if should_mask_herestring {
-                    // Mask here-string content for non-executing targets
-                    // GATE - spec 333 / .agent-config-u06z, sibling of the
-                    // heredoc gate below. Mask here-string content ONLY when it
-                    // is single-quoted. `<<< "$(...)"` and bare `<<< $(...)`
-                    // are both expanded by the outer shell before the data sink
-                    // receives them, so their bytes must stay visible to the
-                    // matcher. Candidate B's receiver fix is what makes this
-                    // path reachable, so without this gate the fix silently
-                    // converts a real deny into an allow (arm U4).
-                    if let Some((content_start, content_end, _single_quoted)) =
-                        find_herestring_content_bounds(command, heredoc_start + 3)
-                            .filter(|bounds| bounds.2)
-                            // A here-string sits on ONE line, so its enclosing
-                            // group's `; } | bash` is on that same line -- and
-                            // `heredoc_output_reaches_executor` above stops at
-                            // the `;`, which is the group's separator and not
-                            // this pipeline's end. `bounds.1` is already past
-                            // the closing quote.
-                            .filter(|bounds| {
-                                !compound_output_reaches_executor(command, bounds.1)
-                            })
-                    {
-                        // Copy up to the content start (includes <<<)
-                        if result.is_empty() {
-                            result = command[..content_start].to_string();
-                        } else {
-                            result.push_str(&command[pos..content_start]);
-                        }
-                        // Replace content with placeholder
-                        result.push_str("'MASKED'");
-                        pos = content_end;
-                        continue;
+                // READER 1 of `heredoc_body_is_inert`. The veto set is asked
+                // here rather than before the bounds because `body_end` is not
+                // known until the content has been located: a here-string sits
+                // on ONE line, so its enclosing group's `; } | bash` is on that
+                // same line, and `heredoc_output_reaches_executor` stops at the
+                // `;` -- which is the group's separator, not this pipeline's
+                // end. `bounds.1` is already past the closing quote, which is
+                // where `compound_output_reaches_executor` has to resume.
+                //
+                // GATE - spec 333 / .agent-config-u06z, sibling of the heredoc
+                // gate below. Mask here-string content ONLY when it is
+                // single-quoted. `<<< "$(...)"` and bare `<<< $(...)` are both
+                // expanded by the outer shell before the data sink receives
+                // them, so their bytes must stay visible to the matcher.
+                // Candidate B's receiver fix is what makes this path reachable,
+                // so without this gate the fix silently converts a real deny
+                // into an allow (arm U4).
+                if let Some((content_start, content_end, _single_quoted)) =
+                    find_herestring_content_bounds(command, heredoc_start + 3)
+                        .filter(|bounds| bounds.2)
+                        .filter(|bounds| {
+                            heredoc_body_is_inert(
+                                command,
+                                target_cmd.as_deref(),
+                                heredoc_start,
+                                bounds.1,
+                            )
+                        })
+                {
+                    // Copy up to the content start (includes <<<)
+                    if result.is_empty() {
+                        result = command[..content_start].to_string();
+                    } else {
+                        result.push_str(&command[pos..content_start]);
                     }
+                    // Replace content with placeholder
+                    result.push_str("'MASKED'");
+                    pos = content_end;
+                    continue;
                 }
 
                 // Not masking - just advance past <<< and continue
@@ -2853,63 +2898,57 @@ pub fn mask_non_executing_heredocs(command: &str) -> std::borrow::Cow<'_, str> {
             // Extract target command (what receives the heredoc)
             let target_cmd = extract_heredoc_target_command(command, heredoc_start);
 
-            // Check if target is non-executing
-            // The receiver is only half of the data flow: `cat <<'EOF' | bash`
-            // hands the body straight to a shell. Mask only when nothing
-            // downstream can execute it.
-            // Two ways the body still reaches an interpreter with a
-            // non-executing receiver: through a pipe, and through a
-            // substitution. Neither can see the other, so both veto.
-            let should_mask = target_cmd
-                .as_ref()
-                .is_some_and(|cmd| is_non_executing_heredoc_command(cmd))
-                && !heredoc_output_reaches_executor(command, heredoc_start)
-                && !heredoc_substitution_result_is_executed(command, heredoc_start)
-                && !heredoc_body_sinks_into_shell_script(command, heredoc_start);
-
-            if should_mask {
-                // Parse the heredoc delimiter
-                let after_op = &command[heredoc_start + 2..];
-                // GATE - spec 333 / .agent-config-u06z. Mask the body ONLY
-                // when the delimiter is quoted (`<<'EOF'`, `<<"EOF"`). A quoted
-                // delimiter suppresses expansion, so the body reaches the data
-                // sink as literal bytes and cannot execute. An UNQUOTED
-                // delimiter lets the outer shell expand the body *before* the
-                // sink receives it, so a command substitution in the body
-                // really runs; leaving those bodies visible to the matcher is
-                // the whole point of the gate. Gating on the delimiter covers
-                // every substitution spelling by construction -- dollar-paren
-                // and backtick alike. Upstream v0.13.9 enumerated spellings
-                // instead and missed backticks.
-                if let Some((delimiter, body_start_offset, heredoc_type, _quoted)) =
-                    parse_heredoc_delimiter(after_op).filter(|parsed| parsed.3)
-                {
-                    // Find the heredoc body end (terminating delimiter)
-                    let body_start = heredoc_start + 2 + body_start_offset;
-                    if let Some(body_end) =
-                        find_heredoc_terminator(command, body_start, &delimiter, heredoc_type)
-                            .filter(|end| !compound_output_reaches_executor(command, *end))
-                    {
-                        // Mask the heredoc body while preserving length and newlines.
-                        if result.is_empty() {
-                            result = command[..body_start].to_string();
-                        } else {
-                            result.push_str(&command[pos..body_start]);
-                        }
-
-                        // Identify the start of the terminator line so we keep it intact.
-                        let body_slice = &command[body_start..body_end];
-                        let terminator_rel = body_slice.rfind('\n').map_or(0, |idx| idx + 1);
-                        let terminator_abs = body_start + terminator_rel;
-
-                        let masked_body =
-                            mask_preserve_newlines(&command[body_start..terminator_abs]);
-                        result.push_str(&masked_body);
-                        result.push_str(&command[terminator_abs..body_end]);
-
-                        pos = body_end;
-                        continue;
+            // Parse the heredoc delimiter
+            let after_op = &command[heredoc_start + 2..];
+            // GATE - spec 333 / .agent-config-u06z. Mask the body ONLY
+            // when the delimiter is quoted (`<<'EOF'`, `<<"EOF"`). A quoted
+            // delimiter suppresses expansion, so the body reaches the data
+            // sink as literal bytes and cannot execute. An UNQUOTED
+            // delimiter lets the outer shell expand the body *before* the
+            // sink receives it, so a command substitution in the body
+            // really runs; leaving those bodies visible to the matcher is
+            // the whole point of the gate. Gating on the delimiter covers
+            // every substitution spelling by construction -- dollar-paren
+            // and backtick alike. Upstream v0.13.9 enumerated spellings
+            // instead and missed backticks.
+            if let Some((delimiter, body_start_offset, heredoc_type, _quoted)) =
+                parse_heredoc_delimiter(after_op).filter(|parsed| parsed.3)
+            {
+                // Find the heredoc body end (terminating delimiter)
+                let body_start = heredoc_start + 2 + body_start_offset;
+                // READER 2 of `heredoc_body_is_inert`. Asked here rather than
+                // before the delimiter parse because `body_end` is not known
+                // until the terminator has been found, and
+                // `compound_output_reaches_executor` resumes from there. Every
+                // veto is a way the body still reaches an interpreter with a
+                // non-executing receiver, and none of them can see the others.
+                if let Some(body_end) = find_heredoc_terminator(
+                    command,
+                    body_start,
+                    &delimiter,
+                    heredoc_type,
+                )
+                .filter(|end| {
+                    heredoc_body_is_inert(command, target_cmd.as_deref(), heredoc_start, *end)
+                }) {
+                    // Mask the heredoc body while preserving length and newlines.
+                    if result.is_empty() {
+                        result = command[..body_start].to_string();
+                    } else {
+                        result.push_str(&command[pos..body_start]);
                     }
+
+                    // Identify the start of the terminator line so we keep it intact.
+                    let body_slice = &command[body_start..body_end];
+                    let terminator_rel = body_slice.rfind('\n').map_or(0, |idx| idx + 1);
+                    let terminator_abs = body_start + terminator_rel;
+
+                    let masked_body = mask_preserve_newlines(&command[body_start..terminator_abs]);
+                    result.push_str(&masked_body);
+                    result.push_str(&command[terminator_abs..body_end]);
+
+                    pos = body_end;
+                    continue;
                 }
             }
 
