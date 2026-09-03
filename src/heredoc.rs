@@ -1479,7 +1479,18 @@ fn extract_heredoc_target_command(command: &str, heredoc_start: usize) -> Option
         return None;
     }
 
-    let before = &command[..heredoc_start];
+    // The heredoc operator binds to the simple command on its OWN physical line,
+    // so only that line can own this heredoc. Bounding here is a soundness fix:
+    // `tokenize_backwards` stops at `| ; & $ ( )` but NOT at newlines, so an
+    // unbounded scan resolves the target from an EARLIER line — e.g.
+    // `cat f\nbash <<EOF\nrm -rf /\nEOF` would resolve the target as `cat` (a data
+    // sink) and mask the executing `bash` body: a false negative. Limiting the
+    // scan to the current line risks only a false positive, never a false
+    // negative (the conservative direction for a security guard).
+    let line_start = command[..heredoc_start]
+        .rfind(['\n', '\r'])
+        .map_or(0, |i| i + 1);
+    let before = &command[line_start..heredoc_start];
 
     // Trim trailing whitespace before the heredoc operator
     let trimmed = before.trim_end();
@@ -1487,13 +1498,51 @@ fn extract_heredoc_target_command(command: &str, heredoc_start: usize) -> Option
         return None;
     }
 
-    // Parse tokens backwards to find the command
-    // This handles quoted strings, flags, and file arguments properly
+    // Parse tokens backwards, then walk them in original order so we identify
+    // the command that owns the heredoc rather than the last argument before
+    // the operator.
     let tokens = tokenize_backwards(trimmed);
 
-    for token in tokens {
+    // A bare redirection OPERATOR takes the NEXT token as its target, so that
+    // token is a filename and not the command word either.
+    let mut expect_redirect_target = false;
+
+    for token in tokens.iter().rev() {
+        if expect_redirect_target {
+            expect_redirect_target = false;
+            continue;
+        }
+
+        if is_shell_env_assignment(token) {
+            continue;
+        }
+
         // Skip flags
         if token.starts_with('-') {
+            continue;
+        }
+
+        // A reserved word occupies the first token of a simple command without
+        // being its command word. `{ cat <<'EOF' ...; }` and `if true; then cat
+        // <<'EOF' ...` own their heredoc with `cat`; resolving the receiver to
+        // `{` or `then` made is_non_executing_heredoc_command false, and a pure
+        // data body was handed to every rule in every pack. Same root cause as
+        // the substitution scanner's COMMAND_FOLLOWS skip, on the false-positive
+        // side; the list is shared so the two readers cannot drift apart.
+        if word_matches(COMMAND_FOLLOWS, token) {
+            continue;
+        }
+
+        // A redirection may legally precede the command word: `>out cat <<'EOF'`.
+        // `>/dev/null` was already skipped further down by the file-path branch,
+        // which is why only the slash-free spellings ever reached the matcher.
+        if is_redirection_token(token) {
+            expect_redirect_target = is_bare_redirection_operator(token);
+            continue;
+        }
+
+        // Skip common shell wrappers until we reach the actual target command.
+        if SHELL_WRAPPER_COMMANDS.contains(&token.as_str()) {
             continue;
         }
 
@@ -1506,7 +1555,7 @@ fn extract_heredoc_target_command(command: &str, heredoc_start: usize) -> Option
 
         // Skip if this looks like a file path argument
         if token.contains('/') {
-            let basename = token.rsplit('/').next().unwrap_or(&token);
+            let basename = token.rsplit('/').next().unwrap_or(token);
 
             // Check if this looks like a command path (/bin/cat, /usr/bin/bash)
             // vs a file argument (/tmp/file, /path/to/data)
@@ -1543,10 +1592,26 @@ fn extract_heredoc_target_command(command: &str, heredoc_start: usize) -> Option
             continue;
         }
 
-        return Some(token);
+        return Some(token.clone());
     }
 
     None
+}
+
+fn is_shell_env_assignment(token: &str) -> bool {
+    let Some((name, _value)) = token.split_once('=') else {
+        return false;
+    };
+
+    !name.is_empty()
+        && name
+            .bytes()
+            .enumerate()
+            .all(|(idx, byte)| match byte {
+                b'a'..=b'z' | b'A'..=b'Z' | b'_' => true,
+                b'0'..=b'9' => idx > 0,
+                _ => false,
+            })
 }
 
 /// Tokenize a command string backwards, respecting quotes.
@@ -1716,6 +1781,8 @@ const NON_EXECUTING_HEREDOC_COMMANDS: &[&str] = &[
     "zstdcat",
 ];
 
+const SHELL_WRAPPER_COMMANDS: &[&str] = &["sudo", "env", "command", "builtin", "nohup"];
+
 /// Check if a command executes its heredoc/stdin content as code.
 ///
 /// Returns `true` if the command is known to NOT execute its input,
@@ -1825,6 +1892,70 @@ pub fn heredoc_output_reaches_executor(command: &str, heredoc_start: usize) -> b
     }
 
     false
+}
+
+/// A compound command's pipeline applies to the heredoc body inside it.
+///
+/// `heredoc_output_reaches_executor` scans the heredoc's OWN line and stops at
+/// the newline, because the body starts there. That is right for
+/// `cat <<'EOF' | bash`, and blind to
+///
+/// ```text
+/// { cat <<'EOF'
+/// <destructive text>
+/// EOF
+/// } | bash
+/// ```
+///
+/// where the pipe belongs to the GROUP and the body still reaches `bash`. Same
+/// for `( ... ) | sh` and `if ...; then ... fi | sh`. All three are valid shell
+/// (`bash -n`); the `; }` spelling is not, which is why the shape hid for so
+/// long behind test cases that could never run.
+///
+/// Only a CLOSING token continues the scan, and that restriction is the whole
+/// safety argument. `cat <<'EOF' ... EOF` followed by an unrelated `ls | wc -l`
+/// is a separate command whose pipeline has nothing to do with this body;
+/// resuming the executor scan there would invent a false positive of exactly the
+/// kind this file exists to remove.
+#[must_use]
+pub fn compound_output_reaches_executor(command: &str, body_end: usize) -> bool {
+    /// The word forms. `}` and `)` are punctuation and handled above.
+    const CLOSERS: &[&str] = &["fi", "done", "esac"];
+
+    let b = command.as_bytes();
+    let mut i = body_end;
+    let mut closed_a_compound = false;
+
+    loop {
+        while i < b.len() && (b[i].is_ascii_whitespace() || b[i] == b';') {
+            i += 1;
+        }
+        if i >= b.len() {
+            return false;
+        }
+        if b[i] == b'}' || b[i] == b')' {
+            i += 1;
+            closed_a_compound = true;
+            continue;
+        }
+        let start = i;
+        while i < b.len() && !b[i].is_ascii_whitespace() && !matches!(b[i], b';' | b'|' | b'&') {
+            i += 1;
+        }
+        if start == i {
+            break;
+        }
+        // `get` rather than `[..]`: a panic here takes the whole hook down and
+        // fails OPEN (`.agent-config-dnsgm`).
+        if command.get(start..i).is_some_and(|w| CLOSERS.contains(&w)) {
+            closed_a_compound = true;
+            continue;
+        }
+        i = start;
+        break;
+    }
+
+    closed_a_compound && heredoc_output_reaches_executor(command, i)
 }
 
 /// Index just past the `)` matching the `(` at `open`, or the end of input.
@@ -1960,8 +2091,19 @@ const SHELL_INTERPRETERS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "mksh"
 /// `for`, `select` and `case` are deliberately absent: a NAME follows those, not
 /// a command, so `case $(cat <<'EOF' ...) in` must NOT be read as command
 /// position. Skipping them would turn an argument into an executed command.
+///
+/// `{` is here because it is a reserved word a command follows by exactly this
+/// definition: `{ cat <<'EOF'` runs `cat`. Note that unlike the other nine
+/// entries it has ONE reader, not two: the substitution scanner consumes the
+/// `{` byte in its group-push arm before any word accumulation, so `word == "{"`
+/// never reaches the COMMAND_FOLLOWS check there. It lives here anyway rather
+/// than in a second list at `extract_heredoc_target_command`, because a
+/// one-entry list beside a ten-entry list of the same kind is the duplication
+/// this const exists to avoid -- but do not go looking for scanner-side
+/// behaviour from it. `(` is absent because it is a command SEPARATOR to both
+/// readers: `tokenize_backwards` stops on it and the scanner tracks it as depth.
 const COMMAND_FOLLOWS: &[&str] = &[
-    "if", "then", "elif", "else", "while", "until", "do", "!", "time",
+    "if", "then", "elif", "else", "while", "until", "do", "!", "time", "{",
 ];
 
 /// Declaration builtins. `export V=$( )` is still an assignment, so the capture
@@ -2149,7 +2291,12 @@ pub fn heredoc_substitution_result_is_executed(command: &str, heredoc_start: usi
             && b.get(i + 2) != Some(&b'<')
             && !levels[top].in_single
         {
-            if let Some((delim, off, ty)) = parse_heredoc_delimiter(&command[i + 2..]) {
+            // The 4th element is the delimiter's quoting. This site only wants to
+            // step over the body, so it does not care -- but it must still
+            // destructure it: `main` added this call while the union branch was
+            // widening the return type, and the text merge of the two compiled
+            // cleanly as a conflict-free merge while being a type error.
+            if let Some((delim, off, ty, _quoted)) = parse_heredoc_delimiter(&command[i + 2..]) {
                 let body_start = i + 2 + off;
                 if let Some(end) = find_heredoc_terminator(command, body_start, &delim, ty) {
                     i = next_char_boundary(command, end);
@@ -2537,8 +2684,26 @@ pub fn mask_non_executing_heredocs(command: &str) -> std::borrow::Cow<'_, str> {
 
                 if should_mask_herestring {
                     // Mask here-string content for non-executing targets
-                    if let Some((content_start, content_end)) =
+                    // GATE - spec 333 / .agent-config-u06z, sibling of the
+                    // heredoc gate below. Mask here-string content ONLY when it
+                    // is single-quoted. `<<< "$(...)"` and bare `<<< $(...)`
+                    // are both expanded by the outer shell before the data sink
+                    // receives them, so their bytes must stay visible to the
+                    // matcher. Candidate B's receiver fix is what makes this
+                    // path reachable, so without this gate the fix silently
+                    // converts a real deny into an allow (arm U4).
+                    if let Some((content_start, content_end, _single_quoted)) =
                         find_herestring_content_bounds(command, heredoc_start + 3)
+                            .filter(|bounds| bounds.2)
+                            // A here-string sits on ONE line, so its enclosing
+                            // group's `; } | bash` is on that same line -- and
+                            // `heredoc_output_reaches_executor` above stops at
+                            // the `;`, which is the group's separator and not
+                            // this pipeline's end. `bounds.1` is already past
+                            // the closing quote.
+                            .filter(|bounds| {
+                                !compound_output_reaches_executor(command, bounds.1)
+                            })
                     {
                         // Copy up to the content start (includes <<<)
                         if result.is_empty() {
@@ -2581,13 +2746,25 @@ pub fn mask_non_executing_heredocs(command: &str) -> std::borrow::Cow<'_, str> {
             if should_mask {
                 // Parse the heredoc delimiter
                 let after_op = &command[heredoc_start + 2..];
-                if let Some((delimiter, body_start_offset, heredoc_type)) =
-                    parse_heredoc_delimiter(after_op)
+                // GATE - spec 333 / .agent-config-u06z. Mask the body ONLY
+                // when the delimiter is quoted (`<<'EOF'`, `<<"EOF"`). A quoted
+                // delimiter suppresses expansion, so the body reaches the data
+                // sink as literal bytes and cannot execute. An UNQUOTED
+                // delimiter lets the outer shell expand the body *before* the
+                // sink receives it, so a command substitution in the body
+                // really runs; leaving those bodies visible to the matcher is
+                // the whole point of the gate. Gating on the delimiter covers
+                // every substitution spelling by construction -- dollar-paren
+                // and backtick alike. Upstream v0.13.9 enumerated spellings
+                // instead and missed backticks.
+                if let Some((delimiter, body_start_offset, heredoc_type, _quoted)) =
+                    parse_heredoc_delimiter(after_op).filter(|parsed| parsed.3)
                 {
                     // Find the heredoc body end (terminating delimiter)
                     let body_start = heredoc_start + 2 + body_start_offset;
                     if let Some(body_end) =
                         find_heredoc_terminator(command, body_start, &delimiter, heredoc_type)
+                            .filter(|end| !compound_output_reaches_executor(command, *end))
                     {
                         // Mask the heredoc body while preserving length and newlines.
                         if result.is_empty() {
@@ -2648,8 +2825,13 @@ fn mask_preserve_newlines(input: &str) -> String {
 }
 
 /// Parse a heredoc delimiter after the << operator.
-/// Returns (delimiter, `body_start_offset`, `heredoc_type`) if successful.
-fn parse_heredoc_delimiter(after_op: &str) -> Option<(String, usize, HeredocType)> {
+///
+/// The fourth tuple element reports whether the delimiter was QUOTED
+/// (`<<'EOF'` or `<<"EOF"`). Bash suppresses every expansion inside a
+/// quoted-delimiter body; an unquoted delimiter is expanded by the outer
+/// shell before the receiving command ever sees the bytes. v0.3.0 parsed
+/// this fact and then threw it away. Spec 333 / .agent-config-u06z.
+fn parse_heredoc_delimiter(after_op: &str) -> Option<(String, usize, HeredocType, bool)> {
     let trimmed = after_op.trim_start_matches([' ', '\t']);
     let skip_whitespace = after_op.len() - trimmed.len();
 
@@ -2663,14 +2845,22 @@ fn parse_heredoc_delimiter(after_op: &str) -> Option<(String, usize, HeredocType
         (HeredocType::Standard, 0)
     };
 
-    let delim_chars = &trimmed[delim_start..];
+    // bash allows blanks between the operator and the delimiter word, and that is
+    // true of `<<-` too. `trimmed` skipped the blanks BEFORE the `-`; without this
+    // second skip, `<<- 'EOF'` leaves `delim_chars` starting with a space, misses
+    // both quoted branches, reaches the unquoted branch, finds whitespace at offset
+    // 0 and parses as nothing at all — so the heredoc is never recognised and its
+    // body is never masked (`.agent-config-1vfil`).
+    let after_dash = &trimmed[delim_start..];
+    let delim_chars = after_dash.trim_start_matches([' ', '\t']);
+    let skip_after_dash = after_dash.len() - delim_chars.len();
 
     // Handle quoted delimiters
-    let (delimiter, delim_len) = if let Some(stripped) = delim_chars.strip_prefix('"') {
+    let (delimiter, delim_len, quoted) = if let Some(stripped) = delim_chars.strip_prefix('"') {
         // Find closing quote
         if let Some(end) = stripped.find('"') {
             let (body, _) = stripped.split_at(end);
-            (body.to_string(), end + 2)
+            (body.to_string(), end + 2, true)
         } else {
             return None;
         }
@@ -2678,29 +2868,34 @@ fn parse_heredoc_delimiter(after_op: &str) -> Option<(String, usize, HeredocType
         // Find closing quote
         if let Some(end) = stripped.find('\'') {
             let (body, _) = stripped.split_at(end);
-            (body.to_string(), end + 2)
+            (body.to_string(), end + 2, true)
         } else {
             return None;
         }
     } else {
-        // Unquoted - extract word
+        // Unquoted - extract word. The outer shell EXPANDS this body.
         let end = delim_chars
             .find(|c: char| c.is_whitespace() || c == '\n' || c == ';' || c == '&' || c == '|')
             .unwrap_or(delim_chars.len());
         if end == 0 {
             return None;
         }
-        (delim_chars[..end].to_string(), end)
+        (delim_chars[..end].to_string(), end, false)
     };
 
     // Calculate total offset to body start (skip to newline)
-    let total_delim_offset = skip_whitespace + delim_start + delim_len;
+    let total_delim_offset = skip_whitespace + delim_start + skip_after_dash + delim_len;
     let remaining = &after_op[total_delim_offset..];
 
     // Find the newline that starts the body
     let newline_offset = remaining.find('\n').map_or(remaining.len(), |i| i + 1);
 
-    Some((delimiter, total_delim_offset + newline_offset, heredoc_type))
+    Some((
+        delimiter,
+        total_delim_offset + newline_offset,
+        heredoc_type,
+        quoted,
+    ))
 }
 
 /// Find the end of a heredoc body (position after the terminating delimiter line).
@@ -2740,7 +2935,16 @@ fn find_heredoc_terminator(
 /// Find the bounds of a here-string's content (start and end byte positions).
 /// Returns `(content_start, content_end)` where `content_start` is after any opening quote
 /// and `content_end` is before any closing quote or at whitespace/end for unquoted.
-fn find_herestring_content_bounds(command: &str, after_operator: usize) -> Option<(usize, usize)> {
+/// Find the bounds of a here-string's content.
+///
+/// The third tuple element is true only when the content is SINGLE-quoted.
+/// Unlike a heredoc delimiter, a double-quoted here-string is still
+/// expanded by the shell, so `"` cannot be treated as safe here.
+/// Spec 333 / .agent-config-u06z.
+fn find_herestring_content_bounds(
+    command: &str,
+    after_operator: usize,
+) -> Option<(usize, usize, bool)> {
     if after_operator >= command.len() {
         return None;
     }
@@ -2773,10 +2977,12 @@ fn find_herestring_content_bounds(command: &str, after_operator: usize) -> Optio
             }
         }
         if i < bytes.len() && bytes[i] == quote {
-            // Include the quotes in the masked region
+            // Include the quotes in the masked region. Only single quotes
+            // suppress expansion; double quotes still expand.
             return Some((
                 after_operator + quote_start,
                 after_operator + i + 1, // after closing quote
+                quote == b'\'',
             ));
         }
         // No closing quote found - treat as unquoted
@@ -2793,7 +2999,8 @@ fn find_herestring_content_bounds(command: &str, after_operator: usize) -> Optio
     }
 
     if i > word_start {
-        Some((after_operator + word_start, after_operator + i))
+        // Unquoted here-string content is expanded by the outer shell.
+        Some((after_operator + word_start, after_operator + i, false))
     } else {
         None
     }
@@ -4556,5 +4763,146 @@ fi"#;
         let content = "print('hello')"; // ambiguous content
         let (lang, _) = ScriptLanguage::detect(cmd, content);
         assert_eq!(lang, ScriptLanguage::Python);
+    }
+
+    #[test]
+    fn extract_heredoc_target_command_prefers_command_over_arguments() {
+        let cat_cmd = "cat bash <<EOF\nrm -rf /\nEOF";
+        let cat_start = cat_cmd.find("<<").expect("cat heredoc");
+        assert_eq!(
+            extract_heredoc_target_command(cat_cmd, cat_start).as_deref(),
+            Some("cat")
+        );
+
+        let grep_cmd = "grep pattern . <<EOF\nrm -rf /\nEOF";
+        let grep_start = grep_cmd.find("<<").expect("grep heredoc");
+        assert_eq!(
+            extract_heredoc_target_command(grep_cmd, grep_start).as_deref(),
+            Some("grep")
+        );
+    }
+
+    #[test]
+    fn extract_heredoc_target_command_skips_assignments_and_wrappers() {
+        let env_cmd = "FOO=1 env -i /bin/cat <<EOF\npayload\nEOF";
+        let env_start = env_cmd.find("<<").expect("env heredoc");
+        assert_eq!(
+            extract_heredoc_target_command(env_cmd, env_start).as_deref(),
+            Some("cat")
+        );
+
+        let sudo_cmd = "sudo bash <<EOF\necho hi\nEOF";
+        let sudo_start = sudo_cmd.find("<<").expect("sudo heredoc");
+        assert_eq!(
+            extract_heredoc_target_command(sudo_cmd, sudo_start).as_deref(),
+            Some("bash")
+        );
+    }
+
+    /// #136 data-sink half: `git commit -F -` / `--file=-` / `git hash-object
+    /// --stdin` read the heredoc body as DATA (a commit message / object
+    /// content) that git never executes, so the body is masked like cat/tee. A
+    /// bare `git commit <<EOF` (no stdin sentinel) is NOT masked, and anything
+    /// after the terminator stays scannable.
+    #[test]
+    fn mask_git_stdin_data_sink_136() {
+        let reset_hard = format!("{}{}", "reset --", "hard");
+
+        // `git commit -F -`: message from stdin → body masked.
+        let c1 = format!("git commit -F - <<EOF\ndocs: {reset_hard} notes\nEOF");
+        let m1 = mask_non_executing_heredocs(&c1);
+        assert!(
+            !m1.contains(&reset_hard),
+            "commit-message body via `-F -` should be masked: {m1:?}"
+        );
+        // The git invocation line itself must be preserved (not masked away).
+        assert!(
+            m1.contains("git commit -F -"),
+            "the git invocation line must be preserved: {m1:?}"
+        );
+
+        // `--file=-` glued form.
+        let c2 = "git commit --file=- <<EOF\ndocs: restore the worktree\nEOF";
+        let m2 = mask_non_executing_heredocs(c2);
+        assert!(
+            !m2.contains("restore"),
+            "commit-message body via `--file=-` should be masked: {m2:?}"
+        );
+
+        // `git hash-object --stdin`: object content from stdin → masked.
+        let c3 = "git hash-object --stdin <<EOF\ngit restore --worktree .\nEOF";
+        let m3 = mask_non_executing_heredocs(c3);
+        assert!(
+            !m3.contains("restore"),
+            "hash-object --stdin body should be masked: {m3:?}"
+        );
+
+        // Conservative: a bare `git commit <<EOF` (no stdin sentinel) is NOT masked.
+        let c4 = "git commit <<EOF\nrestore\nEOF";
+        let m4 = mask_non_executing_heredocs(c4);
+        assert!(
+            m4.contains("restore"),
+            "bare `git commit <<EOF` must NOT be masked (no stdin sentinel): {m4:?}"
+        );
+
+        // Soundness: a destructive command AFTER the terminator stays scannable.
+        let rmrf = format!("{}{}{}", "rm", " -", "rf");
+        let c5 = format!("git commit -F - <<EOF\nmsg\nEOF\n{rmrf} /etc");
+        let m5 = mask_non_executing_heredocs(&c5);
+        assert!(
+            m5.contains(&rmrf),
+            "command after the heredoc terminator must remain scannable: {m5:?}"
+        );
+
+        // A quoted `-m` message that merely contains the text "-F -" must not be
+        // mistaken for a real stdin sentinel (quoted args are single tokens).
+        let c6 = format!("git commit -m \"mentions -F - here\" <<EOF\n{reset_hard}\nEOF");
+        let m6 = mask_non_executing_heredocs(&c6);
+        assert!(
+            m6.contains(&reset_hard),
+            "quoted text '-F -' must not be treated as a stdin sentinel: {m6:?}"
+        );
+
+        // CRITICAL soundness (no cross-line leak): a `git … -F -` on an EARLIER
+        // line must NOT mask a LATER interpreter heredoc whose body genuinely
+        // executes. The heredoc binds to the command on its own physical line.
+        let c7 = format!("git commit -F - msg.txt\nbash <<EOF\n{rmrf} /important\nEOF");
+        let m7 = mask_non_executing_heredocs(&c7);
+        assert!(
+            m7.contains(&rmrf),
+            "git stdin sentinel on a prior line must NOT mask a later bash heredoc body: {m7:?}"
+        );
+
+        // Same line, here-string form on a later interpreter: still no leak.
+        let c8 = format!("git commit -F - msg.txt\nbash <<<'{rmrf} /important'");
+        let m8 = mask_non_executing_heredocs(&c8);
+        assert!(
+            m8.contains(&rmrf),
+            "git sentinel on a prior line must NOT mask a later bash here-string: {m8:?}"
+        );
+    }
+
+    /// Cross-line soundness for the existing #109 data-sink path: a `cat`/`tee`
+    /// data sink on a PRIOR line must not mask a later executing `bash` heredoc
+    /// body. Heredoc target resolution is bounded to the heredoc's own physical
+    /// line, so the target here is `bash` (executing), not `cat` (data sink).
+    #[test]
+    fn data_sink_mask_does_not_leak_across_lines() {
+        let rmrf = format!("{}{}{}", "rm", " -", "rf");
+
+        let c = format!("cat notes.txt\nbash <<EOF\n{rmrf} /important\nEOF");
+        let m = mask_non_executing_heredocs(&c);
+        assert!(
+            m.contains(&rmrf),
+            "cat on a prior line must NOT mask a later bash heredoc body: {m:?}"
+        );
+
+        // Control: cat with its OWN heredoc on the same line is still masked.
+        let c2 = format!("cat <<EOF\n{rmrf} /important\nEOF");
+        let m2 = mask_non_executing_heredocs(&c2);
+        assert!(
+            !m2.contains(&rmrf),
+            "cat's own same-line heredoc body should still be masked: {m2:?}"
+        );
     }
 }

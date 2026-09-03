@@ -2000,6 +2000,13 @@ fn evaluate_heredoc(
             .as_ref()
             .is_some_and(|cmd| crate::heredoc::is_non_executing_heredoc_command(cmd))
             && !crate::heredoc::heredoc_output_reaches_executor(command, content.byte_range.start)
+            // The THIRD reader of this predicate triple, and the one the binary
+            // actually answers with for here-strings. `mask_non_executing_heredocs`
+            // is not the oracle here: a here-string's content reaches the matcher
+            // through extraction, not through the masked command text, so a fix
+            // applied only at the masking sites left `{ cat <<<'...'; } | bash`
+            // ALLOWing while its unit test passed. `.agent-config-41wu8`.
+            && !crate::heredoc::compound_output_reaches_executor(command, content.byte_range.end)
             && !crate::heredoc::heredoc_substitution_result_is_executed(
                 command,
                 content.byte_range.start,
