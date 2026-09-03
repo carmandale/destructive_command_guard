@@ -1503,13 +1503,41 @@ fn extract_heredoc_target_command(command: &str, heredoc_start: usize) -> Option
     // the operator.
     let tokens = tokenize_backwards(trimmed);
 
+    // A bare redirection OPERATOR takes the NEXT token as its target, so that
+    // token is a filename and not the command word either.
+    let mut expect_redirect_target = false;
+
     for token in tokens.iter().rev() {
+        if expect_redirect_target {
+            expect_redirect_target = false;
+            continue;
+        }
+
         if is_shell_env_assignment(token) {
             continue;
         }
 
         // Skip flags
         if token.starts_with('-') {
+            continue;
+        }
+
+        // A reserved word occupies the first token of a simple command without
+        // being its command word. `{ cat <<'EOF' ...; }` and `if true; then cat
+        // <<'EOF' ...` own their heredoc with `cat`; resolving the receiver to
+        // `{` or `then` made is_non_executing_heredoc_command false, and a pure
+        // data body was handed to every rule in every pack. Same root cause as
+        // the substitution scanner's COMMAND_FOLLOWS skip, on the false-positive
+        // side; the list is shared so the two readers cannot drift apart.
+        if word_matches(COMMAND_FOLLOWS, token) {
+            continue;
+        }
+
+        // A redirection may legally precede the command word: `>out cat <<'EOF'`.
+        // `>/dev/null` was already skipped further down by the file-path branch,
+        // which is why only the slash-free spellings ever reached the matcher.
+        if is_redirection_token(token) {
+            expect_redirect_target = is_bare_redirection_operator(token);
             continue;
         }
 
@@ -1866,6 +1894,70 @@ pub fn heredoc_output_reaches_executor(command: &str, heredoc_start: usize) -> b
     false
 }
 
+/// A compound command's pipeline applies to the heredoc body inside it.
+///
+/// `heredoc_output_reaches_executor` scans the heredoc's OWN line and stops at
+/// the newline, because the body starts there. That is right for
+/// `cat <<'EOF' | bash`, and blind to
+///
+/// ```text
+/// { cat <<'EOF'
+/// <destructive text>
+/// EOF
+/// } | bash
+/// ```
+///
+/// where the pipe belongs to the GROUP and the body still reaches `bash`. Same
+/// for `( ... ) | sh` and `if ...; then ... fi | sh`. All three are valid shell
+/// (`bash -n`); the `; }` spelling is not, which is why the shape hid for so
+/// long behind test cases that could never run.
+///
+/// Only a CLOSING token continues the scan, and that restriction is the whole
+/// safety argument. `cat <<'EOF' ... EOF` followed by an unrelated `ls | wc -l`
+/// is a separate command whose pipeline has nothing to do with this body;
+/// resuming the executor scan there would invent a false positive of exactly the
+/// kind this file exists to remove.
+#[must_use]
+pub fn compound_output_reaches_executor(command: &str, body_end: usize) -> bool {
+    /// The word forms. `}` and `)` are punctuation and handled above.
+    const CLOSERS: &[&str] = &["fi", "done", "esac"];
+
+    let b = command.as_bytes();
+    let mut i = body_end;
+    let mut closed_a_compound = false;
+
+    loop {
+        while i < b.len() && (b[i].is_ascii_whitespace() || b[i] == b';') {
+            i += 1;
+        }
+        if i >= b.len() {
+            return false;
+        }
+        if b[i] == b'}' || b[i] == b')' {
+            i += 1;
+            closed_a_compound = true;
+            continue;
+        }
+        let start = i;
+        while i < b.len() && !b[i].is_ascii_whitespace() && !matches!(b[i], b';' | b'|' | b'&') {
+            i += 1;
+        }
+        if start == i {
+            break;
+        }
+        // `get` rather than `[..]`: a panic here takes the whole hook down and
+        // fails OPEN (`.agent-config-dnsgm`).
+        if command.get(start..i).is_some_and(|w| CLOSERS.contains(&w)) {
+            closed_a_compound = true;
+            continue;
+        }
+        i = start;
+        break;
+    }
+
+    closed_a_compound && heredoc_output_reaches_executor(command, i)
+}
+
 /// Index just past the `)` matching the `(` at `open`, or the end of input.
 fn skip_balanced_paren(b: &[u8], open: usize) -> usize {
     let mut depth = 0usize;
@@ -1999,8 +2091,19 @@ const SHELL_INTERPRETERS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "mksh"
 /// `for`, `select` and `case` are deliberately absent: a NAME follows those, not
 /// a command, so `case $(cat <<'EOF' ...) in` must NOT be read as command
 /// position. Skipping them would turn an argument into an executed command.
+///
+/// `{` is here because it is a reserved word a command follows by exactly this
+/// definition: `{ cat <<'EOF'` runs `cat`. Note that unlike the other nine
+/// entries it has ONE reader, not two: the substitution scanner consumes the
+/// `{` byte in its group-push arm before any word accumulation, so `word == "{"`
+/// never reaches the COMMAND_FOLLOWS check there. It lives here anyway rather
+/// than in a second list at `extract_heredoc_target_command`, because a
+/// one-entry list beside a ten-entry list of the same kind is the duplication
+/// this const exists to avoid -- but do not go looking for scanner-side
+/// behaviour from it. `(` is absent because it is a command SEPARATOR to both
+/// readers: `tokenize_backwards` stops on it and the scanner tracks it as depth.
 const COMMAND_FOLLOWS: &[&str] = &[
-    "if", "then", "elif", "else", "while", "until", "do", "!", "time",
+    "if", "then", "elif", "else", "while", "until", "do", "!", "time", "{",
 ];
 
 /// Declaration builtins. `export V=$( )` is still an assignment, so the capture
@@ -2526,6 +2629,15 @@ pub fn mask_non_executing_heredocs(command: &str) -> std::borrow::Cow<'_, str> {
                     if let Some((content_start, content_end, _single_quoted)) =
                         find_herestring_content_bounds(command, heredoc_start + 3)
                             .filter(|bounds| bounds.2)
+                            // A here-string sits on ONE line, so its enclosing
+                            // group's `; } | bash` is on that same line -- and
+                            // `heredoc_output_reaches_executor` above stops at
+                            // the `;`, which is the group's separator and not
+                            // this pipeline's end. `bounds.1` is already past
+                            // the closing quote.
+                            .filter(|bounds| {
+                                !compound_output_reaches_executor(command, bounds.1)
+                            })
                     {
                         // Copy up to the content start (includes <<<)
                         if result.is_empty() {
@@ -2585,6 +2697,7 @@ pub fn mask_non_executing_heredocs(command: &str) -> std::borrow::Cow<'_, str> {
                     let body_start = heredoc_start + 2 + body_start_offset;
                     if let Some(body_end) =
                         find_heredoc_terminator(command, body_start, &delimiter, heredoc_type)
+                            .filter(|end| !compound_output_reaches_executor(command, *end))
                     {
                         // Mask the heredoc body while preserving length and newlines.
                         if result.is_empty() {
