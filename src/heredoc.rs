@@ -1828,13 +1828,39 @@ pub fn heredoc_output_reaches_executor(command: &str, heredoc_start: usize) -> b
     while i < b.len() {
         match b[i] {
             // A quoted span cannot hold an operator: skip it whole.
+            //
+            // Two things this arm has to get right, and got wrong in both
+            // directions (`.agent-config-tuw7m` seams 1 and 2).
+            //
+            // A backslash inside `" "` escapes the next byte, so `2>"a\"b"` is
+            // ONE span. Skipping to the next bare quote ended it at the escaped
+            // one, which opened a second span on the closing quote that never
+            // closed -- and the scan then ran off the end past a live `| bash`
+            // reporting "no executor downstream". The same misread in the other
+            // direction made `2>"a\"b|bash"` a DENY, reading a `|` inside a file
+            // name as a pipeline. The substitution scanner handles `\` BEFORE
+            // its quote arms; this one did not, and that asymmetry was the bug.
+            // Inside `' '` there are no escapes at all, so the backslash is
+            // literal there and honouring it would run past the real end.
+            //
+            // An UNTERMINATED span means the scan began inside one, because a
+            // command that reaches the executor has balanced quotes. That is not
+            // hypothetical: `compound_output_reaches_executor` resumes this scan
+            // wherever the compound's closer left it, and for
+            // `echo "$(cat <<'EOF' ... EOF)" | bash` that is the closing quote of
+            // `echo`'s argument. Treating it as an OPENING quote swallowed
+            // `| bash` whole. So a quote with no partner closes the span the scan
+            // started inside, and scanning continues after it.
             b'\'' | b'"' => {
                 let quote = b[i];
-                i += 1;
-                while i < b.len() && b[i] != quote {
-                    i += 1;
+                let mut j = i + 1;
+                while j < b.len() && b[j] != quote {
+                    if quote == b'"' && b[j] == b'\\' {
+                        j += 1;
+                    }
+                    j += 1;
                 }
-                i += 1;
+                i = if j < b.len() { j + 1 } else { i + 1 };
             }
             // A substitution is its own command list. The `;` in `$(true;)` and
             // the `|` in `` `a | b` `` belong to that inner list, not to this
@@ -1917,6 +1943,16 @@ pub fn heredoc_output_reaches_executor(command: &str, heredoc_start: usize) -> b
 /// is a separate command whose pipeline has nothing to do with this body;
 /// resuming the executor scan there would invent a false positive of exactly the
 /// kind this file exists to remove.
+///
+/// This is also where the SUBSTITUTION gate hands off. That gate answers "does a
+/// substitution splice the body into something that runs it", and stops there;
+/// it says nothing about what the ENCLOSING command then does with its own
+/// stdout. In `echo "$(cat <<'EOF' ... EOF)" | bash` the enclosing word is
+/// `echo`, which runs nothing, and `bash` still gets the body. The `)` is a
+/// closing token, so the resume already reached it -- what did not was
+/// `heredoc_output_reaches_executor`, which met `echo`'s closing quote and read
+/// it as the START of a span. Composition is not a third gate: it is these two
+/// agreeing about where one ends and the other begins (`.agent-config-tuw7m`).
 #[must_use]
 pub fn compound_output_reaches_executor(command: &str, body_end: usize) -> bool {
     /// The word forms. `}` and `)` are punctuation and handled above.
@@ -1925,9 +1961,21 @@ pub fn compound_output_reaches_executor(command: &str, body_end: usize) -> bool 
     let b = command.as_bytes();
     let mut i = body_end;
     let mut closed_a_compound = false;
+    // A `;` between the terminator and a closer is the compound's own
+    // punctuation and has to be skipped. A `;` AFTER the last closer is a
+    // command separator, and the pipeline on its far side belongs to a
+    // different command: `V=$(cat <<'EOF' ... EOF); printf %s "$VERBOSE" | sh`
+    // pipes a variable this body never touched into a shell, and resuming the
+    // scan there DENIED it (`.agent-config-tuw7m`). `heredoc_output_reaches_executor`
+    // already ends its own scan at a `;` for exactly this reason; the resume
+    // point has to honour the same boundary. The capture route is not lost by
+    // stopping here -- `captured_variable_is_executed` owns it, and owns it by
+    // asking where the VALUE goes rather than what follows the paren.
+    let mut separator_since_closer = false;
 
     loop {
         while i < b.len() && (b[i].is_ascii_whitespace() || b[i] == b';') {
+            separator_since_closer |= b[i] == b';';
             i += 1;
         }
         if i >= b.len() {
@@ -1936,6 +1984,7 @@ pub fn compound_output_reaches_executor(command: &str, body_end: usize) -> bool 
         if b[i] == b'}' || b[i] == b')' {
             i += 1;
             closed_a_compound = true;
+            separator_since_closer = false;
             continue;
         }
         let start = i;
@@ -1949,13 +1998,14 @@ pub fn compound_output_reaches_executor(command: &str, body_end: usize) -> bool 
         // fails OPEN (`.agent-config-dnsgm`).
         if command.get(start..i).is_some_and(|w| CLOSERS.contains(&w)) {
             closed_a_compound = true;
+            separator_since_closer = false;
             continue;
         }
         i = start;
         break;
     }
 
-    closed_a_compound && heredoc_output_reaches_executor(command, i)
+    closed_a_compound && !separator_since_closer && heredoc_output_reaches_executor(command, i)
 }
 
 /// Index just past the `)` matching the `(` at `open`, or the end of input.
@@ -2536,7 +2586,7 @@ pub fn heredoc_substitution_result_is_executed(command: &str, heredoc_start: usi
 /// `. "$V"` is not covered here: a bare `.` is too common a token in a
 /// remainder full of file names to test for this way. It is covered in the
 /// direct spelling, `. <(cat <<'EOF' ...)`.
-/// Is `name` referenced as a variable anywhere in `rest`?
+/// Where is `name` referenced as a variable in `rest`?
 ///
 /// Substring matching on `$NAME` was wrong in both directions. It missed every
 /// expansion with a modifier -- `${V:-}`, `${V^^}`, `${V// /}` -- which the cold
@@ -2545,8 +2595,13 @@ pub fn heredoc_substitution_result_is_executed(command: &str, heredoc_start: usi
 ///
 /// So: find a `$`, step over an optional `{`, and require the name to be
 /// followed by something that cannot continue an identifier.
-fn mentions_variable(rest: &str, name: &str) -> bool {
+///
+/// Returns the offset just past each reference, because a reference is also
+/// where the value re-enters the command and the pipeline gate has to pick it
+/// up (see `captured_variable_is_executed`).
+fn variable_mention_ends(rest: &str, name: &str) -> Vec<usize> {
     let b = rest.as_bytes();
+    let mut ends = Vec::new();
     let mut i = 0usize;
     while let Some(pos) = rest[i..].find('$') {
         let at = i + pos + 1;
@@ -2554,16 +2609,17 @@ fn mentions_variable(rest: &str, name: &str) -> bool {
         if rest[start..].starts_with(name) {
             let after = b.get(start + name.len()).copied();
             if !matches!(after, Some(c) if c.is_ascii_alphanumeric() || c == b'_') {
-                return true;
+                ends.push(start + name.len());
             }
         }
         i = at;
     }
-    false
+    ends
 }
 
 fn captured_variable_is_executed(rest: &str, name: &str) -> bool {
-    if !mentions_variable(rest, name) {
+    let mentions = variable_mention_ends(rest, name);
+    if mentions.is_empty() {
         return false;
     }
     // Split on shell word separators only. Splitting on every non-identifier
@@ -2577,7 +2633,20 @@ fn captured_variable_is_executed(rest: &str, name: &str) -> bool {
     if words.iter().any(|w| *w == "eval" || *w == "source") {
         return true;
     }
-    words.iter().any(|w| SHELL_INTERPRETERS.contains(w)) && rest.contains("-c")
+    if words.iter().any(|w| SHELL_INTERPRETERS.contains(w)) && rest.contains("-c") {
+        return true;
+    }
+    // The composition. An expansion puts the captured body back on the command
+    // line, and "where does this output go" is the PIPELINE gate's question, not
+    // a second thing to answer here: `printf %s "$V" | sh` has no `-c` anywhere,
+    // so the `-c` arm above declined and the route was open
+    // (`.agent-config-tuw7m` seam 3). Asking the gate that owns the question is
+    // also what keeps `printf %s "$V" | wc -l` and `br create -d "$V"` allowed --
+    // the data-sink allowlist is already the answer to both, and it stays in one
+    // place instead of being approximated here with a `rest.contains('|')`.
+    mentions
+        .iter()
+        .any(|&end| heredoc_output_reaches_executor(rest, end))
 }
 
 /// Extensions whose file content IS shell, so a shell rule reading a line of it
