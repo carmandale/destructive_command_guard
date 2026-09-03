@@ -502,6 +502,7 @@ pub fn format_denial_message(
     explanation: Option<&str>,
     pack: Option<&str>,
     pattern: Option<&str>,
+    allow_once_code: Option<&str>,
 ) -> String {
     let explain_hint = format_explain_hint(command);
     let rule_id = build_rule_id(pack, pattern);
@@ -516,6 +517,31 @@ pub fn format_denial_message(
         |rule| format!("Rule: {rule}\n\n"),
     );
 
+    // The escape hatch has to be in THIS string. A denial already carries the
+    // code in `allowOnceCode` and in `remediation.allowOnceCommand`, and the
+    // stderr box prints it too — but a client that shows its agent only
+    // `permissionDecisionReason`, and does not surface PreToolUse stderr, leaves
+    // that agent with no code to quote. Measured 2026-09-03 under
+    // `.agent-config-a6jka`: an agent hit a false positive in exactly that
+    // situation. A hatch the caller cannot see is a hatch that does not open,
+    // and what it reaches for instead is rewriting the command until the guard
+    // stops matching — worse than an allow-once, because an allow-once is
+    // recorded, scoped and expiring and an evasion is none of those.
+    //
+    // The runnable command matches `output::denial`; the sentence introducing it
+    // deliberately does not, because this reader cannot see the box that the
+    // "To allow once:" label sits in.
+    //
+    // An empty code is treated as no code. `dcg allow-once ` with nothing after
+    // it is not a runnable command, and it would render byte-identical to a real
+    // code under the golden mask — so the guards would go on passing while the
+    // hatch line said nothing usable.
+    let allow_once_line = allow_once_code
+        .filter(|code| !code.is_empty())
+        .map_or_else(String::new, |code| {
+            format!("If this is a false positive: dcg allow-once {code}\n\n")
+        });
+
     format!(
         "BLOCKED by dcg\n\n\
          {explain_hint}\n\n\
@@ -523,6 +549,7 @@ pub fn format_denial_message(
          {explanation_block}\n\n\
          {rule_line}\
          Command: {command}\n\n\
+         {allow_once_line}\
          If this operation is truly needed, ask the user for explicit \
          permission and have them run the command manually."
     )
@@ -716,6 +743,19 @@ fn get_contextual_suggestion(command: &str) -> Option<&'static str> {
 }
 
 /// Output a denial response to stdout (JSON for hook protocol).
+///
+/// `allow_once_suffices` says whether a bare `dcg allow-once <code>` would
+/// actually clear THIS denial. It is false for a config blocklist entry, which
+/// needs `--force` on top and is the user's own explicit decision rather than a
+/// pattern that might be a false positive. The caller states it because the
+/// caller holds the denial's `MatchSource`; the formatter would otherwise have
+/// to infer it from `pack`/`pattern` both being `None`, which is true of a
+/// config denial today by coincidence rather than by contract.
+///
+/// It gates only the prose. The machine-readable `allowOnceCode` and
+/// `remediation` still carry the code, because the code is real and `--force`
+/// can still redeem it — what must not happen is the guard printing a
+/// suggestion in its own voice that returns an error when run.
 #[cold]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
@@ -731,6 +771,7 @@ pub fn output_denial_for_protocol(
     severity: Option<crate::packs::Severity>,
     confidence: Option<f64>,
     pattern_suggestions: &[PatternSuggestion],
+    allow_once_suffices: bool,
 ) {
     // Print colorful warning to stderr (visible to user)
     let allow_once_code = allow_once.map(|info| info.code.as_str());
@@ -747,7 +788,12 @@ pub fn output_denial_for_protocol(
     );
 
     // Build JSON response for hook protocol (stdout)
-    let message = format_denial_message(command, reason, explanation, pack, pattern);
+    let hatch_code = if allow_once_suffices {
+        allow_once_code
+    } else {
+        None
+    };
+    let message = format_denial_message(command, reason, explanation, pack, pattern, hatch_code);
     let rule_id = build_rule_id(pack, pattern);
     let remediation = allow_once.map(|info| {
         let explanation_text = format_explanation_text(explanation, rule_id.as_deref(), pack);
@@ -834,6 +880,7 @@ pub fn output_denial(
     severity: Option<crate::packs::Severity>,
     confidence: Option<f64>,
     pattern_suggestions: &[PatternSuggestion],
+    allow_once_suffices: bool,
 ) {
     output_denial_for_protocol(
         HookProtocol::ClaudeCompatible,
@@ -847,6 +894,7 @@ pub fn output_denial(
         severity,
         confidence,
         pattern_suggestions,
+        allow_once_suffices,
     );
 }
 
@@ -1206,12 +1254,82 @@ mod tests {
             Some("This is irreversible."),
             Some("core.git"),
             Some("reset-hard"),
+            None,
         );
 
         assert!(message.contains("Reason: destructive"));
         assert!(message.contains("Explanation: This is irreversible."));
         assert!(message.contains("Rule: core.git:reset-hard"));
         assert!(message.contains("Tip: dcg explain"));
+    }
+
+    /// The denial text an agent reads must name the escape hatch.
+    ///
+    /// This string becomes `permissionDecisionReason`, which is all Claude Code
+    /// shows its agent. Without the code here the hatch of AGENTS.md §8 is
+    /// unreachable from the only place the caller looks.
+    #[test]
+    fn test_format_denial_message_carries_the_allow_once_code() {
+        let message = format_denial_message(
+            "git reset --hard",
+            "destructive",
+            None,
+            Some("core.git"),
+            Some("reset-hard"),
+            Some("35836"),
+        );
+
+        assert!(
+            message.contains("dcg allow-once 35836"),
+            "denial text must quote the runnable allow-once command:\n{message}"
+        );
+        // The true-positive route keeps the last word.
+        assert!(
+            message.trim_end().ends_with("run the command manually."),
+            "the manual-permission line must remain last:\n{message}"
+        );
+    }
+
+    /// No code minted, no hatch line — and no dangling placeholder.
+    #[test]
+    fn test_format_denial_message_omits_the_hatch_when_no_code_exists() {
+        let message = format_denial_message(
+            "git reset --hard",
+            "destructive",
+            None,
+            Some("core.git"),
+            Some("reset-hard"),
+            None,
+        );
+
+        assert!(
+            !message.contains("allow-once"),
+            "no code means no allow-once line:\n{message}"
+        );
+    }
+
+    /// An empty code must not render as a hatch line.
+    ///
+    /// `dcg allow-once ` with nothing after it is not runnable, and it renders
+    /// byte-identical to a real code once the golden mask has replaced the
+    /// digits — so without this the guards would stay green over a denial that
+    /// offers the agent nothing. `short_code_from_hash` always returns five
+    /// digits today; this pins the property rather than the current luck.
+    #[test]
+    fn test_format_denial_message_treats_an_empty_code_as_no_code() {
+        let message = format_denial_message(
+            "git reset --hard",
+            "destructive",
+            None,
+            Some("core.git"),
+            Some("reset-hard"),
+            Some(""),
+        );
+
+        assert!(
+            !message.contains("allow-once"),
+            "an empty code must not produce a hatch line:\n{message}"
+        );
     }
 
     #[test]

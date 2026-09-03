@@ -151,6 +151,9 @@ fn deny_unevaluated(
             None,
             None,
             &[],
+            // Not a config blocklist entry — this denial is a budget or parse
+            // failure, which is exactly the case allow-once exists for.
+            true,
         ),
         None => hook::output_denial(
             command,
@@ -163,6 +166,7 @@ fn deny_unevaluated(
             None,
             None,
             &[],
+            true,
         ),
     }
 
@@ -753,6 +757,11 @@ fn main() {
                 info.severity,
                 None, // confidence not yet available in PatternMatch
                 info.suggestions,
+                // A config blocklist entry is the user's own explicit decision,
+                // and a bare `dcg allow-once <code>` refuses it — it needs
+                // `--force`. Do not offer the plain command for a denial it
+                // cannot clear.
+                !matches!(info.source, MatchSource::ConfigOverride),
             );
 
             // Log if configured

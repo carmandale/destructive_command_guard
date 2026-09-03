@@ -61,8 +61,63 @@ fn mask_dynamic_fields(mut json: Value) -> Value {
                     Value::String("dcg allow-once <DYNAMIC>".to_string());
             }
         }
+
+        // The denial reason quotes the same freshly minted code, so it needs the
+        // same mask or every run diffs. Masking it here means the golden pins
+        // the SHAPE of the hatch line and stops pinning the code's value; the
+        // binding — reason text quotes the code that was actually minted — is
+        // pinned by `hook_mode_denial_reason_quotes_the_minted_allow_once_code`
+        // in cli_e2e.rs. Deleting that test leaves this masked and unguarded.
+        if let Some(Value::String(reason)) = hook_output.get("permissionDecisionReason") {
+            let masked = mask_allow_once_code_in_text(reason);
+            hook_output["permissionDecisionReason"] = Value::String(masked);
+        }
     }
     json
+}
+
+/// Replace the code in a `dcg allow-once <code>` occurrence with `<DYNAMIC>`.
+///
+/// Idempotent. Both sides of the comparison go through this: the actual output
+/// carries a fresh code, and the golden file on disk already carries
+/// `<DYNAMIC>`. A version that masked unconditionally turned the golden's
+/// `<DYNAMIC>` into `<DYNAMIC><DYNAMIC>` and failed all three deny goldens
+/// against output that was correct.
+fn mask_allow_once_code_in_text(text: &str) -> String {
+    const NEEDLE: &str = "dcg allow-once ";
+    const MASK: &str = "<DYNAMIC>";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+
+    while let Some(at) = rest.find(NEEDLE) {
+        let (before, after) = rest.split_at(at + NEEDLE.len());
+        out.push_str(before);
+        out.push_str(MASK);
+        if let Some(tail) = after.strip_prefix(MASK) {
+            rest = tail;
+        } else {
+            let code_len = after
+                .find(|c: char| !c.is_ascii_alphanumeric())
+                .unwrap_or(after.len());
+            rest = &after[code_len..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+#[test]
+fn masking_an_allow_once_code_is_idempotent() {
+    let fresh = "run: dcg allow-once 35836\nthen stop.";
+    let once = mask_allow_once_code_in_text(fresh);
+    assert_eq!(once, "run: dcg allow-once <DYNAMIC>\nthen stop.");
+    assert_eq!(
+        mask_allow_once_code_in_text(&once),
+        once,
+        "masking an already-masked string must not change it -- both sides of \
+         the golden comparison are masked, and the golden on disk is already \
+         masked"
+    );
 }
 
 /// Compare JSON output against a golden file.

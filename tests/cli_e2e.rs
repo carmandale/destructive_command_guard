@@ -1578,6 +1578,97 @@ mod hook_mode_tests {
         );
     }
 
+    /// A real deny must hand the agent a code it can actually run.
+    ///
+    /// `permissionDecisionReason` is the whole of what Claude Code shows its
+    /// agent — sibling JSON fields are not rendered and PreToolUse stderr is
+    /// not surfaced — so a code that lives only in `allowOnceCode` leaves the
+    /// AGENTS.md §8 hatch unreachable. Asserting the two agree, rather than
+    /// asserting the text contains the words "allow-once", is what keeps this
+    /// from passing on a hard-coded or stale code.
+    #[test]
+    fn hook_mode_denial_reason_quotes_the_minted_allow_once_code() {
+        let result = run_dcg_hook("git reset --hard");
+        let stdout = result.stdout_str();
+        let json: serde_json::Value =
+            serde_json::from_str(&stdout).expect("deny should emit hook JSON");
+
+        let code = json["hookSpecificOutput"]["allowOnceCode"]
+            .as_str()
+            .expect("a deny must mint an allow-once code");
+        // Assert the code is real BEFORE using it as a needle: an empty code
+        // reduces `contains("dcg allow-once {code}")` to
+        // `contains("dcg allow-once ")`, which the bare prefix satisfies, and
+        // this test would then pass over a denial offering nothing runnable.
+        assert!(
+            !code.is_empty() && code.chars().all(|c| c.is_ascii_alphanumeric()),
+            "the minted code must be a runnable token, got {code:?}"
+        );
+
+        let reason = json["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .expect("a deny must carry a reason");
+
+        assert!(
+            reason.contains(&format!("dcg allow-once {code}")),
+            "the reason an agent reads must quote the code that was minted \
+             ({code}), or the escape hatch is unreachable\nreason:\n{reason}"
+        );
+    }
+
+    /// A config blocklist denial must not offer a command that errors.
+    ///
+    /// `dcg allow-once <code>` refuses a config-block denial — it needs
+    /// `--force` — so printing the plain command in the guard's own voice hands
+    /// the agent a suggestion that fails. The code itself stays in
+    /// `allowOnceCode`, because `--force` can still redeem it; what must not
+    /// appear is the prose offering the bare command.
+    #[test]
+    fn hook_mode_config_block_denial_does_not_offer_the_plain_hatch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_path = temp.path().join("dcg.toml");
+        std::fs::write(
+            &config_path,
+            r"
+[overrides]
+block = [
+  { pattern = '\bmake\s+deploy\b', reason = 'explicit config block' },
+]
+",
+        )
+        .expect("write dcg config");
+
+        let result = run_dcg_hook_in_dir_with_env(
+            temp.path(),
+            "make deploy",
+            &[("DCG_CONFIG", config_path.as_os_str())],
+        );
+
+        let stdout = result.stdout_str();
+        let json: serde_json::Value =
+            serde_json::from_str(&stdout).expect("config block should emit hook JSON");
+        let hook_output = &json["hookSpecificOutput"];
+
+        assert_eq!(
+            hook_output["permissionDecision"].as_str(),
+            Some("deny"),
+            "the config block must still deny\nstdout:\n{stdout}"
+        );
+
+        let reason = hook_output["permissionDecisionReason"]
+            .as_str()
+            .expect("a deny must carry a reason");
+        assert!(
+            !reason.contains("dcg allow-once"),
+            "a config-block denial must not offer the plain allow-once command, \
+             which errors with 're-run with --force'\nreason:\n{reason}"
+        );
+        assert!(
+            reason.contains("explicit config block"),
+            "the config block's own reason must survive\nreason:\n{reason}"
+        );
+    }
+
     #[test]
     fn hook_mode_allow_once_does_not_override_config_block_without_force() {
         let temp = tempfile::tempdir().expect("tempdir");

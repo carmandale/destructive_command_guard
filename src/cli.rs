@@ -9328,30 +9328,10 @@ fn claude_settings_path() -> std::path::PathBuf {
 
 /// Get the path to dcg config directory.
 ///
-/// Prefers `$XDG_CONFIG_HOME/dcg/`, then XDG-style `~/.config/dcg/` if it exists,
-/// otherwise falls back to the platform-native location. This ensures users can
-/// use `~/.config/dcg/` on all platforms, including macOS where
-/// `dirs::config_dir()` returns `~/Library/Application Support`.
+/// One spelling of this policy, in `crate::config`, so that a file written here
+/// is read from the same place.
 fn config_dir() -> std::path::PathBuf {
-    // Check XDG_CONFIG_HOME first (if set)
-    if let Ok(xdg_home) = std::env::var("XDG_CONFIG_HOME") {
-        if let Some(xdg_home) = crate::config::resolve_config_path_value(&xdg_home, None) {
-            return xdg_home.join("dcg");
-        }
-    }
-
-    // Check XDG-style path next (~/.config/dcg/)
-    if let Some(home) = dirs::home_dir() {
-        let xdg_dir = home.join(".config").join("dcg");
-        if xdg_dir.exists() {
-            return xdg_dir;
-        }
-    }
-
-    // Fall back to platform-native or default to ~/.config/dcg
-    dirs::config_dir()
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"))
-        .join("dcg")
+    crate::config::user_config_dir()
 }
 
 /// Get the path to dcg config file
@@ -11336,7 +11316,7 @@ fn handle_suggest_allowlist_undo(minutes: u32) -> Result<(), Box<dyn std::error:
         ),
         (
             AllowlistLayer::User,
-            dirs::config_dir().map(|d| d.join("dcg").join("allowlist.toml")),
+            Some(config_dir().join("allowlist.toml")),
         ),
     ];
 

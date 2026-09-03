@@ -229,6 +229,39 @@ fn expand_tilde_path(value: &str) -> (PathBuf, bool) {
     (home.join(rest), true)
 }
 
+/// The dcg user config directory.
+///
+/// Prefers `$XDG_CONFIG_HOME/dcg/`, then XDG-style `~/.config/dcg/` if it
+/// exists, otherwise the platform-native location. Users can therefore keep
+/// `~/.config/dcg/` on every platform, including macOS where
+/// `dirs::config_dir()` returns `~/Library/Application Support`.
+///
+/// This lives here, and not beside one of its callers, because it is a policy
+/// every reader and writer of a user-level dcg file has to agree on. It did not
+/// used to: `dcg allowlist add --user` wrote through this resolution while
+/// `allowlist::load_default_allowlists` read through `dirs::home_dir()` alone,
+/// so a user with `XDG_CONFIG_HOME` set had their allowlist written to one file
+/// and read from another and the entry simply never took effect
+/// (`.agent-config-0kt9v`). One function is what keeps the two ends together.
+pub(crate) fn user_config_dir() -> PathBuf {
+    if let Ok(xdg_home) = env::var("XDG_CONFIG_HOME") {
+        if let Some(xdg_home) = resolve_config_path_value(&xdg_home, None) {
+            return xdg_home.join("dcg");
+        }
+    }
+
+    if let Some(home) = dirs::home_dir() {
+        let xdg_dir = home.join(".config").join("dcg");
+        if xdg_dir.exists() {
+            return xdg_dir;
+        }
+    }
+
+    dirs::config_dir()
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"))
+        .join("dcg")
+}
+
 /// Resolve a config path value, expanding `~` and resolving relative paths.
 ///
 /// Returns None when the value is empty/whitespace.

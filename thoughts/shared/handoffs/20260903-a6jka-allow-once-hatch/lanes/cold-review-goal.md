@@ -1,0 +1,1 @@
+Cold-review the uncommitted diff in /Users/dalecarman/dev/destructive_command_guard against the brief you were given, and append your findings and a ## VERDICT section to thoughts/shared/handoffs/20260903-a6jka-allow-once-hatch/lanes/cold-review.md in that repo. Do not edit src/, tests/, or golden files; do not commit, push, stash, reset, or checkout.

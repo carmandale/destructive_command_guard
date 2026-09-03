@@ -150,12 +150,48 @@ impl AllowOnceEntry {
         self.consumed_at.is_some()
     }
 
+    /// Whether this entry's scope covers `cwd`.
+    ///
+    /// Compares the directories the two paths name, not the strings. A stored
+    /// `scope_path` carries whatever spelling its writer used, while
+    /// `std::env::current_dir` is `getcwd(3)` and is already symlink-resolved,
+    /// so the same directory can arrive spelled two ways. On macOS every
+    /// `TMPDIR` path is such a pair — `/var/folders/..` and
+    /// `/private/var/folders/..` — and the string comparison denied there with
+    /// no diagnostic at all. Measured under `.agent-config-a6jka`: with the
+    /// entry unchanged in every other respect, the `/var` spelling denied and
+    /// the `/private/var` spelling allowed.
+    ///
+    /// **Scope of the bug, stated honestly.** Every writer in dcg itself
+    /// derives `scope_path` from `current_dir()`
+    /// (`main.rs` → `record_block` → `handle_allow_once_command`), so both
+    /// sides were already canonical and `dcg allow-once` did open the hatch
+    /// before this change — verified end to end on the pre-change binary,
+    /// through a symlinked directory, under `.agent-config-a6jka`. What this
+    /// fixes is the comparison itself, for entries written by an older binary,
+    /// by hand, or by anything else holding the `pub` `scope_path` field. It is
+    /// a correctness fix with no reproduced production symptom, which is a
+    /// weaker claim than "the hatch does not open" and the one the evidence
+    /// supports.
+    ///
+    /// Resolution is all-or-nothing on purpose: if either side fails to
+    /// canonicalize, both are compared as given. Mixing a resolved path with an
+    /// unresolved one would compare two different spellings and could refuse a
+    /// pair the old string comparison accepted — on Windows `canonicalize`
+    /// returns a `\\?\`-prefixed path where `current_dir` does not, so the
+    /// mixed case is reachable there. Falling back together keeps the guarantee
+    /// one-directional: this can make more spellings of a directory match,
+    /// never fewer.
     #[must_use]
     pub fn matches_scope(&self, cwd: &Path) -> bool {
-        let scope_path = Path::new(&self.scope_path);
+        let scope_raw = Path::new(&self.scope_path);
+        let (scope_path, cwd) = match (scope_raw.canonicalize(), cwd.canonicalize()) {
+            (Ok(scope), Ok(here)) => (scope, here),
+            _ => (scope_raw.to_path_buf(), cwd.to_path_buf()),
+        };
         match self.scope_kind {
             AllowOnceScopeKind::Cwd => cwd == scope_path,
-            AllowOnceScopeKind::Project => cwd.starts_with(scope_path),
+            AllowOnceScopeKind::Project => cwd.starts_with(&scope_path),
         }
     }
 }
@@ -1415,6 +1451,121 @@ mod tests {
             mode: crate::logging::RedactionMode::Arguments,
             max_argument_len: 8,
         }
+    }
+
+    fn scoped_entry(scope_kind: AllowOnceScopeKind, scope_path: &str) -> AllowOnceEntry {
+        AllowOnceEntry {
+            schema_version: SCHEMA_VERSION,
+            source_short_code: "12345".to_string(),
+            source_full_hash: "0".repeat(64),
+            created_at: "2099-01-01T00:00:00Z".to_string(),
+            expires_at: "2099-01-02T00:00:00Z".to_string(),
+            scope_kind,
+            scope_path: scope_path.to_string(),
+            command_raw: "git reset --hard".to_string(),
+            command_redacted: "git reset --hard".to_string(),
+            reason: "synthetic".to_string(),
+            single_use: false,
+            consumed_at: None,
+            force_allow_config: false,
+        }
+    }
+
+    /// A scope and a CWD that name one directory must match through a symlink.
+    ///
+    /// `std::env::current_dir` is `getcwd(3)` and hands back a path with every
+    /// symlink already resolved, while a stored `scope_path` carries the
+    /// spelling its writer used. String comparison denies that pair, silently,
+    /// and the AGENTS.md §8 escape hatch does not open.
+    ///
+    /// The symlink is built here rather than inherited from `TMPDIR` on
+    /// purpose: on macOS every temp path is such a pair (`/var/folders/..` vs
+    /// `/private/var/folders/..`) and on Linux none is, so a test that leaned
+    /// on the platform would pass on Linux with the bug still present.
+    #[test]
+    #[cfg(unix)]
+    fn test_matches_scope_sees_through_a_symlinked_spelling() {
+        let dir = TempDir::new().expect("tempdir");
+        let real = dir.path().join("real");
+        let link = dir.path().join("link");
+        std::fs::create_dir(&real).expect("create real dir");
+        std::os::unix::fs::symlink(&real, &link).expect("create symlink");
+
+        // Both spellings name the same directory, and differ as strings.
+        assert_ne!(real, link);
+
+        let via_link = scoped_entry(AllowOnceScopeKind::Cwd, &link.to_string_lossy());
+        assert!(
+            via_link.matches_scope(&real),
+            "a cwd-scoped entry written through {} must cover {}",
+            link.display(),
+            real.display()
+        );
+
+        let via_real = scoped_entry(AllowOnceScopeKind::Cwd, &real.to_string_lossy());
+        assert!(
+            via_real.matches_scope(&link),
+            "a cwd-scoped entry written through {} must cover {}",
+            real.display(),
+            link.display()
+        );
+
+        let nested = real.join("sub");
+        std::fs::create_dir(&nested).expect("create nested dir");
+        let project = scoped_entry(AllowOnceScopeKind::Project, &link.to_string_lossy());
+        assert!(
+            project.matches_scope(&nested),
+            "a project-scoped entry written through {} must cover {}",
+            link.display(),
+            nested.display()
+        );
+    }
+
+    /// Resolving must not turn a neighbour into a match.
+    ///
+    /// The fix widens which spellings match; it must not widen which
+    /// directories do.
+    #[test]
+    fn test_matches_scope_still_refuses_a_different_directory() {
+        let dir = TempDir::new().expect("tempdir");
+        let mine = dir.path().join("mine");
+        let theirs = dir.path().join("theirs");
+        std::fs::create_dir(&mine).expect("create mine");
+        std::fs::create_dir(&theirs).expect("create theirs");
+
+        let entry = scoped_entry(AllowOnceScopeKind::Cwd, &mine.to_string_lossy());
+        assert!(
+            !entry.matches_scope(&theirs),
+            "a cwd-scoped entry for {} must not cover {}",
+            mine.display(),
+            theirs.display()
+        );
+
+        // A sibling whose name merely extends the scope's is not inside it.
+        let project = scoped_entry(AllowOnceScopeKind::Project, &mine.to_string_lossy());
+        let lookalike = dir.path().join("mine-too");
+        std::fs::create_dir(&lookalike).expect("create lookalike");
+        assert!(
+            !project.matches_scope(&lookalike),
+            "a project-scoped entry for {} must not cover {}",
+            mine.display(),
+            lookalike.display()
+        );
+    }
+
+    /// An unresolvable scope keeps the old string behaviour.
+    ///
+    /// `matches_scope` falls back to the paths as given, so an entry whose
+    /// directory has since been removed still matches an identical spelling
+    /// rather than silently ceasing to.
+    #[test]
+    fn test_matches_scope_falls_back_when_the_path_is_gone() {
+        let missing = "/nonexistent-a6jka/gone";
+        let entry = scoped_entry(AllowOnceScopeKind::Cwd, missing);
+        assert!(
+            entry.matches_scope(Path::new(missing)),
+            "an identical spelling must still match when neither side resolves"
+        );
     }
 
     /// Below PRUNE_THRESHOLD_BYTES a denial must be a pure append.
