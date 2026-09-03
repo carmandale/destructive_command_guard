@@ -1675,6 +1675,62 @@ fn tokenize_backwards(s: &str) -> Vec<String> {
 
 /// Commands that do NOT execute their stdin/heredoc content as code.
 /// Heredocs passed to these commands are DATA, not executable scripts.
+///
+/// MEMBERSHIP IS UNCONDITIONAL, AND THAT IS THE WHOLE POINT. `j6ha9` chose an
+/// allowlist over a denylist because "a spelling nobody thought of cannot
+/// defeat it" -- an argument that holds only while every member is inert under
+/// EVERY flag and EVERY program its user can hand it. A member that is inert
+/// only in its common spelling silently converts the allowlist back into a
+/// denylist over the spellings somebody happened to imagine. So the admission
+/// test is not "is this usually a data sink" but "can this, under any
+/// invocation, execute what arrives on its stdin".
+///
+/// WHAT THIS LIST DOES NOT CLAIM. It says nothing about where the body GOES.
+/// `nc`, `netcat`, `curl`, `wget`, `mail` and `sendmail` are members and they
+/// all move the body off this machine; `tee`, `dd` and `split` write it to
+/// disk. Neither is a contradiction, because dcg guards against DESTRUCTION,
+/// not disclosure -- its only exfiltration rules are domain-specific pack rules
+/// (redis `slaveof`, dns `AXFR`), and there is no general data-leak model for
+/// this gate to feed. The write-then-run hazard those file sinks do create is
+/// held by `heredoc_body_sinks_into_shell_script`, a separate veto, precisely
+/// so that membership here stays a question about execution alone.
+///
+/// AUDITED 2026-09-03 (`.agent-config-zbzox`) against that admission test, with
+/// a positive control on every probe. `awk` FAILED and was removed. Everything
+/// else was measured inert on this fleet:
+///
+/// * `sed` -- `sed -f -` really does take its script from stdin, but the BSD
+///   sed on this fleet has no execute verb (`invalid command code e`); GNU
+///   sed's `e` would execute, and no GNU sed is installed under the name `sed`.
+///   If one ever is, sed becomes `awk` and must come out.
+/// * `jq` -- `jq -f -` takes its program from stdin, and jq 1.8.1 has no
+///   `system` builtin at all, so a jq program cannot reach a shell.
+/// * `less` -- inert with stdin piped, with and without `LESSOPEN` set; its
+///   `!` escape needs a terminal a pipeline stage does not have.
+/// * `split --filter` and `sort --compress-program` do execute a command, but
+///   they take it from ARGV, never from stdin, and neither flag exists in the
+///   BSD builds here.
+/// * `tee`/`dd` write the body without executing it -- see the veto above.
+///
+/// WHY `awk` IS NOT HERE, and cannot be readmitted by narrowing a flag. It
+/// executes stdin as code in two independent ways, and only the first looks
+/// like a flag:
+///
+///   `cat <<'EOF' | awk -f -`          body IS the awk program
+///   `awk -f - <<'EOF'`                same, as the direct receiver
+///   `cat <<'EOF' | awk '{system($0)}' program is in ARGV; the BODY is data
+///                                      that the program executes, line by line
+///
+/// The third form carries no flag to test. Catching it would mean parsing the
+/// awk program for `system()`, a pipe to a shell, and `print | "cmd"` -- a
+/// bespoke parser to defend one allowlist row, which is the trade AGENTS.md 13
+/// exists to refuse. Removing the row is smaller and it is total.
+///
+/// Priced before it was chosen, on spec 333's two corpora (1,191 heredoc rows
+/// and 18,723 real bash invocations): the executing spellings appear ZERO
+/// times, so nothing real is being defended by keeping `awk`, while `awk` sits
+/// near a heredoc in 11 and 19 rows respectively -- the cost of removal, and it
+/// is paid in false positives on data, never in a missed destruction.
 const NON_EXECUTING_HEREDOC_COMMANDS: &[&str] = &[
     // Text output commands
     "cat",
@@ -1690,7 +1746,6 @@ const NON_EXECUTING_HEREDOC_COMMANDS: &[&str] = &[
     "egrep",
     "fgrep",
     "sed",
-    "awk",
     "cut",
     "sort",
     "uniq",
@@ -4972,6 +5027,56 @@ fi"#;
         assert!(
             !m2.contains(&rmrf),
             "cat's own same-line heredoc body should still be masked: {m2:?}"
+        );
+    }
+
+    /// `.agent-config-zbzox` — the arm for removing `awk` from
+    /// `NON_EXECUTING_HEREDOC_COMMANDS`. All three spellings below were VERIFIED
+    /// to really execute on macOS awk 20200816 with a positive control, not
+    /// asserted: each created its marker file. While `awk` was a member, all
+    /// three masked their body out of every pack in every layer.
+    ///
+    /// The third case is the one that decides the SHAPE of the fix. Its awk
+    /// program sits in ARGV, so no flag test can separate it from the benign
+    /// `awk '{print $1}'` — which is why `awk` had to be removed outright rather
+    /// than narrowed. If someone later "restores" `awk` behind a `-f -` check,
+    /// that case goes red and says why.
+    #[test]
+    fn awk_executes_its_stdin_so_its_heredoc_body_is_not_masked_zbzox() {
+        let rmrf = format!("{}{}{}", "rm", " -", "rf");
+
+        // 1. Direct receiver: the body IS the awk program.
+        let c1 = format!("awk -f - <<'EOF'\nBEGIN{{system(\"{rmrf} /important\")}}\nEOF");
+        let m1 = mask_non_executing_heredocs(&c1);
+        assert!(
+            m1.contains(&rmrf),
+            "`awk -f -` executes its stdin; body must stay visible: {m1:?}"
+        );
+
+        // 2. Downstream stage: cat is the receiver, awk executes what it is piped.
+        let c2 = format!("cat <<'EOF' | awk -f -\nBEGIN{{system(\"{rmrf} /important\")}}\nEOF");
+        let m2 = mask_non_executing_heredocs(&c2);
+        assert!(
+            m2.contains(&rmrf),
+            "`| awk -f -` executes the piped body; it must stay visible: {m2:?}"
+        );
+
+        // 3. Program in ARGV, body is DATA the program executes line by line.
+        //    No flag distinguishes this from a benign one-liner.
+        let c3 = format!("cat <<'EOF' | awk '{{system($0)}}'\n{rmrf} /important\nEOF");
+        let m3 = mask_non_executing_heredocs(&c3);
+        assert!(
+            m3.contains(&rmrf),
+            "`awk '{{system($0)}}'` executes each body line; it must stay visible: {m3:?}"
+        );
+
+        // Control — the instrument can still mask. Without this, the three
+        // assertions above would also pass if masking were broken entirely.
+        let ctrl = format!("cat <<'EOF'\n{rmrf} /important\nEOF");
+        let mc = mask_non_executing_heredocs(&ctrl);
+        assert!(
+            !mc.contains(&rmrf),
+            "control: a plain cat heredoc body must still be masked: {mc:?}"
         );
     }
 }
