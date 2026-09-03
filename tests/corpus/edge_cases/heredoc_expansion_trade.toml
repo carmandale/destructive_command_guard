@@ -1,0 +1,78 @@
+# Edge cases: the unquoted-delimiter trade, pinned rather than deleted
+#
+# Every row here is the exact twin of a row in
+# tests/corpus/false_positives/heredoc_data.toml, differing only in that its
+# delimiter is NOT quoted. Each is DENIED, and that is deliberate.
+#
+# WHY. Spec 333 / .agent-config-u06z masks a heredoc body only when the
+# delimiter is quoted. An unquoted delimiter is expanded by the outer shell
+# BEFORE the data sink receives it, so a command substitution in the body really
+# runs — `cat <<EOF` with `$(rm -rf /)` inside executes it, and cat never sees
+# the difference. Gating on the delimiter covers every substitution spelling by
+# construction, dollar-paren and backtick alike; upstream v0.13.9 enumerated
+# spellings instead and missed backticks.
+#
+# u06z-replay-summary.md rules that denying an unquoted heredoc carrying a
+# LITERAL destructive body is a false positive BY CONSTRUCTION and accepted:
+# 0 of 92 safe-class corpus rows are unquoted-only, so the trade costs nothing
+# measurable. These rows are that ruling, in the corpus, where the golden and
+# regression oracles can see it.
+#
+# THESE ROWS EXIST SO THE DELETION IS NOT SILENT. Without them, quoting the
+# false-positive file would have removed the only corpus coverage of the
+# unquoted path, and re-masking unquoted bodies — reopening what u06z closed —
+# would turn nothing red. Filed as .agent-config-izbto.
+#
+# If you are changing this, change u06z-replay-summary.md and re-measure the
+# safe-class corpus first.
+
+# ============================================================================
+# The heredoc gate: unquoted delimiter, body stays visible, command denies
+# ============================================================================
+
+[[case]]
+description = "cat heredoc with an UNQUOTED delimiter is expanded before cat reads it"
+command = "cat <<EOF\nrm -rf /home/user\nEOF"
+expected = "deny"
+
+[[case]]
+description = "tee heredoc with an UNQUOTED delimiter is expanded before tee reads it"
+command = "tee /tmp/docs.txt <<EOF\nrm -rf /home/user\nEOF"
+expected = "deny"
+
+[[case]]
+description = "grep heredoc with an UNQUOTED delimiter is expanded before grep reads it"
+command = "grep -n 'rm' <<EOF\nrm -rf /home/user\nEOF"
+expected = "deny"
+
+[[case]]
+description = "tab-stripped heredoc is still gated on the delimiter's quoting"
+command = "cat <<-EOF\n\trm -rf /home/user\n\tEOF"
+expected = "deny"
+
+# The here-string sibling gate has NO row here, on purpose. It masks only the
+# single-quoted form, but a double-quoted here-string still evaluates to ALLOW —
+# measured — because the trigger lands inside a quoted argument and a separate
+# path allows it. A corpus row therefore cannot tell those two mechanisms apart,
+# and writing one as `deny` would have asserted a verdict the build does not
+# give. The gate itself is pinned by `the_here_string_path_is_gated_too` in
+# tests/repro_heredoc_pipe_to_shell.rs, which asserts on the mask directly.
+
+# ============================================================================
+# Not the delimiter at all: awk is not a data sink at any quoting
+#
+# .agent-config-zbzox removed awk from NON_EXECUTING_HEREDOC_COMMANDS because
+# `awk -f -` reads its PROGRAM from stdin and an awk program can call system().
+# The quoted row is the one that matters: it proves the denial here is about the
+# RECEIVER, not about the delimiter gate above.
+# ============================================================================
+
+[[case]]
+description = "awk heredoc is not data even with a quoted delimiter — awk can execute its stdin"
+command = "awk '{print $1}' <<'EOF'\nrm -rf /home/user\nEOF"
+expected = "deny"
+
+[[case]]
+description = "awk heredoc with an unquoted delimiter is denied for both reasons at once"
+command = "awk '{print $1}' <<EOF\nrm -rf /home/user\nEOF"
+expected = "deny"

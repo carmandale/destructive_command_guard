@@ -1,12 +1,27 @@
 # False positives: heredocs to non-executing commands
 #
 # These commands use heredocs to pass DATA to non-executing commands like
-# cat, tee, grep, etc. The heredoc content is not executed as code.
+# cat, tee, grep. The heredoc content is not executed as code.
 #
 # This is a critical false positive category because:
 # - Documentation often contains dangerous command examples
 # - Log/config files may contain dangerous patterns
 # - These are data, not executable code
+#
+# EVERY DELIMITER HERE IS QUOTED, AND THAT IS THE CONTRACT, NOT A STYLE CHOICE.
+# Spec 333 / .agent-config-u06z masks a heredoc body only when the delimiter is
+# quoted (`<<'EOF'`, `<<"EOF"`, `<<-'EOF'`). A quoted delimiter suppresses every
+# expansion, so the body reaches the sink as literal bytes and cannot execute.
+# An UNQUOTED delimiter lets the outer shell expand the body BEFORE the sink
+# receives it, so a command substitution in that body really runs — leaving
+# those bodies visible to the matcher is the whole point of the gate.
+#
+# The unquoted twins of these rows are therefore DENIED, deliberately, and they
+# live in tests/corpus/edge_cases/heredoc_expansion_trade.toml rather than being
+# deleted. This file held them as `allow` until .agent-config-izbto: they were
+# written before the gate and were 17 of the suite's standing reds.
+#
+# The same applies to here-strings, where only the SINGLE-quoted form is masked.
 
 # ============================================================================
 # cat heredocs (text output only)
@@ -14,22 +29,22 @@
 
 [[case]]
 description = "cat heredoc with dangerous-looking rm command is DATA"
-command = "cat <<EOF\nrm -rf /home/user\nEOF"
+command = "cat <<'EOF'\nrm -rf /home/user\nEOF"
 expected = "allow"
 
 [[case]]
 description = "cat heredoc with git reset is DATA"
-command = "cat <<EOF\ngit reset --hard\nEOF"
+command = "cat <<'EOF'\ngit reset --hard\nEOF"
 expected = "allow"
 
 [[case]]
 description = "cat heredoc with multiple dangerous commands is DATA"
-command = "cat <<EOF\nrm -rf /\ngit reset --hard\ndocker system prune -af\nEOF"
+command = "cat <<'EOF'\nrm -rf /\ngit reset --hard\ndocker system prune -af\nEOF"
 expected = "allow"
 
 [[case]]
 description = "cat heredoc with documentation"
-command = "cat <<EOF\n# Dangerous commands to avoid:\n# rm -rf /\n# git reset --hard\nEOF"
+command = "cat <<'EOF'\n# Dangerous commands to avoid:\n# rm -rf /\n# git reset --hard\nEOF"
 expected = "allow"
 
 # ============================================================================
@@ -38,31 +53,31 @@ expected = "allow"
 
 [[case]]
 description = "tee heredoc with dangerous content is DATA"
-command = "tee /tmp/docs.txt <<EOF\nrm -rf /home/user\nEOF"
+command = "tee /tmp/docs.txt <<'EOF'\nrm -rf /home/user\nEOF"
 expected = "allow"
 
 [[case]]
 description = "tee -a heredoc with dangerous content is DATA"
-command = "tee -a /tmp/log.txt <<EOF\ngit reset --hard\nEOF"
+command = "tee -a /tmp/log.txt <<'EOF'\ngit reset --hard\nEOF"
 expected = "allow"
 
 # ============================================================================
-# grep/sed/awk heredocs (text processing)
+# grep/sed heredocs (text processing)
+#
+# `awk` was here until .agent-config-zbzox removed it from
+# NON_EXECUTING_HEREDOC_COMMANDS: `awk -f -` reads its PROGRAM from stdin and an
+# awk program can call system(), so an awk heredoc is not data at any delimiter.
+# Its row is in the edge-cases file with the rest of the trade.
 # ============================================================================
 
 [[case]]
 description = "grep heredoc is DATA"
-command = "grep -n 'rm' <<EOF\nrm -rf /home/user\nEOF"
+command = "grep -n 'rm' <<'EOF'\nrm -rf /home/user\nEOF"
 expected = "allow"
 
 [[case]]
 description = "sed heredoc is DATA"
-command = "sed 's/rm/remove/g' <<EOF\nrm -rf /home/user\nEOF"
-expected = "allow"
-
-[[case]]
-description = "awk heredoc is DATA"
-command = "awk '{print $1}' <<EOF\nrm -rf /home/user\nEOF"
+command = "sed 's/rm/remove/g' <<'EOF'\nrm -rf /home/user\nEOF"
 expected = "allow"
 
 # ============================================================================
@@ -71,22 +86,22 @@ expected = "allow"
 
 [[case]]
 description = "wc heredoc is DATA"
-command = "wc -l <<EOF\nrm -rf /\ngit reset --hard\nEOF"
+command = "wc -l <<'EOF'\nrm -rf /\ngit reset --hard\nEOF"
 expected = "allow"
 
 [[case]]
 description = "sort heredoc is DATA"
-command = "sort <<EOF\nrm -rf /\ngit clean -fd\nEOF"
+command = "sort <<'EOF'\nrm -rf /\ngit clean -fd\nEOF"
 expected = "allow"
 
 [[case]]
 description = "head heredoc is DATA"
-command = "head -5 <<EOF\nrm -rf /home/user\nEOF"
+command = "head -5 <<'EOF'\nrm -rf /home/user\nEOF"
 expected = "allow"
 
 [[case]]
 description = "tail heredoc is DATA"
-command = "tail -5 <<EOF\nrm -rf /home/user\nEOF"
+command = "tail -5 <<'EOF'\nrm -rf /home/user\nEOF"
 expected = "allow"
 
 # ============================================================================
@@ -95,12 +110,12 @@ expected = "allow"
 
 [[case]]
 description = "base64 heredoc is DATA"
-command = "base64 <<EOF\nrm -rf /home/user\nEOF"
+command = "base64 <<'EOF'\nrm -rf /home/user\nEOF"
 expected = "allow"
 
 [[case]]
 description = "md5sum heredoc is DATA"
-command = "md5sum <<EOF\nrm -rf /\nEOF"
+command = "md5sum <<'EOF'\nrm -rf /\nEOF"
 expected = "allow"
 
 # ============================================================================
@@ -109,25 +124,25 @@ expected = "allow"
 
 [[case]]
 description = "curl -d heredoc is DATA"
-command = "curl -d @- https://example.com <<EOF\nrm -rf /\nEOF"
+command = "curl -d @- https://example.com <<'EOF'\nrm -rf /\nEOF"
 expected = "allow"
 
 # ============================================================================
-# Tab-stripped heredocs (<<-)
+# Tab-stripped heredocs (<<-), quoted the same way
 # ============================================================================
 
 [[case]]
 description = "cat tab-stripped heredoc is DATA"
-command = "cat <<-EOF\n\trm -rf /home/user\n\tEOF"
+command = "cat <<-'EOF'\n\trm -rf /home/user\n\tEOF"
 expected = "allow"
 
 [[case]]
 description = "tee tab-stripped heredoc is DATA"
-command = "tee /tmp/file <<-MARKER\n\tgit reset --hard\n\tMARKER"
+command = "tee /tmp/file <<-'MARKER'\n\tgit reset --hard\n\tMARKER"
 expected = "allow"
 
 # ============================================================================
-# Quoted delimiters (no variable expansion)
+# Both quote spellings of the delimiter suppress expansion
 # ============================================================================
 
 [[case]]
@@ -142,6 +157,15 @@ expected = "allow"
 
 # ============================================================================
 # Here-strings (<<<) to non-executing commands are DATA
+#
+# The gate masks only the SINGLE-quoted form: `<<< "$(…)"` and bare `<<< $(…)`
+# are expanded by the outer shell before the sink reads them, exactly like an
+# unquoted heredoc delimiter.
+#
+# The double-quoted row below is still ALLOWED — measured — but NOT by that
+# gate. Its body is left visible, and the evaluator allows it on a separate path
+# because the trigger lands inside a quoted argument. Do not read that row as
+# evidence the here-string gate accepts `"`.
 # ============================================================================
 
 [[case]]
@@ -155,7 +179,7 @@ command = "cat <<<\"rm -rf /home/user\""
 expected = "allow"
 
 [[case]]
-description = "cat here-string unquoted is DATA"
+description = "cat here-string unquoted with no trigger is DATA"
 command = "cat <<<dangerous_command"
 expected = "allow"
 

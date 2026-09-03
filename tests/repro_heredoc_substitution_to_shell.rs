@@ -520,11 +520,35 @@ fn a_markdown_fence_in_an_earlier_heredoc_body_is_not_shell() {
     // binary denied all four shapes -- the deny comes from the tier-2 heredoc
     // content path, so the masking assertion was measuring the wrong oracle.
     // Verified against the installed 19aa74b2: every one of these was DENY.
+    //
+    // EVERY DELIMITER IS QUOTED, and three of these four shapes were not until
+    // `.agent-config-izbto`. Spec 333 / `.agent-config-u06z` leaves an UNQUOTED
+    // body visible on purpose, so those three denied for a reason that has
+    // nothing to do with a fence, and this test was one of the suite's standing
+    // reds. The unquoted twins are pinned in the test below, so quoting them
+    // here is not a loss of coverage.
     for cmd in [
         format!(
             "{{ cat <<'A'\n```diff\n-{}\n```\nA\ncat notes.txt; cat <<'B'\n```\nx\n```\nB\n; }} > out.md",
             trigger()
         ),
+        format!("cat <<'A'\n```diff\n-{}\n```\nA\n", trigger()),
+        format!("cat <<'A'\n```\nx\n```\nA\ncat <<'B'\n{}\nB\n", trigger()),
+    ] {
+        assert_allowed(&cmd, "a fence inside a heredoc body is not a substitution");
+    }
+}
+
+/// The unquoted twins of the fence shapes above. They are DENIED, and the
+/// denial is the recorded u06z trade — an unquoted body is expanded by the
+/// outer shell before the sink receives it, so its bytes stay visible to the
+/// matcher — NOT the phantom-substitution bug the test above guards.
+///
+/// This row exists so that quoting those shapes was not a silent deletion:
+/// without it, re-masking unquoted bodies would turn nothing red here.
+#[test]
+fn the_same_fence_shapes_unquoted_are_denied_by_the_recorded_trade_izbto() {
+    for cmd in [
         format!(
             "{{ cat <<A\n```diff\n-{}\n```\nA\ncat notes.txt; cat <<B\n```\nx\n```\nB\n; }} > out.md",
             trigger()
@@ -532,7 +556,8 @@ fn a_markdown_fence_in_an_earlier_heredoc_body_is_not_shell() {
         format!("cat <<A\n```diff\n-{}\n```\nA\n", trigger()),
         format!("cat <<A\n```\nx\n```\nA\ncat <<B\n{}\nB\n", trigger()),
     ] {
-        assert_allowed(&cmd, "a fence inside a heredoc body is not a substitution");
+        assert_body_visible(&cmd, "an unquoted body expands before the sink reads it");
+        assert_denied(&cmd, "an unquoted body expands before the sink reads it");
     }
 }
 

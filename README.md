@@ -2173,6 +2173,27 @@ added_at = "2026-01-08T12:00:00Z"
 cargo test
 ```
 
+**A bare `cargo test` stops at the first failing test binary**, so the tests in
+every later binary are neither run nor reported. Use `--no-fail-fast` whenever
+you need the real picture — and note that CI's `cargo nextest` does not run
+doctests at all.
+
+### The known-red ledger
+
+Some tests fail on `main` today. Each one is listed in
+[`tests/KNOWN_RED.tsv`](tests/KNOWN_RED.tsv) with the bead that owns it, and
+
+```bash
+scripts/check_known_red.sh            # run the suite, then compare
+scripts/check_known_red.sh some.log   # compare an existing --no-fail-fast log
+```
+
+fails if the run and the ledger disagree in **either** direction: an unlisted
+failure is a regression, and a listed test that passes means the ledger is lying
+about the repo. A row without a bead id is a hard error.
+
+Skipping a red is allowed. Hiding one is not.
+
 The test suite includes 80+ tests covering:
 
 - **normalize_command_tests**: Path stripping for git and rm binaries
