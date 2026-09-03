@@ -4,7 +4,7 @@
 //! checks without shell-hook overhead.
 
 use crate::config::Config;
-use crate::evaluator::{EvaluationDecision, evaluate_command};
+use crate::evaluator::{EvaluationDecision, evaluate_command_consulting_allow_once};
 use crate::packs::REGISTRY;
 use crate::scan::{
     ScanEvalContext, ScanFailOn, ScanFormat, ScanOptions, ScanRedactMode, scan_paths,
@@ -184,7 +184,10 @@ impl DcgMcpServer {
     }
 
     fn check_command(&self, command: &str) -> CheckCommandResponse {
-        let result = evaluate_command(
+        // The MCP server is an interactive surface, so it keeps the allow-once
+        // escape hatch it has always had. Spelled out rather than inherited
+        // (.agent-config-pwv0p).
+        let result = evaluate_command_consulting_allow_once(
             command,
             &self.config,
             &self.scan_ctx.enabled_keywords,

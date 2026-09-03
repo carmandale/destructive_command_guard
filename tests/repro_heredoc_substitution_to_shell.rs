@@ -547,17 +547,22 @@ fn a_markdown_fence_in_an_earlier_heredoc_body_is_not_shell() {
 /// This row exists so that quoting those shapes was not a silent deletion:
 /// without it, re-masking unquoted bodies would turn nothing red here.
 ///
-/// ASSERTED ON THE MASK ONLY, and deliberately not on the evaluator. The first
-/// version of this test also called `assert_denied`, and that assertion FLAKED:
-/// green 15/15 run alone or as its own binary, red inside a full
-/// `--no-fail-fast` run. Masking is a pure function of the command string and
-/// cannot flake; the evaluator's verdict reaches disk. Visibility is also the
-/// whole of what the u06z gate promises here — the deny is a downstream
-/// consequence — so nothing is lost by pinning the thing the gate actually
-/// owns. The flake itself is filed as `.agent-config-pwv0p`; do not add
-/// `assert_denied` back until that is closed.
+/// ASSERTED ON BOTH THE MASK AND THE EVALUATOR AGAIN, as of
+/// `.agent-config-pwv0p`. The first version called `assert_denied` and that
+/// assertion FLAKED — green run alone and as its own binary, red inside a full
+/// `--no-fail-fast` run — so it was cut back to the mask, which is a pure
+/// function of the command string.
+///
+/// pwv0p measured the channel: `evaluate_command` reached the ambient
+/// allow-once store on disk, and an entry there whose `command_raw` equals the
+/// command flips this exact Critical deny to an allow (scope `Project` at `/`
+/// matches from any directory, so the writer need not know the reader). That
+/// lookup is now named at the call site instead of inherited, and
+/// `evaluate_command` reads no files and no environment. The verdict below is a
+/// function of the command and the config built two screens up, so there is no
+/// longer anything for a neighbouring process to move.
 #[test]
-fn the_same_fence_shapes_unquoted_keep_their_bodies_visible_izbto() {
+fn the_same_fence_shapes_unquoted_are_denied_by_the_recorded_trade_izbto() {
     for cmd in [
         format!(
             "{{ cat <<A\n```diff\n-{}\n```\nA\ncat notes.txt; cat <<B\n```\nx\n```\nB\n; }} > out.md",
@@ -567,6 +572,7 @@ fn the_same_fence_shapes_unquoted_keep_their_bodies_visible_izbto() {
         format!("cat <<A\n```\nx\n```\nA\ncat <<B\n{}\nB\n", trigger()),
     ] {
         assert_body_visible(&cmd, "an unquoted body expands before the sink reads it");
+        assert_denied(&cmd, "an unquoted body expands before the sink reads it");
     }
 }
 

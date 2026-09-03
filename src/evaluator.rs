@@ -985,6 +985,14 @@ pub fn evaluate_detailed_with_allowlists(
 /// An `EvaluationResult` indicating whether the command is allowed or denied,
 /// with detailed pattern match information for denials.
 ///
+/// # Determinism
+///
+/// The verdict is a function of the arguments alone. This function reads no
+/// files and no environment. In particular it does NOT consult the ambient
+/// allow-once store, which is shared mutable state on disk that any process on
+/// the machine can write; [`evaluate_command_consulting_allow_once`] is the
+/// spelling that opts into it (`.agent-config-pwv0p`).
+///
 /// # Performance
 ///
 /// This function is optimized for the common case (allow):
@@ -1038,6 +1046,30 @@ fn resolve_project_path(
     std::env::current_dir().ok()
 }
 
+/// Whether an evaluation is allowed to consult the ambient on-disk allow-once store.
+///
+/// The store is real state on disk, resolved from the environment and the process
+/// CWD (`AllowOnceStore::default_path`), and a matching entry turns a Critical deny
+/// into an allow. That is the interactive escape hatch `dcg allow-once` exists to
+/// open, and it belongs to the hook and the CLI.
+///
+/// It does NOT belong to `evaluate_command`, which reads as a pure classifier over
+/// the command and the configuration handed to it. Every caller of that function —
+/// embedders, and every in-process test in `tests/` — was silently sharing one
+/// mutable file with every other process on the machine. Measured under
+/// `.agent-config-pwv0p`: an entry whose `command_raw` equals the command and whose
+/// scope is `Project` at `/` matches from any directory, so a writer needs to know
+/// nothing about the reader.
+///
+/// Naming the source at the call site is the point. There is no default.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AllowOnceSource {
+    /// Consult the ambient store. Hook and CLI behaviour.
+    Ambient,
+    /// Consult nothing. The verdict is a function of the arguments alone.
+    Disabled,
+}
+
 fn allow_once_match(
     command: &str,
     allow_once_audit: Option<&crate::pending_exceptions::AllowOnceAuditConfig<'_>>,
@@ -1067,8 +1099,55 @@ fn allow_once_match_force_config(
 ///
 /// When `deadline` is provided and exceeded, evaluation fails open and returns
 /// `skipped_due_to_budget=true` so hook mode can allow the command safely.
+///
+/// Does NOT consult the ambient allow-once store — see [`AllowOnceSource`]. Use
+/// [`evaluate_command_consulting_allow_once`] for the interactive escape hatch.
 #[must_use]
 pub fn evaluate_command_with_deadline(
+    command: &str,
+    config: &Config,
+    enabled_keywords: &[&str],
+    compiled_overrides: &crate::config::CompiledOverrides,
+    allowlists: &LayeredAllowlist,
+    deadline: Option<&Deadline>,
+) -> EvaluationResult {
+    evaluate_config_with_source(
+        AllowOnceSource::Disabled,
+        command,
+        config,
+        enabled_keywords,
+        compiled_overrides,
+        allowlists,
+        deadline,
+    )
+}
+
+/// [`evaluate_command`], but the ambient allow-once store IS consulted.
+///
+/// This is the interactive surface's spelling: a user who ran `dcg allow-once`
+/// expects the next matching command to pass. Named separately so that reaching
+/// disk is something a call site asks for rather than something it inherits.
+#[must_use]
+pub fn evaluate_command_consulting_allow_once(
+    command: &str,
+    config: &Config,
+    enabled_keywords: &[&str],
+    compiled_overrides: &crate::config::CompiledOverrides,
+    allowlists: &LayeredAllowlist,
+) -> EvaluationResult {
+    evaluate_config_with_source(
+        AllowOnceSource::Ambient,
+        command,
+        config,
+        enabled_keywords,
+        compiled_overrides,
+        allowlists,
+        None,
+    )
+}
+
+fn evaluate_config_with_source(
+    allow_once_source: AllowOnceSource,
     command: &str,
     config: &Config,
     enabled_keywords: &[&str],
@@ -1080,7 +1159,8 @@ pub fn evaluate_command_with_deadline(
     let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
     let keyword_index = REGISTRY.build_enabled_keyword_index(&ordered_packs);
     let heredoc_settings = config.heredoc_settings();
-    evaluate_command_with_pack_order_deadline(
+    evaluate_at_path_impl(
+        allow_once_source,
         command,
         enabled_keywords,
         &ordered_packs,
@@ -1088,6 +1168,7 @@ pub fn evaluate_command_with_deadline(
         compiled_overrides,
         allowlists,
         &heredoc_settings,
+        None,
         None,
         deadline,
     )
@@ -1201,9 +1282,12 @@ pub fn evaluate_command_with_pack_order_deadline(
 }
 
 /// Evaluate a command with deadline support and an optional project path.
+///
+/// This is the hook and CLI entry point, so it consults the ambient allow-once
+/// store. Callers that want the verdict to be a function of their arguments alone
+/// want [`evaluate_command`].
 #[must_use]
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_lines)]
 pub fn evaluate_command_with_pack_order_deadline_at_path(
     command: &str,
     enabled_keywords: &[&str],
@@ -1216,6 +1300,39 @@ pub fn evaluate_command_with_pack_order_deadline_at_path(
     project_path: Option<&Path>,
     deadline: Option<&Deadline>,
 ) -> EvaluationResult {
+    evaluate_at_path_impl(
+        AllowOnceSource::Ambient,
+        command,
+        enabled_keywords,
+        ordered_packs,
+        keyword_index,
+        compiled_overrides,
+        allowlists,
+        heredoc_settings,
+        allow_once_audit,
+        project_path,
+        deadline,
+    )
+}
+
+/// The body shared by every entry point, with the allow-once source named.
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
+fn evaluate_at_path_impl(
+    allow_once_source: AllowOnceSource,
+    command: &str,
+    enabled_keywords: &[&str],
+    ordered_packs: &[String],
+    keyword_index: Option<&crate::packs::EnabledKeywordIndex>,
+    compiled_overrides: &crate::config::CompiledOverrides,
+    allowlists: &LayeredAllowlist,
+    heredoc_settings: &crate::config::HeredocSettings,
+    allow_once_audit: Option<&crate::pending_exceptions::AllowOnceAuditConfig<'_>>,
+    project_path: Option<&Path>,
+    deadline: Option<&Deadline>,
+) -> EvaluationResult {
+    let consult_allow_once = allow_once_source == AllowOnceSource::Ambient;
+
     // Check deadline at entry - if already exceeded, fail-open immediately.
     if deadline_exceeded(deadline) {
         return EvaluationResult::allowed_due_to_budget();
@@ -1233,14 +1350,15 @@ pub fn evaluate_command_with_pack_order_deadline_at_path(
 
     // Step 1.5: Check precompiled block overrides (allow-once may optionally override).
     if let Some(reason) = compiled_overrides.check_block(command) {
-        if allow_once_match_force_config(command, allow_once_audit).is_some() {
+        if consult_allow_once && allow_once_match_force_config(command, allow_once_audit).is_some()
+        {
             return EvaluationResult::allowed();
         }
         return EvaluationResult::denied_by_config(reason.to_string());
     }
 
     // Step 1.6: Check allow-once overrides.
-    if allow_once_match(command, allow_once_audit).is_some() {
+    if consult_allow_once && allow_once_match(command, allow_once_audit).is_some() {
         return EvaluationResult::allowed();
     }
 
