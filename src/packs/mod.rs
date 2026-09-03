@@ -1852,16 +1852,37 @@ static GIT_FINDER: LazyLock<memmem::Finder<'static>> = LazyLock::new(|| memmem::
 #[allow(dead_code)]
 static RM_FINDER: LazyLock<memmem::Finder<'static>> = LazyLock::new(|| memmem::Finder::new("rm"));
 
-/// Bytes that can sit inside a single command word.
-///
-/// A hyphen counts. `my-git`, `docker-compose` and `git-lfs` are whole program
-/// names, not the keyword plus punctuation, so a keyword touching a hyphen is a
-/// different command: `my-git reset --hard` is not `git`, and `docker run --rm`
-/// is not `rm`. Without the hyphen here the keyword gate accepted those and the
-/// unanchored pack pattern then matched mid-word (`.agent-config-6yt2i`).
 #[inline]
 const fn is_word_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// Does the byte in front of `idx` belong to the same word?
+///
+/// A hyphen counts only BETWEEN word characters. `my-git`, `docker-compose` and
+/// `git-lfs` are whole program names, so a keyword touching an interior hyphen
+/// is a different command (`.agent-config-za1pf`). A LEADING hyphen is not part
+/// of a name — nothing on this fleet is invoked as `-rm` — it is a flag or a
+/// diff marker, and `-rm -rf /` on a removed diff line still names the command
+/// it names. Reading both hyphens the same way broke the heredoc trade in
+/// `repro_heredoc_substitution_to_shell`.
+#[inline]
+fn preceded_by_word_byte(hay: &[u8], idx: usize) -> bool {
+    if idx == 0 {
+        return false;
+    }
+    let prev = hay[idx - 1];
+    is_word_byte(prev) || (prev == b'-' && idx >= 2 && is_word_byte(hay[idx - 2]))
+}
+
+/// The same question at the other end: does the byte at `idx` continue the word
+/// that ends just before it? `git-lfs` is not `git` followed by punctuation.
+#[inline]
+fn followed_by_word_byte(hay: &[u8], idx: usize) -> bool {
+    let Some(&next) = hay.get(idx) else {
+        return false;
+    };
+    is_word_byte(next) || (next == b'-' && hay.get(idx + 1).is_some_and(|b| is_word_byte(*b)))
 }
 
 /// True when a match begins inside a longer word.
@@ -1883,7 +1904,7 @@ pub fn match_starts_mid_word(haystack: &str, start: usize) -> bool {
     if start == 0 || start >= bytes.len() {
         return false;
     }
-    is_word_byte(bytes[start]) && is_word_byte(bytes[start - 1])
+    is_word_byte(bytes[start]) && preceded_by_word_byte(bytes, start)
 }
 
 #[inline]
@@ -1949,7 +1970,7 @@ fn keyword_matches_with_whitespace(
     while let Some(pos) = memmem::find(&hay[offset..], first) {
         let start = offset + pos;
         if enforce_boundaries && first_is_word {
-            let start_ok = start == 0 || !is_word_byte(hay[start.saturating_sub(1)]);
+            let start_ok = !preceded_by_word_byte(hay, start);
             if !start_ok {
                 offset = start + 1;
                 continue;
@@ -1979,7 +2000,7 @@ fn keyword_matches_with_whitespace(
         }
 
         if matched && enforce_boundaries && last_is_word {
-            let end_ok = idx == hay.len() || !is_word_byte(hay[idx]);
+            let end_ok = !followed_by_word_byte(hay, idx);
             if !end_ok {
                 matched = false;
             }
@@ -2018,9 +2039,8 @@ fn keyword_matches_span(span_text: &str, keyword: &str) -> bool {
     while let Some(pos) = memmem::find(&haystack[offset..], needle) {
         let start = offset + pos;
         let end = start + needle.len();
-        let start_ok =
-            !first_is_word || start == 0 || !is_word_byte(haystack[start.saturating_sub(1)]);
-        let end_ok = !last_is_word || end == haystack.len() || !is_word_byte(haystack[end]);
+        let start_ok = !first_is_word || !preceded_by_word_byte(haystack, start);
+        let end_ok = !last_is_word || !followed_by_word_byte(haystack, end);
 
         if start_ok && end_ok {
             return true;

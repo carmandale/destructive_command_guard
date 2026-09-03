@@ -165,9 +165,7 @@ impl CompiledRegex {
                     .map(|m| (m.start(), m.end())),
             };
 
-            let Some((start, end)) = found else {
-                return None;
-            };
+            let (start, end) = found?;
             if !crate::packs::match_starts_mid_word(text, start) {
                 return Some((start, end));
             }
