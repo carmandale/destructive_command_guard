@@ -177,7 +177,53 @@ Observe: cold-review.md parent-harvest
 
 ## Dispositions
 
-Filled in after the lane log is read.
+Cold-review lane `cold-review-a6jka`, log `lanes/cold-review.md`, verdict
+**APPROVE WITH FINDINGS** pinned to its state S6. Every finding below is bound
+to that log's own evidence, and the raw log is committed unedited.
+
+| # | finding | disposition |
+|---|---|---|
+| 1 | golden mask not idempotent — three deny goldens red | **Applied.** Fixed mid-review, `strip_prefix(MASK)`, pinned by `masking_an_allow_once_code_is_idempotent`. |
+| 2 | `KNOWN_RED.tsv` still listed the three fixed tests | **Applied.** Three rows removed; `check_known_red.sh` now exits 0. |
+| 3 | allowlist reads narrowed — an allowlist in an older location silently orphaned | **Applied, and my prior reasoning was wrong.** See below. |
+| 4 | `matches_scope` doc claimed an unreproduced production symptom | **Applied.** Comment rewritten to what the evidence supports; canonicalisation made all-or-nothing, which also closes the Windows `\\?\` narrowing. |
+| 5 | `test_matches_scope_falls_back_when_the_path_is_gone` was vacuous | **Applied.** Negative half and Project arm added; re-ran the lane's own M6 mutant and the named test now reddens. |
+| 6 | empty allow-once code indistinguishable from a real one | **Applied.** `filter(|c| !c.is_empty())`, a non-empty precondition in the e2e test, and a unit test. |
+| 7 | hatch line advertised on config-block denials it cannot open | **Applied.** `allow_once_suffices`; mutant-verified. |
+| 8 | `--force --yes` skips the FORCE prompt | **Deferred with cause** → `.agent-config-eth3v`. Pre-existing; this change no longer feeds that chain from the reason text. Posture call, not a bug fix. |
+| 9 | six other hand-rolled user-config-dir spellings; `config_dir_override` skips tilde expansion | **Deferred with cause** → `.agent-config-piua5`. Pre-existing; the tilde half is a real bug (a directory literally named `~`). |
+| 10 | `Config::user_config_path` is a line-for-line duplicate | **Applied.** Routed through `user_config_dir`. |
+| 11 | `ConfigOverride` spelled two ways, nothing couples them | **Applied.** `tests/regression_config_override_spelling.rs`, mutant-verified. |
+| 12 | `AGENTS.md` and `hook-output.json` examples stale | **Already applied when raised.** Both were updated at S5; the finding was measured against an earlier state. |
+| 13 | "Same wording as `output::denial`" was false | **Applied.** The comment now states the difference and why. |
+| 14 | one new `cargo fmt` violation | **Applied.** Back to the pre-existing 26, file-for-file identical. |
+
+### Finding 3 is the one where I was wrong, not just imprecise
+
+I had already spotted that the first allowlist fix drops the undocumented
+platform-native fallback, and I argued in this log that restoring it would
+"reintroduce the writer/reader divergence" the change exists to remove. That
+reasoning was wrong, and the lane's counter is the correct one:
+`Config::load_user_config_layer` has always solved the same problem by falling
+through all three candidates while the writer picks one of them. Because the
+writer's choice is always a member of the reader's list, the two ends cannot
+diverge — and no file already on disk is orphaned. That is exactly why
+`config.toml` never had `.agent-config-0kt9v`'s bug.
+
+So I had reasoned myself into a silent data-loss path and then written three
+paragraphs justifying it. The fail-closed direction and the documentation
+argument were both true and neither made it right. `config::user_config_file`
+now reads through every candidate; `test_user_allowlist_in_an_older_location_is_still_read`
+pins it, and `test_xdg_allowlist_outranks_the_older_location` pins that falling
+through did not turn into "first file found wins".
+
+### On the lane's closing caveat
+
+It is fair. The tree moved six times during the review, three without notice,
+and at 05:13 it did not compile — a transient state between adding a twelfth
+parameter and updating its wrapper, which `cargo build` caught immediately
+after. The approval covers S6. Everything changed after S6 (findings 3, 5, 10,
+11) I mutant-checked myself, each read by the named test's own line.
 
 ## A defect I shipped into my own change, and how it was caught
 
@@ -205,16 +251,17 @@ Fixed by making the masker idempotent, and pinned by
 masking once — the property the first version violated. The cold-review lane was
 told its target had moved rather than being left to review a stale tree.
 
-## A behaviour change in the allowlist fix, stated rather than buried
+## The allowlist fix's read side — a wrong turn, corrected
 
-The old User-layer resolution was `~/.config/dcg/allowlist.toml` *if that file
-exists*, else `dirs::config_dir()/dcg/allowlist.toml`. The new one is
-`user_config_dir()/allowlist.toml` with no second candidate. So a user whose
-allowlist lives ONLY at the macOS platform-native path
-(`~/Library/Application Support/dcg/allowlist.toml`) while `~/.config/dcg/`
-exists would stop having it read.
+**SUPERSEDED. The position argued in this section is the one the cold review
+overturned; see Dispositions, finding 3. It is kept, not rewritten, because the
+reasoning that led me here is the point.**
 
-Three reasons that is the right trade and not a regression I am waving past:
+The first fix made the User-layer resolution `user_config_dir()/allowlist.toml`
+with no second candidate, where it had been `~/.config/dcg/allowlist.toml` *if
+that file exists*, else `dirs::config_dir()/dcg/allowlist.toml`. I noticed that
+drops a real file for a user whose allowlist lives only at the macOS
+platform-native path, and I argued it was the right trade:
 
 1. **It is what the docs already promise.** `README.md:2083`,
    `docs/configuration.md:117` and `docs/custom-packs.md:310` all name
@@ -222,15 +269,24 @@ Three reasons that is the right trade and not a regression I am waving past:
    platform-native path; that fallback was undocumented behaviour.
 2. **The writer never used it either.** `dcg allowlist add --user` goes through
    `config_dir()`, which already preferred `~/.config/dcg` whenever that
-   directory existed — and it exists for anyone who has a `config.toml`. Only a
-   hand-placed file at the platform-native path is affected.
+   directory existed — and it exists for anyone who has a `config.toml`.
 3. **The failure direction is fail-closed.** Losing an allowlist entry makes dcg
-   deny more, not less. For a guard that is the safe direction, which is why
-   this is worth doing rather than reintroducing a read-only fallback that would
-   put the reader back on a path the writer never writes — the exact drift
-   Cause B is about.
+   deny more, not less, which for a guard is the safe direction.
 
-Measured on this machine: no `allowlist.toml` at either location, so nothing
-here changes. `~/Library/Application Support/dcg/` holds only a
-`pending_exceptions.jsonl` last written 25 Jul.
+All three statements are true. None of them made the change right, and the third
+carried a bad inference: that restoring a fallback would "put the reader back on
+a path the writer never writes". It would not. The writer picks one directory
+from a fixed list; a reader that tries the whole list in the same order always
+finds the writer's choice, so the two ends cannot drift — and nothing already on
+disk is orphaned. `Config::load_user_config_layer` had been doing exactly that
+for `config.toml` all along, which is why `config.toml` never had this bug. The
+precedent was in the same file and I did not read it as one.
+
+What the argument above was really defending was silent data loss, dressed as
+documentation fidelity. The corrected shape is `config::user_config_file`.
+
+Measured on this machine at the time: no `allowlist.toml` at either location, so
+nothing here changed for this host either way.
+`~/Library/Application Support/dcg/` holds only a `pending_exceptions.jsonl`
+last written 25 Jul.
 

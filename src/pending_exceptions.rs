@@ -1557,7 +1557,15 @@ mod tests {
     ///
     /// `matches_scope` falls back to the paths as given, so an entry whose
     /// directory has since been removed still matches an identical spelling
-    /// rather than silently ceasing to.
+    /// rather than silently ceasing to — and still refuses a different one.
+    ///
+    /// The negative half is what makes this test mean anything. Asserting only
+    /// that an unresolvable path matches ITSELF is vacuous: both sides run
+    /// through the same transformation, so replacing the fallback with any
+    /// constant keeps them equal and the assertion green. Measured under
+    /// `.agent-config-a6jka` cold review, mutant M6 — a fallback returning a
+    /// fixed `/__unresolved__` left all three scope tests passing. The second
+    /// assertion below is the one that mutant fails.
     #[test]
     fn test_matches_scope_falls_back_when_the_path_is_gone() {
         let missing = "/nonexistent-a6jka/gone";
@@ -1565,6 +1573,26 @@ mod tests {
         assert!(
             entry.matches_scope(Path::new(missing)),
             "an identical spelling must still match when neither side resolves"
+        );
+
+        // A fallback that collapses distinct paths onto one value would match
+        // here, and would hand an allow-once entry a scope it was never granted.
+        assert!(
+            !entry.matches_scope(Path::new("/nonexistent-a6jka/somewhere-else")),
+            "two different unresolvable paths must not match: the fallback has \
+             to preserve the path, not replace it"
+        );
+
+        // Same for the Project arm, whose comparison is a prefix rather than an
+        // equality and so fails differently.
+        let project = scoped_entry(AllowOnceScopeKind::Project, missing);
+        assert!(
+            project.matches_scope(Path::new("/nonexistent-a6jka/gone/deeper")),
+            "an unresolvable project scope must still cover paths beneath it"
+        );
+        assert!(
+            !project.matches_scope(Path::new("/nonexistent-a6jka/gone-elsewhere")),
+            "a sibling whose name merely extends the scope's is not beneath it"
         );
     }
 

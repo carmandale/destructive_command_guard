@@ -989,9 +989,11 @@ pub fn load_default_allowlists() -> LayeredAllowlist {
         .and_then(|cwd| find_repo_root(&cwd))
         .map(|root| root.join(".dcg").join("allowlist.toml"));
 
-    // The same resolution `dcg allowlist add --user` writes through, so the
-    // entry a user just added is the entry this reads back (`.agent-config-0kt9v`).
-    let user = Some(crate::config::user_config_dir().join("allowlist.toml"));
+    // Reads every candidate `dcg allowlist add --user` could have written to, so
+    // the entry a user just added is the entry this reads back
+    // (`.agent-config-0kt9v`) and an allowlist already sitting in an older
+    // location keeps being honoured.
+    let user = Some(crate::config::user_config_file("allowlist.toml"));
 
     // System allowlist is optional; keep the fixed path but treat missing as empty.
     // Allow tests to override via env for hermetic E2E (no reliance on real /etc).

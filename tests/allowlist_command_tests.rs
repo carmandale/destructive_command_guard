@@ -86,6 +86,79 @@ reason = "allowed explicitly"
     );
 }
 
+/// An allowlist in an older location is still read when XDG_CONFIG_HOME is set.
+///
+/// `dcg allowlist add --user` writes to one directory, but a file may already
+/// sit in another — a config predating `XDG_CONFIG_HOME`, or the macOS
+/// platform-native path. The reader tries every candidate, so setting
+/// `XDG_CONFIG_HOME` does not silently orphan an allowlist that is really
+/// there. The first fix for `.agent-config-0kt9v` read one directory only and
+/// would have dropped this file (cold review finding 3).
+#[test]
+fn test_user_allowlist_in_an_older_location_is_still_read() {
+    let cmd = "git reset --hard";
+    let allowlist = format!(
+        r#"
+[[allow]]
+exact_command = "{cmd}"
+reason = "allowed explicitly"
+"#
+    );
+
+    let sandbox = spawn::sandbox();
+
+    // XDG_CONFIG_HOME is set and its dcg dir exists but holds NO allowlist.
+    std::fs::create_dir_all(sandbox.dcg_config_dir()).unwrap();
+
+    // The entry lives only in the older $HOME/.config/dcg location.
+    let home_dir = sandbox.home.join(".config").join("dcg");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    std::fs::write(home_dir.join("allowlist.toml"), &allowlist).unwrap();
+
+    let output = run_hook_in_sandbox(&sandbox, cmd);
+    assert!(
+        output.is_empty(),
+        "an allowlist at $HOME/.config/dcg must still be read when \
+         XDG_CONFIG_HOME is set and holds no allowlist of its own; got:\n{output}"
+    );
+}
+
+/// When both locations hold an allowlist, XDG_CONFIG_HOME wins.
+///
+/// Falling through candidates must not turn into "whichever file we happen to
+/// find first is as good as any" — the preference order still has to be the
+/// writer's, or a stale file outranks the one `dcg allowlist add --user` just
+/// wrote.
+#[test]
+fn test_xdg_allowlist_outranks_the_older_location() {
+    let denied = "git reset --hard";
+    let sandbox = spawn::sandbox();
+
+    // $XDG_CONFIG_HOME allows nothing relevant; $HOME/.config would allow.
+    let xdg_dir = sandbox.dcg_config_dir();
+    std::fs::create_dir_all(&xdg_dir).unwrap();
+    std::fs::write(
+        xdg_dir.join("allowlist.toml"),
+        "\n[[allow]]\nexact_command = \"echo unrelated\"\nreason = \"decoy\"\n",
+    )
+    .unwrap();
+
+    let home_dir = sandbox.home.join(".config").join("dcg");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    std::fs::write(
+        home_dir.join("allowlist.toml"),
+        format!("\n[[allow]]\nexact_command = \"{denied}\"\nreason = \"stale\"\n"),
+    )
+    .unwrap();
+
+    let output = run_hook_in_sandbox(&sandbox, denied);
+    assert!(
+        output.contains("deny"),
+        "the $XDG_CONFIG_HOME allowlist must win, so the stale entry at \
+         $HOME/.config/dcg must NOT allow this command; got:\n{output}"
+    );
+}
+
 fn run_hook_in_sandbox(sandbox: &spawn::Sandbox, command: &str) -> String {
     let input = serde_json::json!({
         "tool_name": "Bash",

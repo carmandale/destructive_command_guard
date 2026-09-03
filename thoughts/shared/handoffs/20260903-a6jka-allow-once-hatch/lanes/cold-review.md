@@ -689,3 +689,419 @@ pre-change tree (`Finished dev profile in 2m 31s`, 0 errors). My run against the
 working tree caught it mid-edit and is not usable; §G re-runs it.
 
 ---
+
+## G. Verify green — measured at the settled state (S6)
+
+The tree stopped moving at 05:22. Everything in this section is one run over one
+state, with a content-hash receipt on both ends so a mid-run edit could not be
+reported as a clean result (`/tmp/coldrev/final_verify.sh`):
+
+```
+TREE-HASH-BEFORE: 59cf246… 214e5f0… fdd453c… 0f3b772… 70b8402… 36d984b… 3ae87b1… 269a699… 5ae1d85… 3fe0705… 7c5e83f… 948d1c4… 400dea1…
+Thu Sep  3 05:48:39 CDT 2026
+suite exit=101
+TREE-HASH-AFTER : 59cf246… 214e5f0… fdd453c… 0f3b772… 70b8402… 36d984b… 3ae87b1… 269a699… 5ae1d85… 3fe0705… 7c5e83f… 948d1c4… 400dea1…
+Thu Sep  3 06:02:15 CDT 2026
+TREE STABLE across the run
+--- failures ---
+src/output/progress.rs - output::progress (line 27) - compile
+test_audit_backtracking_requirements
+--- known-red ledger ---
+OK: 2 failing test(s), exactly the 2 in tests/KNOWN_RED.tsv.
+    Every one cites a bead. Nothing new is broken.
+check_known_red exit=0
+```
+
+(The files hashed, in order: `allowlist.rs cli.rs config.rs hook.rs main.rs
+pending_exceptions.rs allowlist_command_tests.rs cli_e2e.rs golden_json_tests.rs
+KNOWN_RED.tsv` and the three deny goldens.)
+
+`suite exit=101` is expected and is not a finding: the two ledgered known-reds
+make cargo exit non-zero, which is exactly why `check_known_red.sh` reads the
+failure *set* rather than the exit code.
+
+The tests this change is about, from that run:
+
+```
+test test_exact_command_allowlist_works ... ok
+test test_user_allowlist_precedence_follows_xdg_config_home ... ok
+test hook_mode_tests::hook_mode_allow_once_allows_pack_denied_command ... ok
+test hook_mode_tests::hook_mode_allow_once_can_override_config_block_with_force_flag ... ok
+test hook_mode_tests::hook_mode_allow_once_does_not_override_config_block_without_force ... ok
+test hook_mode_tests::hook_mode_denial_reason_quotes_the_minted_allow_once_code ... ok
+test hook_mode_tests::hook_mode_config_block_denial_does_not_offer_the_plain_hatch ... ok
+test golden_hook_deny_filesystem ... ok
+test golden_hook_deny_git_force_push ... ok
+test golden_hook_deny_git_reset_hard ... ok
+test result: ok. 2050 passed; 0 failed        (--lib)
+```
+
+### G1. `cargo clippy --all-targets -- -D warnings` goes from clean to failing
+
+This is the one gate I found red at S6 that is green on `HEAD`. My first two
+clippy runs were unusable — one caught the tree mid-edit — so I re-ran both
+sides from scratch and then bisected it.
+
+```
+$ cd /tmp/coldrev/fmtpre  (HEAD sources)
+$ ~/.cargo/bin/cargo clippy --all-targets -- -D warnings
+    Finished `dev` profile [optimized + debuginfo] target(s) in 2m 31s      # 0 errors
+
+$ cd <repo>  (S6)
+$ ~/.cargo/bin/cargo clippy --all-targets -- -D warnings
+error: allocating a local array larger than 16384 bytes
+  = note: `-D clippy::large-stack-arrays` implied by `-D warnings`
+error: could not compile `destructive_command_guard` (lib test) due to 1 previous error
+```
+
+The diagnostic carries no usable span — a zero-byte primary span at
+`src/lib.rs:1`, target kind `["lib"]` — so I bisected by copying one changed
+`src/` file at a time into the HEAD tree (`/tmp/coldrev/bisect_clippy.sh`):
+
+```
+baseline (HEAD sources): 0
+after adding src/config.rs: 0
+after adding src/allowlist.rs: 0
+after adding src/cli.rs: 0
+after adding src/hook.rs: 0
+after adding src/main.rs: 0
+after adding src/pending_exceptions.rs: 1
+```
+
+Then inside that file (`/tmp/coldrev/bisect_inner*.py`):
+
+```
+variant A (matches_scope change only, new tests removed): 0
+variant B (full file):                                    1
+keep = scoped_entry only            -> 0
+keep = scoped_entry + test #0       -> 0
+keep = scoped_entry + test #1       -> 0
+keep = scoped_entry + test #2       -> 0
+```
+
+Reproducible in both directions, three times:
+
+```
+full S6 file, run 2: 1
+HEAD file, run 2:    0
+full S6 file, run 3: 1
+```
+
+So it is the **aggregate** of the three new `test_matches_scope_*` tests in
+`src/pending_exceptions.rs`, not any one of them — consistent with a span-less
+`large_stack_arrays` on a promoted item that crosses 16 KiB once enough test
+items exist. `.github/workflows/ci.yml:49` runs exactly this command. The `check`
+job would in practice stop earlier, at the already-red `cargo fmt -- --check`
+(26 pre-existing violations, unchanged by this diff) — but that is
+someone else's debt masking this, not this change being clean.
+
+Cheapest fix consistent with the repo's lint config: an
+`#[allow(clippy::large_stack_arrays)]` on the `tests` module in
+`src/pending_exceptions.rs`, or wherever the real allocation turns out to live
+once someone has a span.
+
+
+## VERDICT
+
+**APPROVE WITH FINDINGS**, pinned to state **S6** (the state whose hashes §G
+records). Two findings were BLOCKING when I raised them; both were fixed while
+this review was running, and I re-measured both rather than taking the fix on
+trust. Everything still open is NON-BLOCKING.
+
+A caveat that belongs in the verdict rather than a footnote: the working tree
+moved six times during this review, three of those without notice, and at
+05:13 it did not compile. My approval covers S6 and nothing after it. The
+mutant harness is still in `/tmp/coldrev` and re-running it costs one command
+(`/tmp/coldrev/all_mutants.sh`) after `rsync -a src/ tests/ /tmp/coldrev/pre/`.
+
+### Findings
+
+1. **BLOCKING — fixed at S2.** `mask_allow_once_code_in_text` was not
+   idempotent, and both sides of the golden comparison run through it, so the
+   golden's own `<DYNAMIC>` became `<DYNAMIC><DYNAMIC>` and all three deny
+   goldens failed against correct output.
+   *Evidence:* `golden_hook_deny_filesystem`, `golden_hook_deny_git_force_push`,
+   `golden_hook_deny_git_reset_hard` all `... FAILED` in
+   `/tmp/coldrev_suite_after.log`, with the diff showing
+   `expected: "... <DYNAMIC><DYNAMIC> ..."` vs `actual: "... <DYNAMIC> ..."`.
+   `UPDATE_GOLDEN=1` could not have converged it — that path returns `Ok(())`
+   before comparing. Re-verified after the fix: `test result: ok. 34 passed`,
+   and mutant M8 shows the new `masking_an_allow_once_code_is_idempotent`
+   plus the three goldens all go red if the fix is removed.
+
+2. **BLOCKING — fixed at S5.** `tests/KNOWN_RED.tsv` still listed the three
+   tests this change fixes, which the repo defines as a hard error in both
+   directions.
+   *Evidence:* `scripts/check_known_red.sh /tmp/coldrev_suite_after.log` →
+   `FAIL: tests/KNOWN_RED.tsv lists tests that now PASS`, exit 1. Fixed by
+   `git diff tests/KNOWN_RED.tsv` removing all three rows.
+
+3. **NON-BLOCKING — open.** `load_default_allowlists` silently narrowed which
+   user allowlist locations are read. With `XDG_CONFIG_HOME` set,
+   `~/.config/dcg/allowlist.toml` and the platform-native allowlist are no
+   longer consulted at all; before, both were.
+   *Evidence:* the PRE/POST location table in §A1 — `PRE $HOME/.config/dcg (XDG
+   set) -> READ` vs `POST $HOME/.config/dcg (XDG set) -> NOT read`, same for
+   `$HOME/Library/Application Support/dcg`. A macOS user who exports
+   `XDG_CONFIG_HOME` somewhere other than `~/.config` and keeps an allowlist in
+   either old location loses every entry, silently. It fails closed, and
+   `test_user_allowlist_precedence_follows_xdg_config_home` now pins the new
+   precedence as intended — but the *removed* fallback is untested and
+   undocumented. `Config::load_user_config_layer` solves the same problem by
+   falling through the three candidates instead of picking one, which is why
+   `config.toml` never had this bug; the same shape here would fix the split
+   without dropping anyone's file.
+
+4. **NON-BLOCKING — fixed at S3.** The `matches_scope` doc claimed a production
+   symptom ("the escape hatch of AGENTS.md §8 not opening") that I could not
+   reproduce.
+   *Evidence:* §A4 — on the pre-change binary, end to end through a symlinked
+   cwd, `dcg allow-once <code> --yes` opened the hatch (`3) second hook run ->
+   ALLOW`), because every writer derives `scope_path` from `getcwd(3)`. S3
+   rewrote the comment to say exactly that, and made canonicalisation
+   all-or-nothing, which also closes the Windows `\\?\` mixed-case narrowing I
+   had flagged as an unverified suspicion.
+
+5. **NON-BLOCKING — open.** `test_matches_scope_falls_back_when_the_path_is_gone`
+   does not pin what its name claims. It compares one unresolvable path against
+   itself, and both sides go through the same transformation, so any
+   deterministic fallback keeps them equal.
+   *Evidence:* mutant M6 replaced the fallback with a constant
+   `/__unresolved__`; all three scope tests stayed green
+   (`test result: ok. 3 passed`). Still symmetric at S6.
+
+6. **NON-BLOCKING — fixed at S4/S6.** An empty allow-once code was
+   indistinguishable from a real one in both new guards.
+   *Evidence:* mutants M7e and M7g against S2 — `code: String::new()` in
+   `main.rs`, and both `hook_mode_denial_reason_quotes_the_minted_allow_once_code`
+   and the three deny goldens stayed green over a denial offering nothing
+   runnable. Closed by `allow_once_code.filter(|code| !code.is_empty())`, the
+   e2e test's new non-empty precondition, and
+   `test_format_denial_message_treats_an_empty_code_as_no_code`.
+
+7. **NON-BLOCKING — fixed at S4.** The hatch line was advertised on config
+   blocklist denials, where the command it advertises errors and the error names
+   the `--force` escalation.
+   *Evidence:* §C3 `cfg-yes` — code `32771` scraped from the reason of a config
+   block denial, and `dcg allow-once 32771 --yes` →
+   `Error: This denial came from your config blocklist; re-run with --force to
+   override.` Closed by `allow_once_suffices` plus
+   `hook_mode_config_block_denial_does_not_offer_the_plain_hatch`.
+
+8. **NON-BLOCKING — open, pre-existing, worth a decision.** `--yes` skips the
+   `Type 'FORCE' to confirm override:` prompt, so `dcg allow-once <code> --force
+   --yes` clears a config blocklist with no human anywhere
+   (`src/cli.rs:10014`, `needs_prompt = !(cmd.yes || cmd.dry_run)`).
+   *Evidence:* §C3 `cfg-force-yes  redeem_rc=0  verdict_after=ALLOW
+   (self-cleared)`, stdin at `/dev/null` throughout. This change no longer feeds
+   that chain from the reason text (finding 7), so the exposure is back to what
+   it was — but the FORCE prompt is the only thing standing between an agent and
+   the user's explicit "never" list, and `--yes` removes it.
+
+9. **NON-BLOCKING — open, pre-existing, adjacent.** Six other hand-rolled
+   spellings of the user-config-dir policy survive, and one demonstrably
+   disagrees with the new function.
+   *Evidence:* §D1 table, and `/tmp/coldrev/probe_pending_path.sh` with
+   `XDG_CONFIG_HOME='~/cfg'` on the post-change binary:
+   `<sandbox>/home/cfg/dcg/allowlist.toml` next to
+   `<sandbox>/work/~/cfg/dcg/pending_exceptions.jsonl` — dcg creates a directory
+   literally named `~` under the cwd for the allow-once store, because
+   `pending_exceptions::config_dir_override` skips `resolve_config_path_value`.
+   Same bug class as `.agent-config-0kt9v`, in the file this change edits.
+
+10. **NON-BLOCKING — open.** `Config::user_config_path` (`src/config.rs:3180`)
+    is a line-for-line duplicate of the new `user_config_dir` plus a `mkdir`,
+    3000 lines below it in the same file. The most obvious missed call site.
+    *Evidence:* both read in full; arm for arm identical
+    (XDG → `~/.config/dcg` if it exists → platform-native).
+
+11. **NON-BLOCKING — open.** `MatchSource::ConfigOverride` is now spelled two
+    ways with nothing coupling them: `!matches!(info.source,
+    MatchSource::ConfigOverride)` (`src/main.rs:761`, new) and
+    `selected.source.as_deref() == Some("ConfigOverride")` (`src/cli.rs:9947`,
+    against `format!("{:?}", info.source)`).
+    *Evidence:* §F1 — I broke the string by rewriting the pending store's
+    `source` field, with no code edit. **I could not turn it into a bypass**:
+    the evaluator's independent `force_allow_config` gate held
+    (`mutate=yes --force --yes rc=0 force_allow_config=[False] hook after:
+    DENY`). The real consequence is a silent no-op — `dcg allow-once --force
+    --yes` prints `✓ Allow-once entry created`, exits 0, and does nothing.
+
+12. **NON-BLOCKING — open.** Two documents carry a literal
+    `permissionDecisionReason` example and neither was updated: `AGENTS.md:370`
+    (the integrator-facing contract) and `docs/json-schema/hook-output.json:86`.
+    *Evidence:* both read; both still show the pre-change string. No test
+    asserts them, so nothing went red.
+
+13. **NON-BLOCKING — fixed at S3.** The comment "Same wording as
+    `output::denial`" was wrong — `src/output/denial.rs:176` says
+    `To allow once:`, the new line says `If this is a false positive:`. S3's
+    comment now states the difference is deliberate and why.
+
+14. **NON-BLOCKING — fixed at S4.** S1 added a 27th `cargo fmt --check`
+    violation at `src/hook.rs:765`.
+    *Evidence:* `PRE fmt diffs: 26 / POST fmt diffs: 27`, the extra one being
+    the widened `format_denial_message` call. At S5/S6 the two sets are
+    identical file-for-file, 26 each.
+
+### Answers to the brief's five questions, in one line each
+
+1. **Is the diagnosis right?** Yes, for all three tests, proven by A/B against a
+   binary built from `HEAD` (§A1–A3) — with the caveat that the allow-once
+   fix's *production* rationale did not survive an end-to-end test (§A4,
+   finding 4), which the author has since corrected in the source.
+2. **Do the new tests guard?** Eleven of thirteen mutants were caught by the
+   test aimed at them, by name (§B2). The two that were not are findings 5
+   and 6.
+3. **Is the denial-text change safe?** Nothing parses the string; the code was
+   never a secret and is already in two sibling JSON fields; the real change is
+   *which consumers can see it*, and the one place that mattered — a config
+   blocklist denial — is now excluded (§C, findings 7 and 8).
+4. **Over-built or in the wrong place?** `user_config_dir` is the right seam and
+   fixes a real bug, but it narrows reads (finding 3) and leaves six siblings
+   standing (findings 9, 10). `canonical_or_self` is defensible hardening rather
+   than the correctness fix it was first billed as (finding 4). The hatch line
+   and the golden mask are both minimal.
+5. **What was missed?** Findings 3, 5, 8, 9, 10, 11, 12 — plus the observation
+   that `hook_mode_allow_once_does_not_override_config_block_without_force` was
+   green before this change *for the wrong reason* (§E2), so its pre-change
+   green was not evidence of anything.
+
+### Unverified suspicions, stated as such
+
+- Whether Claude Code renders only `permissionDecisionReason` to its agent — the
+  premise the whole hatch line rests on — is a claim about an external product I
+  cannot test from this repo. What I *can* confirm is the half that lives here
+  (the code is absent from that string before, present after), and that a live
+  dcg denial in this session carried no code.
+- `cargo clippy --all-targets -- -D warnings` — see §G.
+
+---
+
+## VERDICT
+
+*(This block is authoritative and supersedes the VERDICT block immediately above
+it, which I drafted while the clippy bisect in §G1 was still running and which
+therefore says "everything still open is NON-BLOCKING". That is no longer true.
+The file is append-only, so the superseded text stays where it is. Findings
+1–14 are unchanged; finding 15 is new and the headline changes with it.)*
+
+**APPROVE WITH FINDINGS — one of them BLOCKING**, pinned to state **S6**, whose
+content hashes §G records and whose full-suite run carries a
+`TREE STABLE across the run` receipt.
+
+The change is correct, the diagnosis is right for all three tests it set out to
+fix, and the tests it adds genuinely guard — eleven of thirteen mutants died
+against the test aimed at them. The blocking item is a lint gate, not the logic.
+
+### Findings, most severe first
+
+1. **BLOCKING — OPEN.** `cargo clippy --all-targets -- -D warnings`
+   (`.github/workflows/ci.yml:49`) is clean on `HEAD` and fails with this change.
+   *Evidence (§G1):* HEAD tree → `Finished dev profile in 2m 31s`, 0 errors.
+   S6 → `error: allocating a local array larger than 16384 bytes` →
+   `could not compile destructive_command_guard (lib test)`. Bisected by copying
+   one changed `src/` file at a time into the HEAD tree: clean through
+   `config.rs`, `allowlist.rs`, `cli.rs`, `hook.rs`, `main.rs`; fires on
+   `pending_exceptions.rs`. Inside that file it is the aggregate of the three
+   new `test_matches_scope_*` tests — the `matches_scope` change alone is clean
+   and so is the helper plus any single one of them. Reproduced three times in
+   both directions. Fix is one `#[allow(clippy::large_stack_arrays)]`.
+   *Not a reason to reject the change* — but it must not land like this, and
+   the fact that CI would stop earlier at the already-red `cargo fmt --check` is
+   pre-existing debt masking it, not a reason to ship.
+
+2. **BLOCKING — fixed at S2.** Non-idempotent golden mask failed all three deny
+   goldens against correct output. *Evidence:* §B1, three `... FAILED` lines
+   with `expected "<DYNAMIC><DYNAMIC>"` vs `actual "<DYNAMIC>"`. Re-verified
+   green; mutant M8 shows the fix is double-pinned.
+
+3. **BLOCKING — fixed at S5.** `tests/KNOWN_RED.tsv` listed three now-passing
+   tests. *Evidence:* §E1, `check_known_red.sh` exit 1 → after the fix, exit 0
+   with `OK: 2 failing test(s), exactly the 2 in tests/KNOWN_RED.tsv`.
+
+4. **NON-BLOCKING — OPEN.** `load_default_allowlists` silently stops reading
+   `~/.config/dcg/allowlist.toml` and the platform-native allowlist whenever
+   `XDG_CONFIG_HOME` is set. *Evidence:* the PRE/POST table in §A1. Fails
+   closed, and the new precedence is now pinned by a test, but the dropped
+   fallback is undocumented and takes an existing user's entries with it.
+   `Config::load_user_config_layer` falls through its three candidates instead
+   of picking one — the same shape here fixes the write/read split without
+   dropping anyone's file.
+
+5. **NON-BLOCKING — OPEN.** `test_matches_scope_falls_back_when_the_path_is_gone`
+   does not pin what its name claims: both sides go through the same
+   transformation, so any deterministic fallback passes. *Evidence:* mutant M6,
+   constant fallback, all three scope tests stayed green.
+
+6. **NON-BLOCKING — OPEN, pre-existing.** `--yes` skips the `Type 'FORCE'`
+   confirmation, so `dcg allow-once <code> --force --yes` clears a config
+   blocklist with no human. *Evidence:* §C3 `cfg-force-yes redeem_rc=0
+   verdict_after=ALLOW (self-cleared)`, stdin `/dev/null`.
+
+7. **NON-BLOCKING — OPEN, pre-existing, adjacent.** Six other hand-rolled
+   spellings of the user-config-dir policy survive, and
+   `pending_exceptions::config_dir_override` demonstrably disagrees with the new
+   function. *Evidence:* §D1 — with `XDG_CONFIG_HOME='~/cfg'`, the allowlist
+   lands in `<sandbox>/home/cfg/dcg/` and the allow-once store in
+   `<sandbox>/work/~/cfg/dcg/`, a directory literally named `~`.
+
+8. **NON-BLOCKING — OPEN.** `Config::user_config_path` (`src/config.rs:3180`) is
+   a line-for-line duplicate of the new `user_config_dir`, in the same file.
+   The most obvious missed call site. *Evidence:* both read in full, arm for arm.
+
+9. **NON-BLOCKING — OPEN.** `MatchSource::ConfigOverride` is now spelled two
+   ways with nothing coupling them (`matches!` at `src/main.rs:761`, the string
+   `"ConfigOverride"` at `src/cli.rs:9947`). *Evidence:* §F1 — I broke the
+   string with a data-only edit to the pending store and **could not turn it
+   into a bypass**; the evaluator's `force_allow_config` gate held
+   (`hook after: DENY`). The consequence is a silent no-op:
+   `dcg allow-once --force --yes` prints `✓ Allow-once entry created`, exits 0,
+   and changes nothing.
+
+10. **NON-BLOCKING — OPEN.** `AGENTS.md:370` and
+    `docs/json-schema/hook-output.json:86` both carry a literal
+    `permissionDecisionReason` example that no longer matches dcg's output.
+    *Evidence:* both read; no test asserts them, so nothing went red.
+
+11. **NON-BLOCKING — fixed at S3.** The `matches_scope` doc claimed a production
+    symptom I could not reproduce. *Evidence:* §A4 — the hatch opened end to end
+    on the pre-change binary through a symlinked cwd. S3 rewrote the claim
+    honestly and made canonicalisation all-or-nothing, which also closed the
+    Windows `\\?\` narrowing I had flagged as an unverified suspicion.
+
+12. **NON-BLOCKING — fixed at S4/S6.** An empty allow-once code was
+    indistinguishable from a real one in both new guards. *Evidence:* mutants
+    M7e and M7g, both green over a denial offering nothing runnable. Closed by
+    `filter(|code| !code.is_empty())`, the e2e precondition assert, and
+    `test_format_denial_message_treats_an_empty_code_as_no_code`.
+
+13. **NON-BLOCKING — fixed at S4.** The hatch line was advertised on config
+    blocklist denials, where the command it names errors and the error names the
+    `--force` escalation. *Evidence:* §C3 `cfg-yes`. Closed by
+    `allow_once_suffices` plus a new e2e test.
+
+14. **NON-BLOCKING — fixed at S3.** "Same wording as `output::denial`" was
+    inaccurate (`To allow once:` vs `If this is a false positive:`).
+
+15. **NON-BLOCKING — fixed at S4.** S1 added a 27th `cargo fmt --check`
+    violation at `src/hook.rs:765`. *Evidence:* `PRE 26 / POST 27`; at S6 the
+    two sets are identical file-for-file.
+
+### Unverified suspicions, marked as such
+
+- **Unverified suspicion:** that Claude Code renders only
+  `permissionDecisionReason` to its agent — the premise the whole hatch line
+  rests on. It is a claim about an external product and this repo cannot test
+  it. The half that lives here I did verify: the code is absent from that string
+  before the change and present after, and a live dcg denial in this session
+  carried no code.
+
+### Note on the review target
+
+The tree moved six times while I was reviewing, three without notice, and at
+05:13 it did not compile. Findings 2, 3, 11, 12, 13, 14 were fixed underneath
+me; I re-measured each rather than taking the fix on trust, and I have said so
+where I only read the code (finding 12's S4 half). My approval covers S6 and
+nothing after it. Re-running the whole mutant harness costs two commands:
+`rsync -a src/ tests/ /tmp/coldrev/pre/` then `/tmp/coldrev/all_mutants.sh`.

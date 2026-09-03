@@ -262,6 +262,62 @@ pub(crate) fn user_config_dir() -> PathBuf {
         .join("dcg")
 }
 
+/// Every directory a user-level dcg file may live in, most-preferred first.
+///
+/// [`user_config_dir`] picks exactly one of these to WRITE to. A reader should
+/// try all of them, because a file may already sit in a location the writer
+/// would not choose today — `XDG_CONFIG_HOME` set after the fact, or a config
+/// predating it.
+fn user_config_dir_candidates() -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::with_capacity(3);
+    // `dedup` would not do: on Linux `dirs::config_dir()` IS `$XDG_CONFIG_HOME`,
+    // so the third candidate duplicates the first without being adjacent to it.
+    let mut push = |dir: PathBuf| {
+        if !candidates.contains(&dir) {
+            candidates.push(dir);
+        }
+    };
+
+    if let Ok(xdg_home) = env::var("XDG_CONFIG_HOME") {
+        if let Some(xdg_home) = resolve_config_path_value(&xdg_home, None) {
+            push(xdg_home.join("dcg"));
+        }
+    }
+    if let Some(home) = dirs::home_dir() {
+        push(home.join(".config").join("dcg"));
+    }
+    if let Some(native) = dirs::config_dir() {
+        push(native.join("dcg"));
+    }
+
+    candidates
+}
+
+/// Where to READ a user-level dcg file named `file_name`.
+///
+/// The first candidate that exists, else where [`user_config_dir`] would write
+/// it — so a missing file still reports the path a user should create.
+///
+/// Reading through the full candidate list while writing to one of them is what
+/// keeps the two ends together *without* orphaning anyone's file. It is the
+/// shape [`Config::load_user_config_layer`] already used for `config.toml`, and
+/// precisely why `config.toml` never had `.agent-config-0kt9v`'s bug. Picking a
+/// single directory on the read side, as the first fix for that bead did, closes
+/// the writer/reader split but silently stops reading a file that is really
+/// there — a macOS user who exports `XDG_CONFIG_HOME` somewhere other than
+/// `~/.config` and keeps an allowlist in either older location would lose every
+/// entry in it. The writer's choice is always a member of this list, so a file
+/// dcg itself wrote is always found.
+pub(crate) fn user_config_file(file_name: &str) -> PathBuf {
+    for dir in user_config_dir_candidates() {
+        let candidate = dir.join(file_name);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    user_config_dir().join(file_name)
+}
+
 /// Resolve a config path value, expanding `~` and resolving relative paths.
 ///
 /// Returns None when the value is empty/whitespace.
@@ -3176,27 +3232,14 @@ impl Config {
     }
 
     /// Get the path to the user config file (creates dir if needed).
+    ///
+    /// The directory choice is [`user_config_dir`]'s, not a second copy of it —
+    /// this used to spell the same three-candidate rule out again, 3000 lines
+    /// below that function, and a duplicate of a path policy is a duplicate that
+    /// will drift (`.agent-config-a6jka`, cold review finding 10).
     #[must_use]
     pub fn user_config_path() -> Option<PathBuf> {
-        let config_dir = if let Ok(xdg_home) = env::var("XDG_CONFIG_HOME") {
-            resolve_config_path_value(&xdg_home, None)
-        } else {
-            None
-        };
-
-        let config_dir = if let Some(config_dir) = config_dir {
-            config_dir
-        } else if let Some(home) = dirs::home_dir() {
-            let xdg_dir = home.join(".config").join("dcg");
-            if xdg_dir.exists() {
-                home.join(".config")
-            } else {
-                dirs::config_dir().unwrap_or_else(|| home.join(".config"))
-            }
-        } else {
-            dirs::config_dir()?
-        };
-        let guard_dir = config_dir.join("dcg");
+        let guard_dir = user_config_dir();
 
         // Create directory if it doesn't exist
         if !guard_dir.exists() {
