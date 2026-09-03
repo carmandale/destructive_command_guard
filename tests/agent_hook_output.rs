@@ -8,22 +8,20 @@
 use std::io::Write;
 use std::process::Stdio;
 
+#[path = "common/payload.rs"]
+mod payload;
 #[path = "common/spawn.rs"]
 mod spawn;
 
 /// Run dcg in hook mode with the given command as JSON input.
 fn run_hook_mode(command: &str) -> (String, String, i32) {
-    let input = format!(
-        r#"{{"tool_name":"Bash","tool_input":{{"command":"{}"}}}}"#,
-        command.replace('\\', "\\\\").replace('"', "\\\"")
-    );
-
     // Cleared, as in `cli_e2e.rs`. Without this these tests read the
     // developer's real `~/.config/dcg/config.toml`, so a local policy
     // downgrade (`"core.git:reset-hard" = "warn"`) makes dcg emit a stderr
     // warning and no JSON — and eleven tests here fail for a reason that has
     // nothing to do with dcg.
-    let (mut cmd, _sandbox) = spawn::dcg();
+    let (mut cmd, sandbox) = spawn::dcg();
+    let input = payload::pre_tool_use(sandbox.root(), command).to_string();
     let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -31,6 +31,9 @@
 use destructive_command_guard as dcg;
 use std::hint::black_box;
 
+#[path = "common/payload.rs"]
+mod payload;
+
 /// Check if we're running under coverage instrumentation.
 ///
 /// Coverage tools (cargo-llvm-cov) add significant memory overhead that makes
@@ -168,12 +171,14 @@ where
     }
 }
 
-/// Test fixture: sample JSON hook input
+/// Test fixture: the JSON a real `PreToolUse` hook sends.
+///
+/// The leak budgets below are per-parse allocation ceilings, so the payload has
+/// to be the one production parses. A minimal `{tool_name, tool_input}` object
+/// allocates four fewer `String`s per call than the envelope Claude Code
+/// actually sends, which would set every budget here below the real cost.
 pub fn sample_hook_input(cmd: &str) -> String {
-    format!(
-        r#"{{"tool_name":"Bash","tool_input":{{"command":"{}"}}}}"#,
-        cmd.replace('\\', r"\\").replace('"', r#"\""#)
-    )
+    payload::pre_tool_use(&std::env::temp_dir(), cmd).to_string()
 }
 
 /// Test fixture: sample heredoc content

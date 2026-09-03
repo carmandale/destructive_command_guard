@@ -193,11 +193,15 @@ cargo test destructive_pattern_tests
 # Run the E2E test script
 ./scripts/e2e_test.sh
 
-# Or test manually
-echo '{"tool_name":"Bash","tool_input":{"command":"git reset --hard"}}' | cargo run --release
-# Should output JSON denial
+# Or test manually. Send the whole PreToolUse envelope, not just tool_name and
+# tool_input — the short form takes a different branch of detect_protocol than
+# any real agent does. See "JSON Input Format" below.
+hook() { printf '{"session_id":"9a02fa0e","transcript_path":"/dev/null","cwd":"%s","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"%s"}}' "$PWD" "$1"; }
 
-echo '{"tool_name":"Bash","tool_input":{"command":"git status"}}' | cargo run --release
+hook 'git reset --hard' | cargo run --release
+# Should output JSON denial with a hookSpecificOutput object
+
+hook 'git status' | cargo run --release
 # Should output nothing (allowed)
 ```
 
@@ -347,6 +351,10 @@ dcg reads from stdin in Claude Code's `PreToolUse` hook format:
 
 ```json
 {
+  "session_id": "9a02fa0e-5133-42b7-8f0e-1d2c3b4a5e6f",
+  "transcript_path": "/Users/you/.claude/projects/-repo/9a02fa0e.jsonl",
+  "cwd": "/Users/you/dev/repo",
+  "hook_event_name": "PreToolUse",
   "tool_name": "Bash",
   "tool_input": {
     "command": "git reset --hard HEAD~5"
@@ -354,9 +362,25 @@ dcg reads from stdin in Claude Code's `PreToolUse` hook format:
 }
 ```
 
-**Required fields:**
+**Fields dcg acts on:**
 - `tool_name`: Must be `"Bash"` for dcg to process (other tools are ignored)
 - `tool_input.command`: The shell command string to evaluate
+- `hook_event_name`: Selects the output protocol. `"PreToolUse"` gets Claude's
+  `hookSpecificOutput` shape; `"BeforeTool"` gets Gemini's.
+
+**Fields dcg reads but does not act on:** `session_id`, `transcript_path` and
+`cwd`. It tests them for presence only, in `detect_protocol`, and never opens
+the transcript.
+
+> **Send the whole envelope, including in tests.** The four fields above
+> `tool_name` are not decoration. A payload carrying only `tool_name` and
+> `tool_input` reaches the Claude output shape through the *fallback* branch of
+> `detect_protocol`, not the branch a real invocation takes. dcg once answered
+> Claude Code in Gemini's protocol — a correct verdict Claude Code cannot parse,
+> which on the wire is an allow — and every test stayed green because every test
+> sent the short payload. Integration tests build this with
+> `payload::pre_tool_use` in `tests/common/payload.rs`; `tests/payload_shape.rs`
+> fails the build if a harness spells one by hand.
 
 ### JSON Output Format (Denial)
 

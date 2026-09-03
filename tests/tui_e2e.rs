@@ -25,6 +25,8 @@
 
 use std::process::Stdio;
 
+#[path = "common/payload.rs"]
+mod payload;
 #[path = "common/spawn.rs"]
 mod spawn;
 
@@ -34,12 +36,7 @@ fn run_hook_with_env(command: &str, env_vars: &[(&str, &str)]) -> (String, Strin
     let (mut cmd, sandbox) = spawn::dcg();
     std::fs::create_dir_all(sandbox.root().join(".git")).expect("failed to create .git dir");
 
-    let input = serde_json::json!({
-        "tool_name": "Bash",
-        "tool_input": {
-            "command": command,
-        }
-    });
+    let input = payload::pre_tool_use(sandbox.root(), command);
 
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())

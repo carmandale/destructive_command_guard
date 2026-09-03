@@ -1,0 +1,3 @@
+{"tool_name":"Bash","tool_input":{"command":"git status"}}
+{"tool_name":"Bash","tool_input":{"command":"echo hello"}}
+{"tool_name":"Read","tool_input":{"path":"file.txt"}}

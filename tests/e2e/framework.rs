@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use super::payload;
 use super::spawn;
 
 /// Result of a DCG command execution.
@@ -338,10 +339,7 @@ impl E2ETestContext {
     /// This simulates the Claude Code hook protocol by sending JSON input to stdin.
     #[must_use]
     pub fn run_dcg_hook(&self, command: &str) -> DcgOutput {
-        let json_input = format!(
-            r#"{{"tool_name":"Bash","tool_input":{{"command":"{}"}}}}"#,
-            escape_json_string(command)
-        );
+        let json_input = payload::pre_tool_use(self.sandbox.root(), command).to_string();
 
         self.run_dcg_with_stdin(&json_input, &[])
     }
@@ -508,15 +506,6 @@ fn get_fixture_config(name: &str) -> String {
         "graduated_response" => GRADUATED_RESPONSE_CONFIG.to_string(),
         _ => panic!("Unknown config fixture: {}", name),
     }
-}
-
-/// Escape a string for JSON embedding.
-fn escape_json_string(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
 }
 
 // ============================================================================
@@ -715,13 +704,6 @@ mod tests {
 
         assert!(output.is_allowed());
         assert!(!output.is_blocked());
-    }
-
-    #[test]
-    fn test_json_escape() {
-        assert_eq!(escape_json_string("hello"), "hello");
-        assert_eq!(escape_json_string("hello\"world"), "hello\\\"world");
-        assert_eq!(escape_json_string("line\nbreak"), "line\\nbreak");
     }
 
     #[test]

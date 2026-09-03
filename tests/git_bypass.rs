@@ -1,18 +1,14 @@
+#[path = "common/payload.rs"]
+mod payload;
 #[path = "common/spawn.rs"]
 mod spawn;
 
 fn run_hook(command: &str) -> String {
-    let input = serde_json::json!({
-        "tool_name": "Bash",
-        "tool_input": {
-            "command": command,
-        }
-    });
-
     // Cleared for the same reason as `cli_e2e.rs`: without it these tests read
     // the developer's real dcg config, and a local `"core.git:reset-hard" =
     // "warn"` downgrade turns a genuine bypass finding into an unrelated red.
-    let (mut cmd, _sandbox) = spawn::dcg();
+    let (mut cmd, sandbox) = spawn::dcg();
+    let input = payload::pre_tool_use(sandbox.root(), command);
     let mut child = cmd
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

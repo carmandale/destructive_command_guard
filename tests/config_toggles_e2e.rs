@@ -21,6 +21,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Stdio;
 
+#[path = "common/payload.rs"]
+mod payload;
 #[path = "common/spawn.rs"]
 mod spawn;
 
@@ -69,12 +71,7 @@ impl TestEnv {
 
     /// Run dcg in hook mode with the given command.
     fn run_hook(&self, command: &str) -> HookOutput {
-        let input = serde_json::json!({
-            "tool_name": "Bash",
-            "tool_input": {
-                "command": command,
-            }
-        });
+        let input = payload::pre_tool_use(self.sandbox.root(), command);
 
         let mut cmd = spawn::dcg_in(&self.sandbox);
         cmd.env("DCG_CONFIG", &self.config_path)
@@ -440,12 +437,7 @@ fn test_config_toggle_defaults_without_config() {
     let (mut cmd, sandbox) = spawn::dcg_with_packs("core.git");
     fs::create_dir_all(sandbox.root().join(".git")).expect("failed to create .git dir");
 
-    let input = serde_json::json!({
-        "tool_name": "Bash",
-        "tool_input": {
-            "command": "git reset --hard HEAD",
-        }
-    });
+    let input = payload::pre_tool_use(sandbox.root(), "git reset --hard HEAD");
 
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())

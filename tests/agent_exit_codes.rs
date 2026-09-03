@@ -12,18 +12,19 @@
 use std::io::Write;
 use std::process::Stdio;
 
+#[path = "common/payload.rs"]
+mod payload;
 #[path = "common/spawn.rs"]
 mod spawn;
 
-/// Run dcg in hook mode with JSON input.
+/// Write `input` to a freshly spawned dcg and collect what it said.
 ///
 /// The environment is cleared, as in `cli_e2e.rs`. Without that these tests
 /// read the developer's real `~/.config/dcg/config.toml`, so their verdicts
 /// depend on local policy rather than on dcg: `test_exit_0_on_deny_with_json`
 /// failed on a machine whose config sets `"core.git:reset-hard" = "warn"`,
 /// which is a deliberate local downgrade and not a dcg regression at all.
-fn run_hook_mode_raw(input: &str) -> (String, String, i32) {
-    let (mut cmd, _sandbox) = spawn::dcg();
+fn run_stdin(mut cmd: std::process::Command, input: &str) -> (String, String, i32) {
     let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -47,12 +48,29 @@ fn run_hook_mode_raw(input: &str) -> (String, String, i32) {
     (stdout, stderr, exit_code)
 }
 
-/// Create valid hook input JSON for a command.
-fn make_hook_input(command: &str) -> String {
-    format!(
-        r#"{{"tool_name":"Bash","tool_input":{{"command":"{}"}}}}"#,
-        command.replace('\\', "\\\\").replace('"', "\\\"")
-    )
+/// Run dcg in hook mode against bytes the caller wrote by hand.
+///
+/// For the tests whose subject *is* a malformed or incomplete payload. A test
+/// about a well-formed invocation wants [`run_hook_mode`] instead, so that what
+/// it sends is the envelope a real `PreToolUse` sends.
+fn run_hook_mode_raw(input: &str) -> (String, String, i32) {
+    let (cmd, _sandbox) = spawn::dcg();
+    run_stdin(cmd, input)
+}
+
+/// Run dcg in hook mode against a real `PreToolUse` payload for `command`.
+fn run_hook_mode(command: &str) -> (String, String, i32) {
+    let (cmd, sandbox) = spawn::dcg();
+    let input = payload::pre_tool_use(sandbox.root(), command).to_string();
+    run_stdin(cmd, &input)
+}
+
+/// Run dcg in hook mode against a real `PreToolUse` envelope for some other
+/// tool, or for a `tool_input` dcg is meant to ignore.
+fn run_hook_mode_for_tool(tool_name: &str, tool_input: serde_json::Value) -> (String, String, i32) {
+    let (cmd, sandbox) = spawn::dcg();
+    let input = payload::pre_tool_use_for_tool(sandbox.root(), tool_name, tool_input).to_string();
+    run_stdin(cmd, &input)
 }
 
 // =============================================================================
@@ -61,8 +79,7 @@ fn make_hook_input(command: &str) -> String {
 
 #[test]
 fn test_exit_0_on_allow_safe_command() {
-    let input = make_hook_input("ls -la");
-    let (stdout, stderr, exit_code) = run_hook_mode_raw(&input);
+    let (stdout, stderr, exit_code) = run_hook_mode("ls -la");
 
     assert_eq!(
         exit_code, 0,
@@ -76,8 +93,7 @@ fn test_exit_0_on_allow_safe_command() {
 
 #[test]
 fn test_exit_0_on_allow_git_status() {
-    let input = make_hook_input("git status");
-    let (stdout, _stderr, exit_code) = run_hook_mode_raw(&input);
+    let (stdout, _stderr, exit_code) = run_hook_mode("git status");
 
     assert_eq!(exit_code, 0, "git status should exit 0");
     assert!(
@@ -88,8 +104,7 @@ fn test_exit_0_on_allow_git_status() {
 
 #[test]
 fn test_exit_0_on_deny_with_json() {
-    let input = make_hook_input("git reset --hard");
-    let (stdout, stderr, exit_code) = run_hook_mode_raw(&input);
+    let (stdout, stderr, exit_code) = run_hook_mode("git reset --hard");
 
     // Per Claude Code protocol, even denied commands exit 0
     // The decision is communicated via JSON in stdout
@@ -115,8 +130,7 @@ fn test_exit_0_on_deny_with_json() {
 
 #[test]
 fn test_exit_0_on_deny_rm_rf() {
-    let input = make_hook_input("rm -rf /important");
-    let (stdout, _stderr, exit_code) = run_hook_mode_raw(&input);
+    let (stdout, _stderr, exit_code) = run_hook_mode("rm -rf /important");
 
     assert_eq!(exit_code, 0, "rm -rf denial should exit 0");
     assert!(!stdout.is_empty(), "denied rm -rf should produce JSON");
@@ -132,8 +146,7 @@ fn test_exit_0_on_deny_rm_rf() {
 
 #[test]
 fn test_exit_0_on_deny_force_push() {
-    let input = make_hook_input("git push --force origin main");
-    let (stdout, _stderr, exit_code) = run_hook_mode_raw(&input);
+    let (stdout, _stderr, exit_code) = run_hook_mode("git push --force origin main");
 
     assert_eq!(exit_code, 0, "force push denial should exit 0");
 
@@ -155,8 +168,8 @@ fn test_exit_0_on_deny_force_push() {
 #[test]
 fn test_exit_0_for_non_bash_tool() {
     // Non-Bash tools should be silently skipped (exit 0, no output)
-    let input = r#"{"tool_name":"Read","tool_input":{"file_path":"/etc/passwd"}}"#;
-    let (stdout, _stderr, exit_code) = run_hook_mode_raw(input);
+    let (stdout, _stderr, exit_code) =
+        run_hook_mode_for_tool("Read", serde_json::json!({ "file_path": "/etc/passwd" }));
 
     assert_eq!(exit_code, 0, "non-Bash tool should exit 0");
     assert!(
@@ -167,9 +180,10 @@ fn test_exit_0_for_non_bash_tool() {
 
 #[test]
 fn test_exit_0_for_write_tool() {
-    let input =
-        r#"{"tool_name":"Write","tool_input":{"file_path":"/tmp/test.txt","content":"hello"}}"#;
-    let (stdout, _stderr, exit_code) = run_hook_mode_raw(input);
+    let (stdout, _stderr, exit_code) = run_hook_mode_for_tool(
+        "Write",
+        serde_json::json!({ "file_path": "/tmp/test.txt", "content": "hello" }),
+    );
 
     assert_eq!(exit_code, 0, "Write tool should exit 0 (skip)");
     assert!(
@@ -238,8 +252,7 @@ fn test_exit_on_missing_tool_name() {
 
 #[test]
 fn test_exit_on_missing_command() {
-    let input = r#"{"tool_name":"Bash","tool_input":{}}"#;
-    let (stdout, _stderr, exit_code) = run_hook_mode_raw(input);
+    let (stdout, _stderr, exit_code) = run_hook_mode_for_tool("Bash", serde_json::json!({}));
 
     // Missing command should be handled gracefully
     assert_eq!(exit_code, 0, "missing command should not error");
@@ -341,8 +354,7 @@ fn test_consistent_exit_codes_across_commands() {
     ];
 
     for cmd in safe_commands {
-        let input = make_hook_input(cmd);
-        let (stdout, stderr, exit_code) = run_hook_mode_raw(&input);
+        let (stdout, stderr, exit_code) = run_hook_mode(cmd);
 
         assert_eq!(
             exit_code, 0,
@@ -366,8 +378,7 @@ fn test_consistent_exit_codes_denied_commands() {
     ];
 
     for cmd in dangerous_commands {
-        let input = make_hook_input(cmd);
-        let (stdout, stderr, exit_code) = run_hook_mode_raw(&input);
+        let (stdout, stderr, exit_code) = run_hook_mode(cmd);
 
         assert_eq!(
             exit_code, 0,

@@ -31,13 +31,20 @@ pub struct HookInput {
     #[serde(alias = "hookEventName")]
     pub hook_event_name: Option<String>,
 
-    /// Gemini session id.
+    /// Session id. Claude Code sends this on every `PreToolUse`; Gemini sends
+    /// it too. Read for presence only, in `detect_protocol`.
+    ///
+    /// Calling these three "Gemini" fields is what caused `.agent-config-d5c7l`:
+    /// they were treated as a marker for Gemini, so a real Claude payload took
+    /// the Gemini branch and got an answer Claude Code cannot parse.
+    /// `hook_event_name` is the field that actually distinguishes the clients.
     pub session_id: Option<String>,
 
-    /// Gemini transcript path.
+    /// Transcript path. Sent by Claude Code and Gemini alike; never opened.
     pub transcript_path: Option<String>,
 
-    /// Gemini working directory.
+    /// The directory the agent is running in. Sent by Claude Code and Gemini
+    /// alike. Read for presence only; dcg uses its own process cwd for scope.
     pub cwd: Option<String>,
 
     /// Gemini event timestamp.

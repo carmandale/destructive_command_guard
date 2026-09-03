@@ -1,16 +1,12 @@
 
+#[path = "common/payload.rs"]
+mod payload;
 #[path = "common/spawn.rs"]
 mod spawn;
 
 fn run_hook(command: &str) -> String {
-    let input = serde_json::json!({
-        "tool_name": "Bash",
-        "tool_input": {
-            "command": command,
-        }
-    });
-
-    let (mut dcg_cmd, _sandbox) = spawn::dcg_with_packs("system.permissions");
+    let (mut dcg_cmd, sandbox) = spawn::dcg_with_packs("system.permissions");
+    let input = payload::pre_tool_use(sandbox.root(), command);
     let mut child = dcg_cmd
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

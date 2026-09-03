@@ -1,4 +1,6 @@
 
+#[path = "common/payload.rs"]
+mod payload;
 #[path = "common/spawn.rs"]
 mod spawn;
 
@@ -8,12 +10,7 @@ fn run_hook_with_allowlist(command: &str, allowlist_content: &str) -> String {
     std::fs::create_dir_all(&user_config_dir).unwrap();
     std::fs::write(user_config_dir.join("allowlist.toml"), allowlist_content).unwrap();
 
-    let input = serde_json::json!({
-        "tool_name": "Bash",
-        "tool_input": {
-            "command": command,
-        }
-    });
+    let input = payload::pre_tool_use(sandbox.root(), command);
 
     let mut child = dcg_cmd
         // Ensure system allowlist doesn't interfere
@@ -160,10 +157,7 @@ fn test_xdg_allowlist_outranks_the_older_location() {
 }
 
 fn run_hook_in_sandbox(sandbox: &spawn::Sandbox, command: &str) -> String {
-    let input = serde_json::json!({
-        "tool_name": "Bash",
-        "tool_input": { "command": command },
-    });
+    let input = payload::pre_tool_use(sandbox.root(), command);
 
     let mut child = spawn::dcg_in(sandbox)
         .env("DCG_ALLOWLIST_SYSTEM_PATH", "/nonexistent")

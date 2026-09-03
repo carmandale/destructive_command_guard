@@ -13,6 +13,8 @@
 use std::io::Write;
 use std::process::Stdio;
 
+#[path = "common/payload.rs"]
+mod payload;
 #[path = "common/spawn.rs"]
 mod spawn;
 
@@ -50,12 +52,7 @@ fn run_dcg_hook_with_env(command: &str, extra_env: &[(&str, &std::ffi::OsStr)]) 
     let (mut cmd, sandbox) = spawn::dcg();
     std::fs::create_dir_all(sandbox.root().join(".git")).expect("failed to create .git dir");
 
-    let input = serde_json::json!({
-        "tool_name": "Bash",
-        "tool_input": {
-            "command": command,
-        }
-    });
+    let input = payload::pre_tool_use(sandbox.root(), command);
 
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -416,12 +413,7 @@ mod allow_once_flow_tests {
 
         /// Run dcg in hook mode with JSON input.
         fn run_hook(&self, command: &str) -> HookRunOutput {
-            let input = serde_json::json!({
-                "tool_name": "Bash",
-                "tool_input": {
-                    "command": command,
-                }
-            });
+            let input = payload::pre_tool_use(self.sandbox.root(), command);
 
             let mut cmd = spawn::dcg_in(&self.sandbox);
             cmd.env("DCG_PENDING_EXCEPTIONS_PATH", &self.pending_path)
@@ -460,12 +452,9 @@ mod allow_once_flow_tests {
 
         /// Run dcg in hook mode in a different directory (for scoping tests).
         fn run_hook_in_dir(&self, command: &str, cwd: &std::path::Path) -> HookRunOutput {
-            let input = serde_json::json!({
-                "tool_name": "Bash",
-                "tool_input": {
-                    "command": command,
-                }
-            });
+            // The envelope's `cwd` is the directory the agent is in, which for
+            // this helper is the caller's `cwd`, not the sandbox root.
+            let input = payload::pre_tool_use(cwd, command);
 
             let mut cmd = spawn::dcg_in(&self.sandbox);
             cmd.env("DCG_PENDING_EXCEPTIONS_PATH", &self.pending_path)
@@ -711,12 +700,7 @@ block = [
         .expect("write config");
 
         // Run hook with the config (this creates a pending entry)
-        let input = serde_json::json!({
-            "tool_name": "Bash",
-            "tool_input": {
-                "command": command,
-            }
-        });
+        let input = payload::pre_tool_use(env.sandbox.root(), command);
 
         let mut cmd = spawn::dcg_in(&env.sandbox);
         cmd.env("DCG_PENDING_EXCEPTIONS_PATH", &env.pending_path)
@@ -1436,12 +1420,7 @@ mod hook_mode_tests {
     ) -> HookRunOutput {
         std::fs::create_dir_all(cwd.join(".git")).expect("failed to create .git dir");
 
-        let input = serde_json::json!({
-            "tool_name": "Bash",
-            "tool_input": {
-                "command": command,
-            }
-        });
+        let input = payload::pre_tool_use(cwd, command);
 
         let (mut cmd, _sandbox) = spawn::dcg();
         cmd.current_dir(cwd)
@@ -1900,10 +1879,11 @@ mod simulate_tests {
 
     #[test]
     fn simulate_hook_json_file() {
-        let content = r#"{"tool_name":"Bash","tool_input":{"command":"git status"}}
-{"tool_name":"Bash","tool_input":{"command":"echo hello"}}
-{"tool_name":"Read","tool_input":{"path":"file.txt"}}
-"#;
+        // `dcg simulate` reads a log of past tool calls through its own parser
+        // in `src/simulate.rs`, which never looks at the PreToolUse envelope.
+        // The fixture therefore stays the minimal shape that module documents;
+        // see tests/fixtures/simulate/README.md.
+        let content = include_str!("fixtures/simulate/hook_json.jsonl");
         let file = create_temp_log_file(content);
 
         let output = run_simulate_file(file.path().to_str().unwrap(), &["--format", "json"]);
@@ -2178,11 +2158,9 @@ mod simulate_tests {
 
     #[test]
     fn simulate_strict_mode_fails_on_malformed() {
-        // Valid JSON with missing command field
-        let content = r#"git status
-{"tool_name":"Bash","tool_input":{}}
-echo hello
-"#;
+        // Valid JSON with missing command field. A simulate log fixture, not a
+        // hook payload — see tests/fixtures/simulate/README.md.
+        let content = include_str!("fixtures/simulate/mixed_with_malformed.log");
         let file = create_temp_log_file(content);
 
         let output = run_simulate_file(file.path().to_str().unwrap(), &["--strict"]);
@@ -2196,11 +2174,9 @@ echo hello
 
     #[test]
     fn simulate_non_strict_continues_on_malformed() {
-        // Valid JSON with missing command field
-        let content = r#"git status
-{"tool_name":"Bash","tool_input":{}}
-echo hello
-"#;
+        // Valid JSON with missing command field. A simulate log fixture, not a
+        // hook payload — see tests/fixtures/simulate/README.md.
+        let content = include_str!("fixtures/simulate/mixed_with_malformed.log");
         let file = create_temp_log_file(content);
 
         let output = run_simulate_file(file.path().to_str().unwrap(), &["--format", "json"]);
@@ -3395,12 +3371,7 @@ custom_paths = ["{}"]
             .expect("failed to write config");
 
         // Run hook with command
-        let input = serde_json::json!({
-            "tool_name": "Bash",
-            "tool_input": {
-                "command": command,
-            }
-        });
+        let input = payload::pre_tool_use(sandbox.root(), command);
 
         // The config's `[packs]` table selects the packs here, so the env must not.
         cmd.env_remove("DCG_PACKS")
@@ -4269,26 +4240,26 @@ mod claude_protocol_tests {
 
     /// dcg must answer a real Claude Code PreToolUse payload in Claude's shape.
     ///
-    /// Every other harness in this file sends a minimal `{tool_name, tool_input}`
+    /// Every harness in this file once sent a minimal `{tool_name, tool_input}`
     /// payload, and that is exactly why this went unnoticed: the minimal payload
-    /// happened to route to the Claude branch. A real invocation also carries
-    /// session_id, transcript_path and cwd, which `detect_protocol` read as
-    /// "Gemini context" and tested first — so dcg replied `{"decision":"deny"}`,
-    /// which Claude Code does not read. The verdict was correct and unreadable,
-    /// which on the wire is indistinguishable from an allow.
+    /// happened to route to the Claude branch, by falling off the end of
+    /// `detect_protocol` rather than by the branch a real invocation takes. A
+    /// real invocation also carries session_id, transcript_path and cwd, which
+    /// `detect_protocol` read as "Gemini context" and tested first — so dcg
+    /// replied `{"decision":"deny"}`, which Claude Code does not read. The
+    /// verdict was correct and unreadable, which on the wire is
+    /// indistinguishable from an allow.
+    ///
+    /// It sends `payload::pre_tool_use` rather than a literal on purpose. Every
+    /// other hook-mode harness in the suite now sends that builder's bytes, so
+    /// this is where a regression in the builder — a dropped `hook_event_name`,
+    /// say — becomes one red test instead of a suite that quietly goes back to
+    /// exercising a branch no agent reaches.
     #[test]
     fn real_claude_payload_gets_hook_specific_output() {
         let (mut cmd, sandbox) = spawn::dcg();
 
-        // The full envelope a real PreToolUse hook receives.
-        let input = serde_json::json!({
-            "session_id": "9a02fa0e-5133-42",
-            "transcript_path": "/dev/null",
-            "cwd": sandbox.root().to_string_lossy(),
-            "hook_event_name": "PreToolUse",
-            "tool_name": "Bash",
-            "tool_input": { "command": "git reset --hard" }
-        });
+        let input = payload::pre_tool_use(sandbox.root(), "git reset --hard");
 
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())

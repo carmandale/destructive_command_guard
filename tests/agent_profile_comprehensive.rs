@@ -20,6 +20,8 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::process::Stdio;
 
+#[path = "common/payload.rs"]
+mod payload;
 #[path = "common/spawn.rs"]
 mod spawn;
 
@@ -30,12 +32,8 @@ mod spawn;
 /// Path to the DCG binary (uses same target directory as the test binary).
 /// Run DCG in hook mode with environment variables.
 fn run_hook_mode_with_env(command: &str, env_vars: &[(&str, &str)]) -> (String, String, i32) {
-    let input = format!(
-        r#"{{"tool_name":"Bash","tool_input":{{"command":"{}"}}}}"#,
-        command.replace('\\', "\\\\").replace('"', "\\\"")
-    );
-
-    let (mut cmd, _sandbox) = spawn::dcg();
+    let (mut cmd, sandbox) = spawn::dcg();
+    let input = payload::pre_tool_use(sandbox.root(), command).to_string();
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

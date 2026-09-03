@@ -84,6 +84,10 @@
 
 pub mod framework;
 pub mod logging;
+/// The stdin payload a real `PreToolUse` hook sends, included once here for
+/// the same reason as `spawn` below.
+#[path = "../common/payload.rs"]
+pub mod payload;
 /// Isolated spawning of the dcg binary, included once here so a root that
 /// declares `mod e2e;` gets it as `e2e::spawn` and never loads the file twice.
 #[path = "../common/spawn.rs"]
