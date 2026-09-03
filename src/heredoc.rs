@@ -2790,12 +2790,34 @@ pub fn heredoc_body_sinks_into_shell_script(command: &str, heredoc_start: usize)
 /// apart. There is now one site to add a veto to.
 ///
 /// A caller passes its own two offsets and they are not interchangeable.
-/// `heredoc_start` points at the `<<` operator, because three of the four vetoes
-/// scan the heredoc's own command line from there. `body_end` points just past
-/// the terminator (or, for a here-string, past the closing quote), because
-/// `compound_output_reaches_executor` resumes AFTER the body to find the
-/// enclosing compound's pipeline. The evaluator site derives both from
-/// `ExtractedContent::byte_range`, whose ends mean the same two things.
+/// `heredoc_start` is where three of the four vetoes begin scanning the
+/// heredoc's own command line; `body_end` is where
+/// `compound_output_reaches_executor` resumes to find the ENCLOSING compound's
+/// pipeline, so it has to be past the body.
+///
+/// The evaluator site passes `ExtractedContent::byte_range`, and its two ends do
+/// NOT mean exactly what the masking sites' do. Both differences were measured
+/// and both are harmless for a stated reason rather than by luck:
+///
+/// - **`byte_range.start` is not always a `<<`.** `ExtractedContent` has three
+///   producers, and `extract_inline_scripts` sets the range from the interpreter
+///   regex, so `python3 -c '...'` arrives with the range starting at `python3`.
+///   `evaluate_heredoc` loops over every extracted content, so this function
+///   really is called with that offset. Clause 1 is what saves it: that regex
+///   only ever yields `python|ruby|irb|perl|node|php|lua|sh|bash|zsh|fish`, and
+///   none of them is in `NON_EXECUTING_HEREDOC_COMMANDS`, so the offsets are
+///   never consulted. Put one data-sink name into that alternation and this
+///   paragraph becomes load-bearing.
+/// - **The two `body_end` values differ by the terminator's line ending.**
+///   `find_heredoc_terminator` returns a value past the newline;
+///   `extract_heredoc_body`'s `terminator_end` has `\n` and `\r` stripped. The
+///   gap is one or two bytes, and it closes because
+///   `compound_output_reaches_executor` opens by consuming whitespace and `;`,
+///   and a newline does not set `separator_since_closer`.
+///
+/// Found by the `.agent-config-c29fn` cold reviewer, which probed
+/// `extract_content` directly rather than believing the sentence that used to
+/// stand here.
 #[must_use]
 pub fn heredoc_body_is_inert(
     command: &str,

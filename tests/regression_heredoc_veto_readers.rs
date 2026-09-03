@@ -22,16 +22,25 @@
 //!
 //! `heredoc_body_is_inert` is now the single reader, which is the fix — a veto
 //! cannot be added to fewer than three sites when there is only one site. This
-//! file is the behavioural half: one test per reader, so deleting a veto from
+//! file is the behavioural half: one test per reader, so deleting a clause from
 //! the shared predicate goes red in ALL THREE rather than in whichever one the
 //! author happened to look at. Each test reports every row it failed instead of
 //! aborting at the first, because "one reader still red" and "three readers
 //! still red" are the two answers this file exists to tell apart.
 //!
-//! Written from both sides. The first three tests pin that each veto is still
-//! read; the last two pin that spec 333's whole point — documentation text is
-//! DATA — survived. A predicate that vetoed everything would score perfectly on
-//! the first three alone.
+//! Written from both sides. The first three tests pin that each of the five
+//! questions is still asked; the last two pin that spec 333's whole point —
+//! documentation text is DATA — survived. A predicate that vetoed everything
+//! would score perfectly on the first three alone.
+//!
+//! **What the rest of the tree already covers, and what it does not.** Delete
+//! any one veto and 9 to 22 pre-existing tests go red on their own, so on those
+//! this file is belt-and-braces. Its unique coverage is one route: give the
+//! evaluator only the receiver check and leave both masking sites whole — the
+//! historical 41wu8 shape — and `cat <<<'rm -rf /' | bash` ALLOWs on the binary
+//! while `repro_heredoc_pipe_to_shell.rs`'s here-string case still reports green,
+//! because that one asserts on `mask_non_executing_heredocs` rather than on
+//! `evaluate_command`. Nothing else in `tests/` denies that route.
 
 use destructive_command_guard::heredoc::mask_non_executing_heredocs;
 use destructive_command_guard::{Config, LayeredAllowlist, evaluate_command, packs::REGISTRY};
@@ -40,9 +49,15 @@ use destructive_command_guard::{Config, LayeredAllowlist, evaluate_command, pack
 /// difference can only come from the plumbing, never from the payload.
 const TRIGGER: &str = "rm -rf /";
 
-/// Heredoc shapes, one per veto, each reaching an executor by exactly one route.
-/// These exercise the heredoc masking site.
+/// Heredoc shapes, one per question, each reaching an executor by exactly one
+/// route. These exercise the heredoc masking site.
 const HEREDOC_REACHES_AN_EXECUTOR: &[(&str, &str)] = &[
+    // is_non_executing_heredoc_command — the receiver runs the body itself, and
+    // no veto is involved. Without this row every table here uses `cat`, so
+    // nothing distinguishes "the receiver is a data sink" from "there is a
+    // receiver": a predicate reading `is_some_and(|_| true)` scores 5/5 while
+    // `bash <<'EOF'`, `sh <<'EOF'` and `bash <<<'…'` all turn ALLOW.
+    ("executing receiver", "bash <<'EOF'\nrm -rf /\nEOF"),
     // heredoc_output_reaches_executor — the pipe is on the heredoc's own line.
     ("pipeline", "cat <<'EOF' | bash\nrm -rf /\nEOF"),
     // compound_output_reaches_executor — the pipe belongs to the GROUP, two
@@ -56,23 +71,32 @@ const HEREDOC_REACHES_AN_EXECUTOR: &[(&str, &str)] = &[
     ("script sink", "cat <<'EOF' > deploy.sh\nrm -rf /\nEOF"),
 ];
 
-/// The same four vetoes in here-string shapes. These exercise the here-string
-/// masking site, and `compound` is the row that stayed open on the binary when
-/// two of the three readers had been fixed and the third had not.
+/// The same five questions in here-string shapes. These exercise the
+/// here-string masking site, and `compound` is the row that stayed open on the
+/// binary when two of the three readers had been fixed and the third had not.
 const HERESTRING_REACHES_AN_EXECUTOR: &[(&str, &str)] = &[
+    ("executing receiver", "bash <<<'rm -rf /'"),
     ("pipeline", "cat <<<'rm -rf /' | bash"),
     ("compound", "{ cat <<<'rm -rf /'; } | bash"),
     ("substitution", "eval \"$(cat <<<'rm -rf /')\""),
     ("script sink", "cat <<<'rm -rf /' > deploy.sh"),
 ];
 
-/// The false positives spec 333 exists to remove: each is the nearest RUNNABLE
-/// neighbour of a row above with its veto's condition taken away.
+/// The false positives spec 333 exists to remove. Each is the nearest RUNNABLE
+/// neighbour of a row above with that row's reason to execute taken away, and
+/// the pairing is meant to be complete — a veto with no neighbour here is
+/// unpinned in the false-positive direction, which is how an over-firing
+/// substitution gate (`echo` treated as executing its argument) could turn
+/// documentation text into a denial while this file scored 5/5.
 const HEREDOC_STAYS_DATA: &[(&str, &str)] = &[
     ("bare", "cat <<'EOF'\nrm -rf /\nEOF"),
     (
         "group into a file",
         "{ cat <<'EOF'\nrm -rf /\nEOF\n} > notes.md",
+    ),
+    (
+        "substitution into a data sink",
+        "echo \"$(cat <<'EOF'\nrm -rf /\nEOF\n)\"",
     ),
     (
         "sink that is not a script",
@@ -90,6 +114,10 @@ const HEREDOC_STAYS_DATA: &[(&str, &str)] = &[
 const HERESTRING_STAYS_DATA: &[(&str, &str)] = &[
     ("bare", "cat <<<'rm -rf /'"),
     ("group into a file", "{ cat <<<'rm -rf /'; } > notes.md"),
+    (
+        "substitution into a data sink",
+        "echo \"$(cat <<<'rm -rf /')\"",
+    ),
     ("sink that is not a script", "cat <<<'rm -rf /' > notes.md"),
 ];
 
