@@ -357,6 +357,11 @@ fn every_listed_receiver_masks_its_body_including_the_new_entries() {
     // context-aware path that reads the unmasked command — pre-existing on
     // unpatched main, unrelated to the pipeline, and filed separately. This test
     // pins the masking half, which is the half the gate is built on.
+    //
+    // `awk` WAS on this list and is deliberately absent now: `awk -f -` reads its
+    // PROGRAM from stdin and an awk program can call `system()`, so it never kept
+    // the list's promise (.agent-config-zbzox). Do not re-add it — the row below
+    // pins the other half and will go red if you do (.agent-config-vyjkz).
     for receiver in [
         "cat",
         "tee /tmp/j6ha9-notes.txt",
@@ -364,7 +369,6 @@ fn every_listed_receiver_masks_its_body_including_the_new_entries() {
         "egrep",
         "fgrep",
         "sed",
-        "awk",
         "sort",
         "wc",
         "base64",
@@ -405,6 +409,33 @@ fn every_listed_receiver_masks_its_body_including_the_new_entries() {
     ] {
         let cmd = format!("{receiver} <<'EOF'\n{TRIGGER}\nEOF");
         assert_body_masked(&cmd, "a receiver on the non-executing list");
+    }
+}
+
+#[test]
+fn awk_executes_its_stdin_so_its_body_is_never_data_vyjkz() {
+    // The other half of removing a member from NON_EXECUTING_HEREDOC_COMMANDS.
+    // The list test above lost a row; without this one, re-adding `awk` would
+    // turn no test red and the hole .agent-config-zbzox closed would reopen in
+    // silence. That removal landed (7ba3698) with the list test still naming
+    // awk, which is what .agent-config-vyjkz was filed for.
+    //
+    // Both directions, because ONE list answers both questions: `awk` as the
+    // receiver, and `awk` as a downstream stage — `heredoc_output_reaches_executor`
+    // consults the same list, so a member is trusted on both sides at once.
+    // All three receiver spellings were verified to really execute on macOS
+    // awk 20200816 by zbzox, each creating its marker.
+    for cmd in [
+        // awk receives the heredoc.
+        format!("awk <<'EOF'\n{TRIGGER}\nEOF"),
+        format!("awk -f - <<'EOF'\n{TRIGGER}\nEOF"),
+        format!("awk '{{system($0)}}' <<'EOF'\n{TRIGGER}\nEOF"),
+        // awk is downstream of a data sink.
+        format!("cat <<'EOF' | awk -f -\n{TRIGGER}\nEOF"),
+        format!("cat <<'EOF' | awk '{{system($0)}}'\n{TRIGGER}\nEOF"),
+    ] {
+        assert_body_visible(&cmd, "awk can execute what it reads from stdin");
+        assert_denied(&cmd, "awk can execute what it reads from stdin");
     }
 }
 
