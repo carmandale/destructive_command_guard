@@ -1,0 +1,37 @@
+# False positives: program names that merely end in a keyword
+#
+# A hyphen is an ordinary character in a program name. `my-git`, `git-lfs` and
+# `docker-compose` are whole names, so a keyword touching a hyphen belongs to a
+# different command. Neither regex engine here can look behind, so the
+# unanchored pack patterns matched three characters into `my-git` and blocked a
+# program that is not git at all.
+#
+# NOTE: This file contains ONLY commands expected to be ALLOWED. It is the
+# mirror of ../bypass_attempts/redirection.toml: same question about where a
+# command word begins and ends, asked from the over-blocking side. Widening the
+# anchor to catch a bypass tends to break these rows, and narrowing it to fix
+# these rows tends to open a bypass, so run both files together.
+
+[[case]]
+description = "hyphenated program name ending in git is not git"
+command = "my-git reset --hard"
+expected = "allow"
+
+[[case]]
+description = "hyphenated program name with a git subcommand it does not own"
+command = "my-git clean -fd"
+expected = "allow"
+
+[[case]]
+description = "hyphenated program name ending in rm is not rm"
+command = "my-rm -rf /"
+expected = "allow"
+
+# A digit-suffixed program name is a different command too, and the fd prefix of
+# a redirection is not glued to it: `git2>/dev/null` runs `git2`, exactly as
+# `git2 >/dev/null` does.
+
+[[case]]
+description = "digit-suffixed program name with a glued redirection is not git"
+command = "git2>/dev/null reset --hard"
+expected = "allow"

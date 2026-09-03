@@ -14,6 +14,23 @@
 use std::borrow::Cow;
 use std::sync::OnceLock;
 
+/// How many mid-word starts [`CompiledRegex::find_command_word`] steps over
+/// before it stops looking. Each restart costs one more scan of the command, so
+/// this bounds the worst case a crafted command can impose.
+const MAX_BOUNDARY_RESTARTS: usize = 64;
+
+/// Round `offset` up to the next UTF-8 character boundary.
+///
+/// `find_at`/`find_from_pos` take a byte offset into the haystack and panic on
+/// one that splits a character, so a restart just past a multi-byte character
+/// must land on the next real boundary.
+fn next_char_boundary(text: &str, mut offset: usize) -> usize {
+    while offset < text.len() && !text.is_char_boundary(offset) {
+        offset += 1;
+    }
+    offset
+}
+
 /// A compiled regex that auto-selects between linear-time and backtracking engines.
 ///
 /// Use this instead of `fancy_regex::Regex` directly when the pattern may not
@@ -116,6 +133,53 @@ impl CompiledRegex {
             Self::Linear(re) => re.find(text).map(|m| (m.start(), m.end())),
             Self::Backtracking(re) => re.find(text).ok().flatten().map(|m| (m.start(), m.end())),
         }
+    }
+
+    /// Find the first match that begins at a command-word boundary.
+    ///
+    /// Restarts the search one character past a rejected start rather than past
+    /// the whole match. `my-git status && git reset --hard` is why: the git
+    /// pattern's `(?:\S+\s+)*` makes its leftmost match swallow the entire line,
+    /// so a non-overlapping walk would find nothing after it and report the
+    /// command clean. Restarting from `start + 1` finds the real `git` at 17.
+    ///
+    /// The search always runs against the whole haystack with an offset, never a
+    /// slice, so `^` and lookbehind still see the text in front of them.
+    ///
+    /// If a pathological command exhausts [`MAX_BOUNDARY_RESTARTS`], the last
+    /// match found is returned rather than `None`: this is a guard, and a
+    /// too-strict answer costs a detour where a missed one costs the thing the
+    /// guard exists to protect.
+    #[must_use]
+    pub fn find_command_word(&self, text: &str) -> Option<(usize, usize)> {
+        let mut at = 0usize;
+        let mut last_rejected: Option<(usize, usize)> = None;
+
+        for _ in 0..MAX_BOUNDARY_RESTARTS {
+            let found = match self {
+                Self::Linear(re) => re.find_at(text, at).map(|m| (m.start(), m.end())),
+                Self::Backtracking(re) => re
+                    .find_from_pos(text, at)
+                    .ok()
+                    .flatten()
+                    .map(|m| (m.start(), m.end())),
+            };
+
+            let Some((start, end)) = found else {
+                return None;
+            };
+            if !crate::packs::match_starts_mid_word(text, start) {
+                return Some((start, end));
+            }
+
+            last_rejected = Some((start, end));
+            at = next_char_boundary(text, start + 1);
+            if at > text.len() {
+                return None;
+            }
+        }
+
+        last_rejected
     }
 
     /// Get the pattern string.
@@ -307,6 +371,21 @@ impl LazyCompiledRegex {
     pub fn find(&self, haystack: &str) -> Option<(usize, usize)> {
         self.get_compiled()
             .and_then(|compiled| compiled.find(haystack))
+    }
+
+    /// Find the first match that begins at a command-word boundary.
+    ///
+    /// Same as [`Self::find`], except that a match starting partway through a
+    /// longer word is passed over rather than returned: `my-git reset --hard`
+    /// and `digit reset --hard` are not `git`. Later matches are still
+    /// considered, so `my-git status && git reset --hard` still reports the real
+    /// one — dropping the pattern at the first mid-word hit would be a bypass.
+    ///
+    /// Returns `None` if no match qualifies, or on execution/compile error.
+    #[must_use]
+    pub fn find_command_word(&self, haystack: &str) -> Option<(usize, usize)> {
+        self.get_compiled()
+            .and_then(|compiled| compiled.find_command_word(haystack))
     }
 
     /// Get the pattern string.

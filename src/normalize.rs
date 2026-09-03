@@ -1546,11 +1546,132 @@ fn apply_path_normalizers(base: &str) -> Option<String> {
     None
 }
 
+/// Restore the word break that an unquoted redirection operator already makes.
+///
+/// `>` and `<` are shell metacharacters: they end the current word wherever they
+/// appear, so `git>/dev/null reset --hard` runs exactly what
+/// `git >/dev/null reset --hard` runs. Pack patterns anchor the command word with
+/// `git\s+`, so the glued spelling matched nothing and the guard allowed a real
+/// destructive invocation (`.agent-config-6yt2i`). Writing the space the shell
+/// already implies lets every existing pattern see the command word it was
+/// written for, instead of teaching each pattern about redirections.
+///
+/// Left exactly as written:
+/// - quoted and backslash-escaped `>`/`<`, which are data, not operators;
+/// - heredoc and here-string operators (`<<`, `<<<`), whose tokenization the
+///   heredoc masker owns — re-spacing them would change which delimiter it reads;
+/// - a file-descriptor prefix that is already its own word (`cmd 2>&1`), where
+///   the word ended before the digits and no break is missing.
+#[must_use]
+pub fn split_glued_redirections(command: &str) -> Cow<'_, str> {
+    let bytes = command.as_bytes();
+    if !bytes.iter().any(|b| matches!(b, b'>' | b'<')) {
+        return Cow::Borrowed(command);
+    }
+
+    let len = bytes.len();
+    let mut out: Option<String> = None;
+    let mut copied = 0usize;
+    let mut i = 0usize;
+
+    while i < len {
+        match bytes[i] {
+            b'\\' => {
+                // Escaped byte: `\>` is a literal, not an operator.
+                i = (i + 2).min(len);
+            }
+            b'\'' => {
+                i += 1;
+                while i < len && bytes[i] != b'\'' {
+                    i += 1;
+                }
+                if i < len {
+                    i += 1;
+                }
+            }
+            b'"' => {
+                i += 1;
+                while i < len {
+                    match bytes[i] {
+                        b'"' => {
+                            i += 1;
+                            break;
+                        }
+                        b'\\' => {
+                            i = (i + 2).min(len);
+                        }
+                        _ => i += 1,
+                    }
+                }
+            }
+            b'<' if i + 1 < len && bytes[i + 1] == b'<' => {
+                // Heredoc (`<<`) or here-string (`<<<`): not ours to re-space.
+                i += 2;
+                if i < len && bytes[i] == b'<' {
+                    i += 1;
+                }
+            }
+            b'>' | b'<' => {
+                // `&>` redirects both streams; the `&` belongs to the operator,
+                // so the break goes in front of it.
+                let mut op_start = i;
+                if bytes[i] == b'>' && op_start > 0 && bytes[op_start - 1] == b'&' {
+                    op_start -= 1;
+                }
+
+                // Walk back over an fd prefix (`2>`, `10>>`). If only digits stand
+                // between the operator and whitespace, the previous word already
+                // ended and nothing is glued.
+                let mut word_end = op_start;
+                while word_end > 0 && bytes[word_end - 1].is_ascii_digit() {
+                    word_end -= 1;
+                }
+                let fd_prefix_is_its_own_word = word_end < op_start
+                    && (word_end == 0 || bytes[word_end - 1].is_ascii_whitespace());
+
+                if op_start > 0
+                    && !bytes[op_start - 1].is_ascii_whitespace()
+                    && !fd_prefix_is_its_own_word
+                {
+                    let buf = out.get_or_insert_with(|| String::with_capacity(len + 4));
+                    buf.push_str(&command[copied..op_start]);
+                    buf.push(' ');
+                    copied = op_start;
+                }
+
+                // Consume the whole operator so `>>` is not re-examined.
+                while i < len && matches!(bytes[i], b'>' | b'<') {
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+
+    match out {
+        Some(mut buf) => {
+            buf.push_str(&command[copied..]);
+            Cow::Owned(buf)
+        }
+        None => Cow::Borrowed(command),
+    }
+}
+
 /// Normalize a command by stripping absolute paths from common binaries.
 ///
 /// Returns the original command unchanged if normalization fails (fail-open).
 #[inline]
 pub fn normalize_command(cmd: &str) -> Cow<'_, str> {
+    // 0. Restore the word break an unquoted redirection already makes, so the
+    //    command word is visible to every later step (tokenizer, path
+    //    normalizers, pack patterns).
+    match split_glued_redirections(cmd) {
+        Cow::Borrowed(_) => normalize_command_inner(cmd),
+        Cow::Owned(split) => Cow::Owned(normalize_command_inner(&split).into_owned()),
+    }
+}
+
+fn normalize_command_inner(cmd: &str) -> Cow<'_, str> {
     // 1. Strip wrappers (sudo, env, etc.)
     let stripped = crate::normalize::strip_wrapper_prefixes(cmd);
 

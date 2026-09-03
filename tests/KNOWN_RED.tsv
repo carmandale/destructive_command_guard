@@ -21,7 +21,5 @@
 hook_mode_tests::hook_mode_allow_once_allows_pack_denied_command	.agent-config-a6jka	allow-once override via DCG_ALLOW_ONCE_PATH is not honoured in hook mode
 hook_mode_tests::hook_mode_allow_once_can_override_config_block_with_force_flag	.agent-config-a6jka	same override channel, force-flag spelling
 test_exact_command_allowlist_works	.agent-config-0kt9v	user allowlist.toml in the sandbox config dir is not consulted; same shape as a6jka
-tests::test_redirection_bypass	.agent-config-6yt2i	UNDER-BLOCK: a quoted command word with a glued redirection is not matched
-tests::test_hyphenated_false_positive	.agent-config-za1pf	a pattern anchors inside a hyphenated word, blocking a wrapper name
 test_audit_backtracking_requirements	.agent-config-rzo28	two lookahead patterns backtrack and the audit's expected set does not name them
 src/output/progress.rs - output::progress (line 27) - compile	.agent-config-bbdqd	the module's doc example does not compile against the current API

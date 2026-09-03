@@ -511,7 +511,7 @@ impl Pack {
     pub fn matches_destructive(&self, cmd: &str) -> Option<DestructiveMatch> {
         self.destructive_patterns
             .iter()
-            .find(|p| p.regex.is_match(cmd))
+            .find(|p| p.regex.find_command_word(cmd).is_some())
             .map(|p| DestructiveMatch {
                 reason: p.reason,
                 name: p.name,
@@ -1852,9 +1852,38 @@ static GIT_FINDER: LazyLock<memmem::Finder<'static>> = LazyLock::new(|| memmem::
 #[allow(dead_code)]
 static RM_FINDER: LazyLock<memmem::Finder<'static>> = LazyLock::new(|| memmem::Finder::new("rm"));
 
+/// Bytes that can sit inside a single command word.
+///
+/// A hyphen counts. `my-git`, `docker-compose` and `git-lfs` are whole program
+/// names, not the keyword plus punctuation, so a keyword touching a hyphen is a
+/// different command: `my-git reset --hard` is not `git`, and `docker run --rm`
+/// is not `rm`. Without the hyphen here the keyword gate accepted those and the
+/// unanchored pack pattern then matched mid-word (`.agent-config-6yt2i`).
 #[inline]
 const fn is_word_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_'
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'
+}
+
+/// True when a match begins inside a longer word.
+///
+/// Pack patterns spell the command word literally (`git\s+…`) and neither regex
+/// engine here can look behind, so the leftmost match of the git pattern in
+/// `my-git reset --hard` or `digit reset --hard` starts partway through a
+/// program name that is not git. The keyword gate catches that only while git is
+/// the sole enabled keyword; under a real pack set another pack's keyword lets
+/// the command through the gate and the unanchored pattern fires
+/// (`.agent-config-6yt2i`).
+///
+/// A match that starts with a word byte must start at a word boundary. Patterns
+/// that begin with `/`, `.`, `$` or a quote are unaffected, which is what keeps
+/// `./git` and `/opt/custom/git` blocked.
+#[must_use]
+pub fn match_starts_mid_word(haystack: &str, start: usize) -> bool {
+    let bytes = haystack.as_bytes();
+    if start == 0 || start >= bytes.len() {
+        return false;
+    }
+    is_word_byte(bytes[start]) && is_word_byte(bytes[start - 1])
 }
 
 #[inline]

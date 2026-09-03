@@ -1,0 +1,66 @@
+# Bypass attempts: a redirection glued to the command word
+#
+# `>` and `<` are shell metacharacters. They end the current word wherever they
+# appear, so `git>/dev/null reset --hard` runs exactly what
+# `git >/dev/null reset --hard` runs -- but pack patterns anchor the command
+# word with `git\s+`, and the glued spelling never reached them. Every row here
+# was ALLOWED before .agent-config-6yt2i.
+#
+# NOTE: This file contains ONLY commands expected to be DENIED.
+# The matching false-positive rows -- hyphenated program names that merely end
+# in a keyword -- live in ../false_positives/hyphenated_commands.toml. The two
+# sets are one question (where does a command word begin and end?) asked from
+# opposite sides, so a change that fixes one must be run against both.
+
+# ============================================================================
+# Quoted command word plus glued redirection -- the reported spelling
+# ============================================================================
+
+[[case]]
+description = "quoted command word with glued redirection"
+command = '"git">/dev/null reset --hard'
+expected = "deny"
+rule_id = "core.git:reset-hard"
+
+# ============================================================================
+# Unquoted glued redirections
+# ============================================================================
+
+[[case]]
+description = "glued stdout redirection to /dev/null"
+command = "git>/dev/null reset --hard"
+expected = "deny"
+rule_id = "core.git:reset-hard"
+
+[[case]]
+description = "glued append redirection"
+command = "git>>build.log reset --hard"
+expected = "deny"
+rule_id = "core.git:reset-hard"
+
+[[case]]
+description = "glued both-streams redirection"
+command = "git&>/dev/null reset --hard"
+expected = "deny"
+rule_id = "core.git:reset-hard"
+
+[[case]]
+description = "glued stdin redirection"
+command = "git</dev/null reset --hard"
+expected = "deny"
+rule_id = "core.git:reset-hard"
+
+# ============================================================================
+# A hyphenated lookalike in front of the real command
+# ============================================================================
+#
+# The git pattern's `(?:\S+\s+)*` makes its leftmost match swallow the whole
+# line starting inside `my-git`. Rejecting that start must not retire the
+# pattern for the rest of the command, or hiding behind a lookalike becomes the
+# next bypass.
+
+[[case]]
+description = "hyphenated lookalike ahead of a real destructive command"
+command = "my-git status && git reset --hard"
+expected = "deny"
+rule_id = "core.git:reset-hard"

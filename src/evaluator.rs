@@ -1571,7 +1571,7 @@ fn evaluate_packs_with_allowlists(
 
             let matched_span = pattern
                 .regex
-                .find(command_for_packs)
+                .find_command_word(command_for_packs)
                 .map(|(start, end)| MatchSpan { start, end });
             let Some(span) = matched_span else {
                 continue;
