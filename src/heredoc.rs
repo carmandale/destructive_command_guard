@@ -4923,86 +4923,82 @@ fi"#;
         );
     }
 
-    /// #136 data-sink half: `git commit -F -` / `--file=-` / `git hash-object
-    /// --stdin` read the heredoc body as DATA (a commit message / object
-    /// content) that git never executes, so the body is masked like cat/tee. A
-    /// bare `git commit <<EOF` (no stdin sentinel) is NOT masked, and anything
-    /// after the terminator stays scannable.
+    /// #136 data-sink half, AS SHIPPED. Upstream `76b2a57` masks the body of
+    /// `git commit -F -` / `--file=-` / `git hash-object --stdin`, on the
+    /// grounds that git reads stdin as a commit message or object content and
+    /// never executes it. THIS BUILD DELIBERATELY DOES NOT CARRY THAT FEATURE.
+    /// Spec 333's `u06z-build-recipe.md` rejects both `|| is_git_stdin_data_sink(…)`
+    /// call sites on purpose — "that feature **widens** allow, so excluding it
+    /// keeps this candidate strictly narrower than upstream". `d45752f` landed
+    /// the definition unused; the merge `e57d922` dropped even that. `git` is
+    /// not in `NON_EXECUTING_HEREDOC_COMMANDS`, so a `git …` receiver is an
+    /// unknown command and its body stays visible to the matcher.
+    ///
+    /// The TEST did not go with the feature. It asserted masking, so it failed
+    /// on main from `e57d922` onward and was read as a delimiter-quoting
+    /// problem (`.agent-config-3kpp5`). Quoting the delimiters is necessary and
+    /// not sufficient: on a `git` receiver masking never happens at all. This
+    /// pins the shipped contract instead, so re-adding the feature is a
+    /// deliberate act that turns this red — not a silent widening of allow.
+    /// Formerly `mask_git_stdin_data_sink_136`.
     #[test]
-    fn mask_git_stdin_data_sink_136() {
+    fn git_stdin_data_sink_136_is_deliberately_not_masked() {
         let reset_hard = format!("{}{}", "reset --", "hard");
 
-        // `git commit -F -`: message from stdin → body masked.
-        let c1 = format!("git commit -F - <<EOF\ndocs: {reset_hard} notes\nEOF");
-        let m1 = mask_non_executing_heredocs(&c1);
-        assert!(
-            !m1.contains(&reset_hard),
-            "commit-message body via `-F -` should be masked: {m1:?}"
-        );
-        // The git invocation line itself must be preserved (not masked away).
-        assert!(
-            m1.contains("git commit -F -"),
-            "the git invocation line must be preserved: {m1:?}"
-        );
+        // Every delimiter here is QUOTED on purpose. With `<<EOF` the spec 333 /
+        // `.agent-config-u06z` gate declines to mask for the delimiter's sake,
+        // and each row below would hold without saying anything about `git`.
+        for (cmd, shape) in [
+            (
+                format!("git commit -F - <<'EOF'\ndocs: {reset_hard} notes\nEOF"),
+                "-F - (message from stdin)",
+            ),
+            (
+                format!("git commit --file=- <<'EOF'\ndocs: {reset_hard} notes\nEOF"),
+                "--file=- (glued form)",
+            ),
+            (
+                format!("git hash-object --stdin <<'EOF'\ngit {reset_hard} .\nEOF"),
+                "--stdin (object content)",
+            ),
+            (
+                format!("git commit <<'EOF'\n{reset_hard}\nEOF"),
+                "bare git commit, no stdin sentinel",
+            ),
+        ] {
+            let m = mask_non_executing_heredocs(&cmd);
+            assert!(
+                m.contains(&reset_hard),
+                "a `git` heredoc receiver is not a data sink in this build, so the \
+                 body must stay visible to the matcher [{shape}]: {m:?}"
+            );
+        }
 
-        // `--file=-` glued form.
-        let c2 = "git commit --file=- <<EOF\ndocs: restore the worktree\nEOF";
-        let m2 = mask_non_executing_heredocs(c2);
+        // The control that makes "visible" mean something. Without it every row
+        // above would pass if masking were broken outright, which is exactly the
+        // failure that hid behind this test for eight commits.
+        let sink = format!("cat <<'EOF'\n{reset_hard}\nEOF");
+        let ms = mask_non_executing_heredocs(&sink);
         assert!(
-            !m2.contains("restore"),
-            "commit-message body via `--file=-` should be masked: {m2:?}"
-        );
-
-        // `git hash-object --stdin`: object content from stdin → masked.
-        let c3 = "git hash-object --stdin <<EOF\ngit restore --worktree .\nEOF";
-        let m3 = mask_non_executing_heredocs(c3);
-        assert!(
-            !m3.contains("restore"),
-            "hash-object --stdin body should be masked: {m3:?}"
-        );
-
-        // Conservative: a bare `git commit <<EOF` (no stdin sentinel) is NOT masked.
-        let c4 = "git commit <<EOF\nrestore\nEOF";
-        let m4 = mask_non_executing_heredocs(c4);
-        assert!(
-            m4.contains("restore"),
-            "bare `git commit <<EOF` must NOT be masked (no stdin sentinel): {m4:?}"
+            !ms.contains(&reset_hard),
+            "a real data sink must still mask, or the git rows above prove nothing: {ms:?}"
         );
 
         // Soundness: a destructive command AFTER the terminator stays scannable.
+        // On a receiver that actually masks — on `git` this row would be true by
+        // accident.
         let rmrf = format!("{}{}{}", "rm", " -", "rf");
-        let c5 = format!("git commit -F - <<EOF\nmsg\nEOF\n{rmrf} /etc");
-        let m5 = mask_non_executing_heredocs(&c5);
+        let after = format!("cat <<'EOF'\nmsg\nEOF\n{rmrf} /etc");
+        let ma = mask_non_executing_heredocs(&after);
         assert!(
-            m5.contains(&rmrf),
-            "command after the heredoc terminator must remain scannable: {m5:?}"
+            ma.contains(&rmrf),
+            "command after the heredoc terminator must remain scannable: {ma:?}"
         );
 
-        // A quoted `-m` message that merely contains the text "-F -" must not be
-        // mistaken for a real stdin sentinel (quoted args are single tokens).
-        let c6 = format!("git commit -m \"mentions -F - here\" <<EOF\n{reset_hard}\nEOF");
-        let m6 = mask_non_executing_heredocs(&c6);
+        // The data-sink line itself is preserved, never masked away.
         assert!(
-            m6.contains(&reset_hard),
-            "quoted text '-F -' must not be treated as a stdin sentinel: {m6:?}"
-        );
-
-        // CRITICAL soundness (no cross-line leak): a `git … -F -` on an EARLIER
-        // line must NOT mask a LATER interpreter heredoc whose body genuinely
-        // executes. The heredoc binds to the command on its own physical line.
-        let c7 = format!("git commit -F - msg.txt\nbash <<EOF\n{rmrf} /important\nEOF");
-        let m7 = mask_non_executing_heredocs(&c7);
-        assert!(
-            m7.contains(&rmrf),
-            "git stdin sentinel on a prior line must NOT mask a later bash heredoc body: {m7:?}"
-        );
-
-        // Same line, here-string form on a later interpreter: still no leak.
-        let c8 = format!("git commit -F - msg.txt\nbash <<<'{rmrf} /important'");
-        let m8 = mask_non_executing_heredocs(&c8);
-        assert!(
-            m8.contains(&rmrf),
-            "git sentinel on a prior line must NOT mask a later bash here-string: {m8:?}"
+            ma.contains("cat <<'EOF'"),
+            "the receiver's own line must be preserved: {ma:?}"
         );
     }
 
@@ -5010,11 +5006,19 @@ fi"#;
     /// data sink on a PRIOR line must not mask a later executing `bash` heredoc
     /// body. Heredoc target resolution is bounded to the heredoc's own physical
     /// line, so the target here is `bash` (executing), not `cat` (data sink).
+    ///
+    /// The first two delimiters are QUOTED so masking is genuinely on the table
+    /// and the only thing deciding it is target resolution. Unquoted, the spec
+    /// 333 / `.agent-config-u06z` gate declines to mask either way: the
+    /// cross-line assertion would then hold even with target resolution broken,
+    /// and the control was simply false — which is how this test failed on main
+    /// (`.agent-config-3kpp5`). The last two rows pin the unquoted half of that
+    /// gate on this same path, so flipping a delimiter back cannot look harmless.
     #[test]
     fn data_sink_mask_does_not_leak_across_lines() {
         let rmrf = format!("{}{}{}", "rm", " -", "rf");
 
-        let c = format!("cat notes.txt\nbash <<EOF\n{rmrf} /important\nEOF");
+        let c = format!("cat notes.txt\nbash <<'EOF'\n{rmrf} /important\nEOF");
         let m = mask_non_executing_heredocs(&c);
         assert!(
             m.contains(&rmrf),
@@ -5022,11 +5026,33 @@ fi"#;
         );
 
         // Control: cat with its OWN heredoc on the same line is still masked.
-        let c2 = format!("cat <<EOF\n{rmrf} /important\nEOF");
+        let c2 = format!("cat <<'EOF'\n{rmrf} /important\nEOF");
         let m2 = mask_non_executing_heredocs(&c2);
         assert!(
             !m2.contains(&rmrf),
             "cat's own same-line heredoc body should still be masked: {m2:?}"
+        );
+
+        // Same shape, here-string form on the later interpreter: still no leak.
+        let c3 = format!("cat notes.txt\nbash <<<'{rmrf} /important'");
+        let m3 = mask_non_executing_heredocs(&c3);
+        assert!(
+            m3.contains(&rmrf),
+            "cat on a prior line must NOT mask a later bash here-string: {m3:?}"
+        );
+
+        // The u06z half on this same path: with an UNQUOTED delimiter the data
+        // sink's own body is expanded by the outer shell before cat ever reads
+        // it, so the gate leaves it visible on purpose. Without this row,
+        // flipping c2's delimiter back to `<<EOF` would look like a harmless
+        // edit. If you are changing this, change u06z-replay-summary.md and
+        // re-measure the safe-class corpus first.
+        let c4 = format!("cat <<EOF\n{rmrf} /important\nEOF");
+        let m4 = mask_non_executing_heredocs(&c4);
+        assert!(
+            m4.contains(&rmrf),
+            "an unquoted delimiter expands before cat reads it, so the body stays \
+             visible on purpose: {m4:?}"
         );
     }
 
