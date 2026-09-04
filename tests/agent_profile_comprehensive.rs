@@ -571,35 +571,42 @@ mod edge_cases {
 // Performance Tests
 // =============================================================================
 
-mod performance_tests {
-    use super::*;
-    use std::time::Instant;
-
-    #[test]
-    fn test_agent_detection_does_not_add_significant_latency() {
-        // Agent detection should be fast (< 50ms overhead)
-        let iterations = 5;
-        let mut total_time = std::time::Duration::ZERO;
-
-        for _ in 0..iterations {
-            let start = Instant::now();
-            let (stdout, _stderr, exit_code) =
-                run_hook_mode_with_env("git status", &[("CLAUDE_CODE", "1")]);
-            let duration = start.elapsed();
-
-            assert_eq!(exit_code, 0);
-            assert_eq!(stdout.trim(), "");
-
-            total_time += duration;
-        }
-
-        let avg_time = total_time / iterations as u32;
-
-        // Allow up to 100ms per call (generous for CI environments)
-        assert!(
-            avg_time.as_millis() < 100,
-            "Average hook evaluation time should be < 100ms, got: {:?}",
-            avg_time
-        );
-    }
-}
+// =============================================================================
+// Performance Tests — REMOVED (`.agent-config-mk1ei`)
+// =============================================================================
+//
+// `performance_tests::test_agent_detection_does_not_add_significant_latency`
+// lived here. It asserted that the average wall time of five
+// `run_hook_mode_with_env("git status", &[("CLAUDE_CODE", "1")])` calls was
+// under an absolute 100ms. It is deleted rather than repaired, because it never
+// measured the thing it was named for and its only live behaviour was a flake.
+//
+// IT DID NOT MEASURE AGENT DETECTION. Agent detection is not on the hook path
+// at all: `src/main.rs` — the hook-mode entry point — contains zero references
+// to `detect_agent`, `detect_agent_with_details` or any `*_for_agent` helper.
+// The one production caller of `detect_agent_with_details` is `cli.rs`'s
+// `test_command`, a separate subcommand. MEASURED rather than read off the
+// call graph: an 80ms `sleep` injected into `agent::detect_from_environment`
+// behind the `CLAUDE_CODE` branch moved the hook's median from 19.2ms to
+// 20.8ms — 1.6ms of an 80ms mutant, i.e. noise. The test could not have failed
+// if agent detection had become 80ms slower.
+//
+// WHAT IT ACTUALLY MEASURED was process spawn plus dcg startup, on a machine
+// shared with every other session. At load average ~700 on 2026-09-04 it read
+// 108.0ms on a candidate branch and 109.0ms on `origin/main` with that branch's
+// diff absent — the baseline slower than the change under test — so it was
+// reporting the machine, not the code. That failed `scripts/check_known_red.sh`
+// for every dcg change on a busy machine, and it could not be parked in
+// `tests/KNOWN_RED.tsv` either, because that ledger also fails when a listed
+// test PASSES, which this one does as soon as the machine goes quiet.
+//
+// IF A HOOK LATENCY BUDGET IS WANTED — and `main.rs`'s own header says latency
+// is critical — it needs an instrument this file cannot provide: a benchmark on
+// a quiet machine, or a measurement relative to an in-process baseline that
+// isolates evaluation from spawn. An absolute wall clock in the integration
+// suite is not that instrument. Do not re-add one here without reading
+// `.agent-config-mk1ei`.
+//
+// The safe-command smoke coverage this test incidentally provided (hook allows
+// `git status`, exit 0, empty stdout, with `CLAUDE_CODE` set) is not lost: it is
+// asserted by the agent-detection tests above, which set the same env var.
