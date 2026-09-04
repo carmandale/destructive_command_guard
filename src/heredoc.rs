@@ -1717,13 +1717,32 @@ fn tokenize_backwards(s: &str) -> Vec<String> {
 ///   it executes. `sort --compress-program` is the same shape, reachable only
 ///   once the input spills to a temp file.
 ///
-///   `split` and `csplit` nevertheless STAY, on the same conditional footing
-///   `sed` is on, and for a reason the sweep can state precisely: neither flag
-///   exists in the BSD builds installed here, so the hazard is GNU-only and
-///   UNMEASURED on this fleet rather than measured inert. Reverse by probing
-///   `printf 'x\n' | split --filter=sh - /tmp/p_`; an exit other than 64
-///   ("illegal option") means a GNU split is on PATH and `split` must come out
-///   the way `awk` did. Tracked in `.agent-config-bvt4k`.
+///   `split` and `csplit` were therefore REMOVED (`.agent-config-bvt4k`), and
+///   the reason for removing rather than documenting is a cost, not a new
+///   principle. Both BSD builds on this fleet were re-measured first and both
+///   refuse the flag (`illegal option`, exit 64) on this laptop and on the Mac
+///   mini, so the ending this bead offered -- leave them in, document the
+///   GNU-only hazard -- was genuinely available. It was declined because that
+///   footing lasts exactly until a `brew install coreutils` puts a GNU `split`
+///   on PATH, and nothing would notice; the only guard would be a human
+///   remembering to re-run a probe. Removal costs nothing measurable to buy the
+///   unconditional version: `zbzox-census.py` counts `split` and `csplit` at 0
+///   receiver / 0 downstream across both corpora (19,914 rows).
+///
+///   `sed` stays on the conditional footing above and that is not an
+///   inconsistency -- removing `sed` WOULD cost real false positives, so its
+///   trade is a genuine one. `split` had no such price to pay.
+///
+///   `sort` also stays, and the reason is a JUDGEMENT, not a measurement --
+///   the census gives it 0 receiver / 0 downstream, exactly like `split`, so
+///   the numbers alone would say remove it. Two things the count does not see
+///   argue the other way. Its `--compress-program` reaches a shell only after
+///   the input spills to a temp file, so the hazard needs a GNU build AND an
+///   input far larger than a heredoc; and `cat <<'EOF' | sort` is an ordinary
+///   thing to write, so a 0 in a 19,914-row sample is a thinner promise for
+///   `sort` than the same 0 is for `split`, which nobody pipes a heredoc into.
+///   That is the `sed` trade -- a real price for a remote hazard -- rather than
+///   the `split` one. Recorded so it can be reversed: `.agent-config-slwtp`.
 /// * `tee`/`dd` write the body without executing it -- see the veto above.
 ///
 /// TWO LIMITS OF THAT SWEEP, both closed or named by `.agent-config-mt4yo`.
@@ -1853,8 +1872,9 @@ const NON_EXECUTING_HEREDOC_COMMANDS: &[&str] = &[
     "tac",
     "shuf",
     "pr",
-    "split",
-    "csplit",
+    // `split` and `csplit` were here until `.agent-config-bvt4k`. GNU
+    // `split --filter=CMD` pipes each chunk to CMD's STDIN, so the body is
+    // executed; see the doc comment above. Do not re-add them.
     "strings",
     "iconv",
     "sponge",
@@ -5198,6 +5218,64 @@ fi"#;
         assert!(
             !mc.contains(&rmrf),
             "control: a plain cat heredoc body must still be masked: {mc:?}"
+        );
+    }
+
+    /// `.agent-config-bvt4k` — the arm for removing `split` and `csplit`.
+    ///
+    /// The `zbzox` audit cleared them with "they take their COMMAND from ARGV,
+    /// never from stdin", which is not the admission test the list states. GNU
+    /// `split --filter=CMD` pipes each output chunk to CMD's STDIN, so the body
+    /// is executed — `awk`'s third spelling exactly, with the program in ARGV
+    /// and the BODY as the data it executes.
+    ///
+    /// No GNU `split` is installed on this fleet (BSD answers `illegal option`,
+    /// exit 64, on both this laptop and the Mac mini), so unlike the `awk` arm
+    /// these spellings were NOT verified executing against a real binary here.
+    /// What is verified is the property that matters to dcg and is measurable
+    /// without one: while `split` was a member, both spellings masked their
+    /// body out of every pack in every layer. That is the hole; this closes it.
+    #[test]
+    fn split_filter_executes_its_stdin_so_its_heredoc_body_is_not_masked_bvt4k() {
+        let rmrf = format!("{}{}{}", "rm", " -", "rf");
+
+        // 1. Downstream stage: cat is the receiver, split hands each chunk to sh.
+        let c1 = format!("cat <<'EOF' | split --filter=sh -\n{rmrf} /important\nEOF");
+        let m1 = mask_non_executing_heredocs(&c1);
+        assert!(
+            m1.contains(&rmrf),
+            "`| split --filter=sh` executes the piped body; it must stay \
+             visible: {m1:?}"
+        );
+
+        // 2. Direct receiver: split reads the heredoc itself.
+        let c2 = format!("split --filter=sh - <<'EOF'\n{rmrf} /important\nEOF");
+        let m2 = mask_non_executing_heredocs(&c2);
+        assert!(
+            m2.contains(&rmrf),
+            "`split --filter=sh` as the receiver executes its stdin; body must \
+             stay visible: {m2:?}"
+        );
+
+        // 3. `csplit` came out with it — same family, same flag, and it was
+        //    admitted on family resemblance in the first place.
+        let c3 = format!("cat <<'EOF' | csplit --filter=sh - 1\n{rmrf} /important\nEOF");
+        let m3 = mask_non_executing_heredocs(&c3);
+        assert!(
+            m3.contains(&rmrf),
+            "`csplit` is out of the list too; body must stay visible: {m3:?}"
+        );
+
+        // Control — the instrument can still mask, so a green above is not
+        // green-over-nothing. `sort` is the sharpest control available: it is
+        // still a member ON PURPOSE (`.agent-config-slwtp`), so if someone
+        // removes it without updating this arm, this line says so.
+        let ctrl = format!("cat <<'EOF' | sort\n{rmrf} /important\nEOF");
+        let mc = mask_non_executing_heredocs(&ctrl);
+        assert!(
+            !mc.contains(&rmrf),
+            "control: `| sort` is still a data sink, so its body must still be \
+             masked: {mc:?}"
         );
     }
 }
