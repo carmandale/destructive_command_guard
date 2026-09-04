@@ -1712,6 +1712,26 @@ fn tokenize_backwards(s: &str) -> Vec<String> {
 ///   BSD builds here.
 /// * `tee`/`dd` write the body without executing it -- see the veto above.
 ///
+/// TWO LIMITS OF THAT SWEEP, both closed or named by `.agent-config-mt4yo`.
+///
+/// `tail -f /dev/stdin` was the one spelling recorded INCONCLUSIVE, because the
+/// probe returned on its timeout without ever stating the marker -- a command
+/// that executed and then went on blocking was indistinguishable from one that
+/// only blocked. Killing the child does not delete a marker it already wrote,
+/// so the stat is still valid afterwards: re-probed that way, `tail -f
+/// /dev/stdin` and `tail -f -` are both inert, with `awk` firing as the
+/// positive control on the identical post-timeout path. `tail` is measured, not
+/// assumed.
+///
+/// "Measured inert on this fleet" is exactly as narrow as it sounds: 69 of the
+/// 82 members were present to measure. THESE 13 WERE NOT INSTALLED AND ARE
+/// THEREFORE UNMEASURED, not cleared -- `ag`, `ack`, `yq`, `xclip`, `xsel`,
+/// `tac`, `shuf`, `sponge`, `pv`, `base32`, `basenc`, `b2sum`, `netcat`. Most
+/// are transforms with no program to supply, but `yq` takes an expression with
+/// `--from-file` and `ack` is Perl, so those two are program-takers admitted on
+/// family resemblance alone. Whichever of them lands on a machine first is due
+/// the same probe `awk` failed.
+///
 /// WHY `awk` IS NOT HERE, and cannot be readmitted by narrowing a flag. It
 /// executes stdin as code in two independent ways, and only the first looks
 /// like a flag:
