@@ -1707,9 +1707,23 @@ fn tokenize_backwards(s: &str) -> Vec<String> {
 ///   `system` builtin at all, so a jq program cannot reach a shell.
 /// * `less` -- inert with stdin piped, with and without `LESSOPEN` set; its
 ///   `!` escape needs a terminal a pipeline stage does not have.
-/// * `split --filter` and `sort --compress-program` do execute a command, but
-///   they take it from ARGV, never from stdin, and neither flag exists in the
-///   BSD builds here.
+/// * `split --filter` and `sort --compress-program` take their COMMAND from
+///   ARGV, never from stdin -- but that is the wrong question, and reading it
+///   as a clearance was this audit's own error. The admission test above asks
+///   whether the command can execute what arrives on ITS STDIN, and GNU
+///   `split --filter=CMD` pipes each chunk to CMD's stdin, so
+///   `cat <<'EOF' | split --filter=sh -` executes the body. That is `awk`'s
+///   third spelling exactly: the program sits in ARGV and the BODY is the data
+///   it executes. `sort --compress-program` is the same shape, reachable only
+///   once the input spills to a temp file.
+///
+///   `split` and `csplit` nevertheless STAY, on the same conditional footing
+///   `sed` is on, and for a reason the sweep can state precisely: neither flag
+///   exists in the BSD builds installed here, so the hazard is GNU-only and
+///   UNMEASURED on this fleet rather than measured inert. Reverse by probing
+///   `printf 'x\n' | split --filter=sh - /tmp/p_`; an exit other than 64
+///   ("illegal option") means a GNU split is on PATH and `split` must come out
+///   the way `awk` did. Tracked in `.agent-config-bvt4k`.
 /// * `tee`/`dd` write the body without executing it -- see the veto above.
 ///
 /// TWO LIMITS OF THAT SWEEP, both closed or named by `.agent-config-mt4yo`.
