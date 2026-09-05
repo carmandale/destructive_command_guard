@@ -2077,7 +2077,51 @@ fn evaluate_heredoc(
             }
         };
 
-    for content in contents {
+    // A here-string or heredoc operator spelled INSIDE a body that is already
+    // inert is prose, not a command. `extract_herestrings` and
+    // `extract_heredocs` both scan the raw command with `captures_iter`, so a
+    // commit message, a spec or a test fixture that merely QUOTES a here-string
+    // pipeline yields a second ExtractedContent whose "receiver" is whatever
+    // English word happens to precede the operator. That entry then fails the
+    // veto set on its own terms and denies a command whose real receiver is
+    // `cat` -- the exact documentation-text false positive spec 333 exists to
+    // prevent (`.agent-config-v5f37`, measured 2026-09-05 on two real commits).
+    //
+    // Scoped by INERTNESS, not by nesting alone: when the enclosing body really
+    // does reach an interpreter, the text inside it really is code and the
+    // nested entry must still be judged. That is the `| bash` control in
+    // tests/repro_heredoc_nested_operator_in_prose.rs.
+    //
+    // Reuses `heredoc_body_is_inert` rather than asking a new question, so the
+    // veto set keeps the single reader `.agent-config-c29fn` gave it.
+    let inert_body_spans: Vec<(usize, std::ops::Range<usize>)> = contents
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| {
+            crate::heredoc::heredoc_body_is_inert(
+                command,
+                c.target_command.as_deref(),
+                c.byte_range.start,
+                c.byte_range.end,
+            )
+        })
+        .filter_map(|(i, c)| c.content_range.clone().map(|range| (i, range)))
+        .collect();
+
+    for (index, content) in contents.iter().enumerate() {
+        if inert_body_spans.iter().any(|(owner, span)| {
+            *owner != index
+                && span.start <= content.byte_range.start
+                && content.byte_range.end <= span.end
+        }) {
+            tracing::trace!(
+                target_command = ?content.target_command,
+                byte_range = ?content.byte_range,
+                "Skipping content spelled inside an inert heredoc body"
+            );
+            continue;
+        }
+
         if deadline_exceeded(context.deadline)
             || remaining_below(context.deadline, &crate::perf::FULL_HEREDOC_PIPELINE)
         {
@@ -2167,7 +2211,7 @@ fn evaluate_heredoc(
                         info.source = MatchSource::HeredocAst; // Mark as heredoc source
                         if let Some(span) = info.matched_span {
                             if let Some(mapped_inner) =
-                                map_heredoc_span(command, &content, inner.start, inner.end)
+                                map_heredoc_span(command, content, inner.start, inner.end)
                             {
                                 let mapped = MatchSpan {
                                     start: mapped_inner.start.saturating_add(span.start),
@@ -2233,8 +2277,8 @@ fn evaluate_heredoc(
             if let Some(hit) = context.allowlists.match_rule(&pack_id, &pattern_name) {
                 if first_allowlist_hit.is_none() {
                     let reason =
-                        format_heredoc_denial_reason(&content, &m, &pack_id, &pattern_name);
-                    let mapped_span = map_heredoc_span(command, &content, m.start, m.end);
+                        format_heredoc_denial_reason(content, &m, &pack_id, &pattern_name);
+                    let mapped_span = map_heredoc_span(command, content, m.start, m.end);
                     *first_allowlist_hit = Some((
                         PatternMatch {
                             pack_id: Some(pack_id),
@@ -2254,8 +2298,8 @@ fn evaluate_heredoc(
                 continue;
             }
 
-            let reason = format_heredoc_denial_reason(&content, &m, &pack_id, &pattern_name);
-            let mapped_span = map_heredoc_span(command, &content, m.start, m.end);
+            let reason = format_heredoc_denial_reason(content, &m, &pack_id, &pattern_name);
+            let mapped_span = map_heredoc_span(command, content, m.start, m.end);
             return Some(EvaluationResult {
                 decision: EvaluationDecision::Deny,
                 pattern_info: Some(PatternMatch {
