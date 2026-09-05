@@ -28,9 +28,10 @@
 //! use destructive_command_guard::output::progress::{ScanProgress, spinner};
 //!
 //! // For file scanning
-//! if let Some(progress) = ScanProgress::new_if_needed(100) {
-//!     for file in files {
-//!         progress.tick(&file);
+//! let files = vec!["src/main.rs".to_string(), "src/lib.rs".to_string()];
+//! if let Some(progress) = ScanProgress::new_if_needed(files.len() as u64) {
+//!     for file in &files {
+//!         progress.tick(file);
 //!     }
 //!     progress.finish("Scan complete");
 //! }
