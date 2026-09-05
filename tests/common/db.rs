@@ -78,13 +78,15 @@ impl TestDb {
         let test_db = Self::new();
         let now = Utc::now();
 
-        for cmd in commands {
-            let entry = cmd.to_entry(now);
-            test_db
-                .db
-                .log_command(&entry)
-                .expect("Failed to seed test command");
-        }
+        // One BEGIN IMMEDIATE for the whole seed, not one autocommit per row.
+        // Seeding row-by-row made test_large_dataset_insertion (1000 rows) take
+        // 309s locally — fsync-bound, sys 240s vs user 60s — which blew past the
+        // 120s cap in .config/nextest.toml [profile.ci] and failed CI.
+        let entries: Vec<_> = commands.iter().map(|cmd| cmd.to_entry(now)).collect();
+        test_db
+            .db
+            .log_commands_batch(&entries)
+            .expect("Failed to seed test commands");
 
         test_db
     }
