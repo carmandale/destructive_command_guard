@@ -367,6 +367,13 @@ fn every_listed_receiver_masks_its_body_including_the_new_entries() {
     // PROGRAM from stdin and an awk program can call `system()`, so it never kept
     // the list's promise (.agent-config-zbzox). Do not re-add it — the row below
     // pins the other half and will go red if you do (.agent-config-vyjkz).
+    //
+    // `split` and `csplit` are absent for the same reason and left the same way
+    // (.agent-config-bvt4k): GNU `split --filter=CMD` pipes each output chunk to
+    // CMD's STDIN, so the body is executed. `sort` is still here ON PURPOSE — its
+    // `--compress-program` is the same shape but needs a temp-file spill, and
+    // `cat <<EOF | sort` is common enough that removing it would cost real false
+    // positives. That call is a judgement and is tracked at `.agent-config-slwtp`.
     for receiver in [
         "cat",
         "tee /tmp/j6ha9-notes.txt",
@@ -397,8 +404,6 @@ fn every_listed_receiver_masks_its_body_including_the_new_entries() {
         "tac",
         "shuf",
         "pr",
-        "split",
-        "csplit",
         "strings",
         "iconv",
         "sponge",
@@ -442,6 +447,41 @@ fn awk_executes_its_stdin_so_its_body_is_never_data_vyjkz() {
         assert_body_visible(&cmd, "awk can execute what it reads from stdin");
         assert_denied(&cmd, "awk can execute what it reads from stdin");
     }
+}
+
+#[test]
+fn split_filter_executes_its_stdin_so_its_body_is_never_data_bvt4k() {
+    // The other half of removing `split`/`csplit`, exactly as `vyjkz` is the
+    // other half of removing `awk`. The list test above lost two rows; without
+    // this one, re-adding either would turn no test red and the hole
+    // `.agent-config-bvt4k` closed would reopen in silence.
+    //
+    // GNU `split --filter=CMD` pipes each output chunk to CMD's STDIN, so the
+    // body is executed. That is `awk`'s third spelling: the program sits in
+    // ARGV and the BODY is the data it executes, which is why neither could be
+    // narrowed by testing for a flag.
+    //
+    // HONEST LIMIT: no GNU split exists on this fleet — BSD answers `illegal
+    // option`, exit 64, on this laptop and on the Mac mini — so unlike the awk
+    // rows these spellings were NOT verified executing against a real binary.
+    // What is pinned is the property dcg depends on and can be measured without
+    // one: the body reaches the matcher, and the command is denied.
+    for cmd in [
+        // split receives the heredoc.
+        format!("split --filter=sh - <<'EOF'\n{TRIGGER}\nEOF"),
+        format!("csplit --filter=sh - 1 <<'EOF'\n{TRIGGER}\nEOF"),
+        // split is downstream of a data sink.
+        format!("cat <<'EOF' | split --filter=sh -\n{TRIGGER}\nEOF"),
+        format!("cat <<'EOF' | csplit --filter=sh - 1\n{TRIGGER}\nEOF"),
+    ] {
+        assert_body_visible(&cmd, "split --filter executes what it reads from stdin");
+        assert_denied(&cmd, "split --filter executes what it reads from stdin");
+    }
+
+    // `sort` is the control: still a member on purpose (`.agent-config-slwtp`),
+    // so this row goes red if someone removes it without revisiting that call.
+    let ctrl = format!("cat <<'EOF' | sort\n{TRIGGER}\nEOF");
+    assert_body_masked(&ctrl, "sort is still a data sink");
 }
 
 #[test]

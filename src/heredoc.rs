@@ -1707,10 +1707,63 @@ fn tokenize_backwards(s: &str) -> Vec<String> {
 ///   `system` builtin at all, so a jq program cannot reach a shell.
 /// * `less` -- inert with stdin piped, with and without `LESSOPEN` set; its
 ///   `!` escape needs a terminal a pipeline stage does not have.
-/// * `split --filter` and `sort --compress-program` do execute a command, but
-///   they take it from ARGV, never from stdin, and neither flag exists in the
-///   BSD builds here.
+/// * `split --filter` and `sort --compress-program` take their COMMAND from
+///   ARGV, never from stdin -- but that is the wrong question, and reading it
+///   as a clearance was this audit's own error. The admission test above asks
+///   whether the command can execute what arrives on ITS STDIN, and GNU
+///   `split --filter=CMD` pipes each chunk to CMD's stdin, so
+///   `cat <<'EOF' | split --filter=sh -` executes the body. That is `awk`'s
+///   third spelling exactly: the program sits in ARGV and the BODY is the data
+///   it executes. `sort --compress-program` is the same shape, reachable only
+///   once the input spills to a temp file.
+///
+///   `split` and `csplit` were therefore REMOVED (`.agent-config-bvt4k`), and
+///   the reason for removing rather than documenting is a cost, not a new
+///   principle. Both BSD builds on this fleet were re-measured first and both
+///   refuse the flag (`illegal option`, exit 64) on this laptop and on the Mac
+///   mini, so the ending this bead offered -- leave them in, document the
+///   GNU-only hazard -- was genuinely available. It was declined because that
+///   footing lasts exactly until a `brew install coreutils` puts a GNU `split`
+///   on PATH, and nothing would notice; the only guard would be a human
+///   remembering to re-run a probe. Removal costs nothing measurable to buy the
+///   unconditional version: `zbzox-census.py` counts `split` and `csplit` at 0
+///   receiver / 0 downstream across both corpora (19,914 rows).
+///
+///   `sed` stays on the conditional footing above and that is not an
+///   inconsistency -- removing `sed` WOULD cost real false positives, so its
+///   trade is a genuine one. `split` had no such price to pay.
+///
+///   `sort` also stays, and the reason is a JUDGEMENT, not a measurement --
+///   the census gives it 0 receiver / 0 downstream, exactly like `split`, so
+///   the numbers alone would say remove it. Two things the count does not see
+///   argue the other way. Its `--compress-program` reaches a shell only after
+///   the input spills to a temp file, so the hazard needs a GNU build AND an
+///   input far larger than a heredoc; and `cat <<'EOF' | sort` is an ordinary
+///   thing to write, so a 0 in a 19,914-row sample is a thinner promise for
+///   `sort` than the same 0 is for `split`, which nobody pipes a heredoc into.
+///   That is the `sed` trade -- a real price for a remote hazard -- rather than
+///   the `split` one. Recorded so it can be reversed: `.agent-config-slwtp`.
 /// * `tee`/`dd` write the body without executing it -- see the veto above.
+///
+/// TWO LIMITS OF THAT SWEEP, both closed or named by `.agent-config-mt4yo`.
+///
+/// `tail -f /dev/stdin` was the one spelling recorded INCONCLUSIVE, because the
+/// probe returned on its timeout without ever stating the marker -- a command
+/// that executed and then went on blocking was indistinguishable from one that
+/// only blocked. Killing the child does not delete a marker it already wrote,
+/// so the stat is still valid afterwards: re-probed that way, `tail -f
+/// /dev/stdin` and `tail -f -` are both inert, with `awk` firing as the
+/// positive control on the identical post-timeout path. `tail` is measured, not
+/// assumed.
+///
+/// "Measured inert on this fleet" is exactly as narrow as it sounds: 69 of the
+/// 82 members were present to measure. THESE 13 WERE NOT INSTALLED AND ARE
+/// THEREFORE UNMEASURED, not cleared -- `ag`, `ack`, `yq`, `xclip`, `xsel`,
+/// `tac`, `shuf`, `sponge`, `pv`, `base32`, `basenc`, `b2sum`, `netcat`. Most
+/// are transforms with no program to supply, but `yq` takes an expression with
+/// `--from-file` and `ack` is Perl, so those two are program-takers admitted on
+/// family resemblance alone. Whichever of them lands on a machine first is due
+/// the same probe `awk` failed.
 ///
 /// WHY `awk` IS NOT HERE, and cannot be readmitted by narrowing a flag. It
 /// executes stdin as code in two independent ways, and only the first looks
@@ -1819,8 +1872,9 @@ const NON_EXECUTING_HEREDOC_COMMANDS: &[&str] = &[
     "tac",
     "shuf",
     "pr",
-    "split",
-    "csplit",
+    // `split` and `csplit` were here until `.agent-config-bvt4k`. GNU
+    // `split --filter=CMD` pipes each chunk to CMD's STDIN, so the body is
+    // executed; see the doc comment above. Do not re-add them.
     "strings",
     "iconv",
     "sponge",
@@ -5164,6 +5218,64 @@ fi"#;
         assert!(
             !mc.contains(&rmrf),
             "control: a plain cat heredoc body must still be masked: {mc:?}"
+        );
+    }
+
+    /// `.agent-config-bvt4k` — the arm for removing `split` and `csplit`.
+    ///
+    /// The `zbzox` audit cleared them with "they take their COMMAND from ARGV,
+    /// never from stdin", which is not the admission test the list states. GNU
+    /// `split --filter=CMD` pipes each output chunk to CMD's STDIN, so the body
+    /// is executed — `awk`'s third spelling exactly, with the program in ARGV
+    /// and the BODY as the data it executes.
+    ///
+    /// No GNU `split` is installed on this fleet (BSD answers `illegal option`,
+    /// exit 64, on both this laptop and the Mac mini), so unlike the `awk` arm
+    /// these spellings were NOT verified executing against a real binary here.
+    /// What is verified is the property that matters to dcg and is measurable
+    /// without one: while `split` was a member, both spellings masked their
+    /// body out of every pack in every layer. That is the hole; this closes it.
+    #[test]
+    fn split_filter_executes_its_stdin_so_its_heredoc_body_is_not_masked_bvt4k() {
+        let rmrf = format!("{}{}{}", "rm", " -", "rf");
+
+        // 1. Downstream stage: cat is the receiver, split hands each chunk to sh.
+        let c1 = format!("cat <<'EOF' | split --filter=sh -\n{rmrf} /important\nEOF");
+        let m1 = mask_non_executing_heredocs(&c1);
+        assert!(
+            m1.contains(&rmrf),
+            "`| split --filter=sh` executes the piped body; it must stay \
+             visible: {m1:?}"
+        );
+
+        // 2. Direct receiver: split reads the heredoc itself.
+        let c2 = format!("split --filter=sh - <<'EOF'\n{rmrf} /important\nEOF");
+        let m2 = mask_non_executing_heredocs(&c2);
+        assert!(
+            m2.contains(&rmrf),
+            "`split --filter=sh` as the receiver executes its stdin; body must \
+             stay visible: {m2:?}"
+        );
+
+        // 3. `csplit` came out with it — same family, same flag, and it was
+        //    admitted on family resemblance in the first place.
+        let c3 = format!("cat <<'EOF' | csplit --filter=sh - 1\n{rmrf} /important\nEOF");
+        let m3 = mask_non_executing_heredocs(&c3);
+        assert!(
+            m3.contains(&rmrf),
+            "`csplit` is out of the list too; body must stay visible: {m3:?}"
+        );
+
+        // Control — the instrument can still mask, so a green above is not
+        // green-over-nothing. `sort` is the sharpest control available: it is
+        // still a member ON PURPOSE (`.agent-config-slwtp`), so if someone
+        // removes it without updating this arm, this line says so.
+        let ctrl = format!("cat <<'EOF' | sort\n{rmrf} /important\nEOF");
+        let mc = mask_non_executing_heredocs(&ctrl);
+        assert!(
+            !mc.contains(&rmrf),
+            "control: `| sort` is still a data sink, so its body must still be \
+             masked: {mc:?}"
         );
     }
 }
