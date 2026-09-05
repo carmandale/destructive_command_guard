@@ -14,9 +14,5 @@
 # invisible — including a live under-block (6yt2i). Three separate beads each
 # re-established their own baseline by hand because there was nothing to read.
 #
-# NOTE ON DOCTESTS: CI runs `cargo nextest`, which does not run doctests at all,
-# so the progress.rs row below is invisible to CI and only this script sees it.
-#
 # test name<TAB>bead<TAB>one-line reason
 test_audit_backtracking_requirements	.agent-config-rzo28	two lookahead patterns backtrack and the audit's expected set does not name them
-src/output/progress.rs - output::progress (line 27) - compile	.agent-config-bbdqd	the module's doc example does not compile against the current API
