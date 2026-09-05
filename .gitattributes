@@ -1,3 +1,21 @@
 
-# Use bd merge for beads JSONL files
-.beads/issues.jsonl merge=beads
+# `.beads/issues.jsonl` is a whole-file dump of a database every concurrent
+# session writes to. `-merge` is git's own attribute, not a driver: on a conflict
+# git leaves the file at OUR bytes and marks the path conflicted, instead of
+# line-merging two dumps and writing `<<<<<<<` markers INTO the JSON.
+# Hand-resolving those markers is how a session silently drops its siblings'
+# beads. Resolve by taking origin's copy whole, never by editing the file:
+#
+#     git checkout --theirs -- .beads/issues.jsonl && git add .beads/issues.jsonl
+#     git commit          # finish the merge
+#     br-export           # reconciles origin's view into the DB, then writes
+#
+# Do NOT name a merge driver here. This line read `merge=beads` until 2026-09-05.
+# The driver was `bd merge %A %O %A %B`, configured only in untracked
+# .git/config; `bd` was retired for `br`, `br` has no `merge` subcommand, and
+# nothing tracked ever wrote that config. So `git merge` either printed
+# `bd: command not found` and fell through to the very line merge this line is
+# supposed to prevent, or — in a checkout with no local config at all — died with
+# `fatal: custom merge driver beads lacks command line` and refused to merge.
+# Measured both ways in bead .agent-config-4vtpw.
+.beads/issues.jsonl -merge
