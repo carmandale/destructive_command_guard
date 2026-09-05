@@ -4,7 +4,6 @@
 //! These tests verify that all CLI commands with --format json
 //! produce valid, well-structured JSON output suitable for AI agent parsing.
 
-
 #[path = "common/spawn.rs"]
 mod spawn;
 
@@ -12,10 +11,7 @@ mod spawn;
 /// Run a dcg command and return stdout, stderr, exit code.
 fn run_dcg(args: &[&str]) -> (String, String, i32) {
     let (mut cmd, _sandbox) = spawn::dcg();
-    let output = cmd
-        .args(args)
-        .output()
-        .expect("failed to run dcg");
+    let output = cmd.args(args).output().expect("failed to run dcg");
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();

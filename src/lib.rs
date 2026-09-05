@@ -103,10 +103,10 @@ pub use evaluator::{
     ConfidenceResult, DetailedEvaluationResult, EvaluationDecision, EvaluationResult,
     LegacyDestructivePattern, LegacySafePattern, MatchSource, MatchSpan, PatternMatch,
     apply_confidence_scoring, evaluate_command, evaluate_command_consulting_allow_once,
-    evaluate_command_with_deadline,
-    evaluate_command_with_pack_order, evaluate_command_with_pack_order_at_path,
-    evaluate_command_with_pack_order_deadline, evaluate_command_with_pack_order_deadline_at_path,
-    evaluate_detailed, evaluate_detailed_with_allowlists,
+    evaluate_command_with_deadline, evaluate_command_with_pack_order,
+    evaluate_command_with_pack_order_at_path, evaluate_command_with_pack_order_deadline,
+    evaluate_command_with_pack_order_deadline_at_path, evaluate_detailed,
+    evaluate_detailed_with_allowlists,
 };
 pub use exit_codes::{
     EXIT_CONFIG_ERROR, EXIT_DENIED, EXIT_IO_ERROR, EXIT_PARSE_ERROR, EXIT_SUCCESS, EXIT_WARNING,

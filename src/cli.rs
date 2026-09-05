@@ -8949,16 +8949,9 @@ fn run_setup(
         true
     } else if std::io::stdin().is_terminal() {
         println!();
-        println!(
-            "{}",
-            "Shell startup check".cyan().bold()
-        );
-        println!(
-            "Claude Code can silently remove the dcg hook when it rewrites settings.json."
-        );
-        println!(
-            "A small shell check in your RC file will warn you on every new terminal"
-        );
+        println!("{}", "Shell startup check".cyan().bold());
+        println!("Claude Code can silently remove the dcg hook when it rewrites settings.json.");
+        println!("A small shell check in your RC file will warn you on every new terminal");
         println!("if the hook goes missing. It runs in milliseconds and is silent normally.");
         println!();
 
@@ -8988,26 +8981,13 @@ fn run_setup(
         for rc_path in &rc_files {
             match inject_shell_check(rc_path) {
                 Ok(true) => {
-                    println!(
-                        "{} {}",
-                        "Added shell check to".green(),
-                        rc_path.display()
-                    );
+                    println!("{} {}", "Added shell check to".green(), rc_path.display());
                 }
                 Ok(false) => {
-                    println!(
-                        "{} {}",
-                        "Already present in".yellow(),
-                        rc_path.display()
-                    );
+                    println!("{} {}", "Already present in".yellow(), rc_path.display());
                 }
                 Err(e) => {
-                    eprintln!(
-                        "{} {}: {}",
-                        "Failed to update".red(),
-                        rc_path.display(),
-                        e
-                    );
+                    eprintln!("{} {}: {}", "Failed to update".red(), rc_path.display(), e);
                 }
             }
         }

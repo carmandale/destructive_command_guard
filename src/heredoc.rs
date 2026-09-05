@@ -1604,14 +1604,11 @@ fn is_shell_env_assignment(token: &str) -> bool {
     };
 
     !name.is_empty()
-        && name
-            .bytes()
-            .enumerate()
-            .all(|(idx, byte)| match byte {
-                b'a'..=b'z' | b'A'..=b'Z' | b'_' => true,
-                b'0'..=b'9' => idx > 0,
-                _ => false,
-            })
+        && name.bytes().enumerate().all(|(idx, byte)| match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'_' => true,
+            b'0'..=b'9' => idx > 0,
+            _ => false,
+        })
 }
 
 /// Tokenize a command string backwards, respecting quotes.

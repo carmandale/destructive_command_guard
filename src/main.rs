@@ -449,8 +449,12 @@ fn main() {
             // protocol is known. Deny anyway: allowing here meant padding a
             // command past max_hook_input_bytes disabled the guard for it.
             let placeholder = format!("<hook input of {len} bytes, over the limit; not evaluated>");
-            let (reason, explanation) =
-                size_denial_text("the hook payload", len, max_input_bytes, "general.max_hook_input_bytes");
+            let (reason, explanation) = size_denial_text(
+                "the hook payload",
+                len,
+                max_input_bytes,
+                "general.max_hook_input_bytes",
+            );
             let cwd_path = std::env::current_dir().ok();
             let working_dir = cwd_path.as_ref().map_or_else(
                 || "<unknown>".to_string(),

@@ -12,7 +12,6 @@
 //!
 //! Related bead: git_safety_guard-l9ig
 
-
 #[path = "common/spawn.rs"]
 mod spawn;
 

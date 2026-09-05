@@ -205,7 +205,10 @@ fn a_subshell_piped_into_a_shell_still_reaches_the_body() {
     // this bead and was live on the installed guard. Same root cause, so it is
     // closed here rather than left because it was not mine.
     let cmd = format!("( cat <<'EOF'\n{}\nEOF\n) | sh", trigger());
-    assert!(!masked(&cmd), "the subshell's pipe feeds the body to sh: {cmd}");
+    assert!(
+        !masked(&cmd),
+        "the subshell's pipe feeds the body to sh: {cmd}"
+    );
 }
 
 #[test]
@@ -219,7 +222,10 @@ fn a_group_that_only_writes_a_file_is_still_masked() {
     // The document-assembly shape this bead exists for. If the fix above denied
     // this it would have traded one false positive for another.
     let cmd = format!("{{ cat <<'EOF'\n{}\nEOF\n}} > out.md", trigger());
-    assert!(masked(&cmd), "a group redirected to a file executes nothing: {cmd}");
+    assert!(
+        masked(&cmd),
+        "a group redirected to a file executes nothing: {cmd}"
+    );
 }
 
 #[test]
@@ -229,7 +235,10 @@ fn a_later_unrelated_pipeline_does_not_unmask_the_body() {
     // resumed after the body would call this executing and invent a false
     // positive.
     let cmd = format!("cat <<'EOF'\n{}\nEOF\nls | wc -l", trigger());
-    assert!(masked(&cmd), "an unrelated later pipeline is not this body's: {cmd}");
+    assert!(
+        masked(&cmd),
+        "an unrelated later pipeline is not this body's: {cmd}"
+    );
 }
 
 #[test]
@@ -244,7 +253,10 @@ fn a_group_around_a_here_string_piped_into_a_shell_still_reaches_the_content() {
     // line -- and the existing pipeline gate stops at the `;`, reading a group
     // separator as the end of the pipeline. `bash -n`: valid.
     let cmd = format!("{{ cat <<<'{}'; }} | bash", trigger());
-    assert!(!masked(&cmd), "the group's pipe feeds the here-string to bash: {cmd}");
+    assert!(
+        !masked(&cmd),
+        "the group's pipe feeds the here-string to bash: {cmd}"
+    );
 }
 
 #[test]
@@ -258,7 +270,10 @@ fn a_plain_here_string_to_a_data_sink_is_still_masked() {
     // The control. If the two above passed because here-strings stopped being
     // masked at all, this goes red.
     let cmd = format!("cat <<<'{}'", trigger());
-    assert!(masked(&cmd), "a here-string into cat executes nothing: {cmd}");
+    assert!(
+        masked(&cmd),
+        "a here-string into cat executes nothing: {cmd}"
+    );
 }
 
 // ---------------------------------------------------------------------------

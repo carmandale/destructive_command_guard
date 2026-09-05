@@ -27,7 +27,14 @@ fn trigger() -> String {
     format!("rm -{}f /", "r")
 }
 
-fn configured<T>(f: impl FnOnce(&Config, &[&str], &destructive_command_guard::config::CompiledOverrides, &LayeredAllowlist) -> T) -> T {
+fn configured<T>(
+    f: impl FnOnce(
+        &Config,
+        &[&str],
+        &destructive_command_guard::config::CompiledOverrides,
+        &LayeredAllowlist,
+    ) -> T,
+) -> T {
     let mut config = Config::default();
     config.heredoc.enabled = Some(true);
     config.packs.enabled = vec!["core".to_string()];
@@ -72,7 +79,10 @@ fn allow_once_is_named_at_the_call_site_not_inherited() {
     let store = dir.join("allow_once.jsonl");
     std::fs::write(
         &store,
-        format!("{}\n", serde_json::to_string(&entry_for(&command)).expect("serialize")),
+        format!(
+            "{}\n",
+            serde_json::to_string(&entry_for(&command)).expect("serialize")
+        ),
     )
     .expect("write allow-once fixture");
 
@@ -81,9 +91,8 @@ fn allow_once_is_named_at_the_call_site_not_inherited() {
     unsafe { std::env::set_var("DCG_ALLOW_ONCE_PATH", &store) };
 
     let inherited = configured(|c, k, o, a| evaluate_command(&command, c, k, o, a));
-    let asked_for = configured(|c, k, o, a| {
-        evaluate_command_consulting_allow_once(&command, c, k, o, a)
-    });
+    let asked_for =
+        configured(|c, k, o, a| evaluate_command_consulting_allow_once(&command, c, k, o, a));
 
     unsafe { std::env::remove_var("DCG_ALLOW_ONCE_PATH") };
     std::fs::remove_dir_all(&dir).ok();

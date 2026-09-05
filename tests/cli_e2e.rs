@@ -835,11 +835,14 @@ block = [
         };
 
         let denial = run_hook_with_config();
-        let code = extract_code_from_denial(&denial)
-            .expect("config block should emit an allow-once code");
+        let code =
+            extract_code_from_denial(&denial).expect("config block should emit an allow-once code");
 
         // Arm 1: the bypass. --force --yes, no human.
-        let forced = redeem(&["allow-once", &code, "--force", "--yes", "--pick", "1"], None);
+        let forced = redeem(
+            &["allow-once", &code, "--force", "--yes", "--pick", "1"],
+            None,
+        );
         let forced_stderr = String::from_utf8_lossy(&forced.stderr);
         assert!(
             !forced.status.success(),
@@ -863,7 +866,15 @@ block = [
 
         // Arm 2: --json is the other non-interactive door into the same room.
         let forced_json = redeem(
-            &["allow-once", &code, "--force", "--yes", "--json", "--pick", "1"],
+            &[
+                "allow-once",
+                &code,
+                "--force",
+                "--yes",
+                "--json",
+                "--pick",
+                "1",
+            ],
             None,
         );
         let forced_json_stderr = String::from_utf8_lossy(&forced_json.stderr);
@@ -887,7 +898,10 @@ block = [
         // Arm 3: "y" is not FORCE. This separates "a prompt ran" from "the
         // FORCE prompt ran" -- if the ordinary [y/N] branch were taken here,
         // this would succeed.
-        let typed_y = redeem(&["allow-once", &code, "--force", "--pick", "1"], Some("y\n"));
+        let typed_y = redeem(
+            &["allow-once", &code, "--force", "--pick", "1"],
+            Some("y\n"),
+        );
         assert!(
             !typed_y.status.success(),
             "answering the config-block prompt with \"y\" must not override it\n\
@@ -904,7 +918,10 @@ block = [
 
         // Arm 4: the control. Typing FORCE still overrides, so the arms above
         // are refusing `--yes` specifically and not reporting a dead path.
-        let typed = redeem(&["allow-once", &code, "--force", "--pick", "1"], Some("FORCE\n"));
+        let typed = redeem(
+            &["allow-once", &code, "--force", "--pick", "1"],
+            Some("FORCE\n"),
+        );
         assert!(
             typed.status.success(),
             "typing FORCE must still override the config block\n\

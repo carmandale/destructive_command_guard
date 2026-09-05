@@ -2276,8 +2276,7 @@ fn evaluate_heredoc(
 
             if let Some(hit) = context.allowlists.match_rule(&pack_id, &pattern_name) {
                 if first_allowlist_hit.is_none() {
-                    let reason =
-                        format_heredoc_denial_reason(content, &m, &pack_id, &pattern_name);
+                    let reason = format_heredoc_denial_reason(content, &m, &pack_id, &pattern_name);
                     let mapped_span = map_heredoc_span(command, content, m.start, m.end);
                     *first_allowlist_hit = Some((
                         PatternMatch {

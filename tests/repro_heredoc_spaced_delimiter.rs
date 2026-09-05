@@ -81,10 +81,7 @@ fn a_space_before_a_quoted_delimiter_still_masks() {
 #[test]
 fn several_spaces_and_a_tab_before_a_quoted_delimiter_still_mask() {
     let t = trigger();
-    assert_allowed(
-        &format!("cat <<  'EOF'\n{t}\nEOF"),
-        "two spaces",
-    );
+    assert_allowed(&format!("cat <<  'EOF'\n{t}\nEOF"), "two spaces");
     assert_allowed(&format!("cat <<\t'EOF'\n{t}\nEOF"), "a tab");
 }
 
@@ -101,7 +98,10 @@ fn a_space_before_a_double_quoted_delimiter_still_masks() {
 fn the_spaced_form_masks_for_other_data_sinks_too() {
     let t = trigger();
     assert_allowed(&format!("tee f << 'EOF'\n{t}\nEOF"), "tee");
-    assert_allowed(&format!("cat > f << 'EOF'\n{t}\nEOF"), "cat with a redirect");
+    assert_allowed(
+        &format!("cat > f << 'EOF'\n{t}\nEOF"),
+        "cat with a redirect",
+    );
 }
 
 #[test]
@@ -167,10 +167,7 @@ fn an_unquoted_delimiter_still_exposes_its_body() {
         &format!("cat << EOF\n$({t})\nEOF"),
         "unquoted: the shell expands the body before cat ever sees it",
     );
-    assert_blocked(
-        &format!("cat <<EOF\n$({t})\nEOF"),
-        "unquoted, no space",
-    );
+    assert_blocked(&format!("cat <<EOF\n$({t})\nEOF"), "unquoted, no space");
 }
 
 #[test]
@@ -213,5 +210,8 @@ fn ordinary_quoted_subcommand_words_are_still_dequoted() {
 
 #[test]
 fn a_bare_destructive_command_is_still_blocked() {
-    assert_blocked(&trigger(), "the control: the matcher can still produce DENY");
+    assert_blocked(
+        &trigger(),
+        "the control: the matcher can still produce DENY",
+    );
 }

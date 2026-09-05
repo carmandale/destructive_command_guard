@@ -1642,7 +1642,10 @@ mod tests {
 
         let raw = std::fs::read_to_string(store.path()).expect("read store");
         assert_eq!(raw.lines().count(), 2, "expected an append, not a rewrite");
-        assert!(raw.contains("echo stale"), "the expired line was rewritten away");
+        assert!(
+            raw.contains("echo stale"),
+            "the expired line was rewritten away"
+        );
 
         // Consumers are unaffected: the read path still filters expired records.
         let (active, _) = store.preview_active(Utc::now()).expect("preview");
@@ -1698,7 +1701,10 @@ mod tests {
         let raw = std::fs::read_to_string(store.path()).expect("read store");
         assert_eq!(raw.lines().count(), MAX_RETAINED_RECORDS + 1);
         assert!(raw.contains("echo newest"), "the new record must survive");
-        assert!(!raw.contains("echo seed0 "), "the oldest record must be dropped");
+        assert!(
+            !raw.contains("echo seed0 "),
+            "the oldest record must be dropped"
+        );
         assert!(
             std::fs::metadata(store.path()).expect("stat").len() < size_before,
             "the store must shrink once it crosses the threshold"
