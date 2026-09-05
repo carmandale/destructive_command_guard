@@ -119,12 +119,17 @@ fn line_continuation_does_not_hide_the_pipe() {
 
 #[test]
 fn here_string_piped_to_a_shell_is_not_data() {
+    // The VERDICT is the oracle for a here-string, not the mask. A here-string's
+    // body reaches the matcher through extraction rather than through the masked
+    // command text, so `evaluate_heredoc` is what decides it and masking is not.
+    // A build carrying all five vetoes at both masking sites and only the
+    // receiver check at the evaluator ALLOWs this command while a mask-only
+    // assertion here stays green -- the historical `.agent-config-41wu8` shape,
+    // re-measured as mutant M8 under `.agent-config-304r3`. The mask is still
+    // asserted, second, because masking the body away would be a different bug.
     let cmd = format!("cat <<<'{TRIGGER}' | bash");
-    let masked = mask_non_executing_heredocs(&cmd);
-    assert!(
-        masked.contains(TRIGGER),
-        "here-string body was masked away despite the pipe into bash: {masked:?}"
-    );
+    assert_denied(&cmd, "bash executes what the here-string hands it");
+    assert_body_visible(&cmd, "the pipe into bash means the body is not data");
 }
 
 // ---------------------------------------------------------------------------
@@ -286,11 +291,11 @@ fn the_here_string_path_is_gated_too() {
     // fix to one path cannot silently leave the other open.
     for tail in ["| bash", "2>&1 | bash", "$(true;) | bash"] {
         let cmd = format!("cat <<<'{TRIGGER}' {tail}");
-        let masked = mask_non_executing_heredocs(&cmd);
-        assert!(
-            masked.contains(TRIGGER),
-            "here-string body masked away despite `{tail}`: {masked:?}"
-        );
+        // Verdict first, for the reason given on
+        // `here_string_piped_to_a_shell_is_not_data`: on a here-string the mask
+        // is not the oracle the binary answers with.
+        assert_denied(&cmd, &format!("bash still runs the body despite `{tail}`"));
+        assert_body_visible(&cmd, &format!("the body survives masking despite `{tail}`"));
     }
 }
 
