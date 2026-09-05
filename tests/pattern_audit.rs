@@ -75,8 +75,23 @@ fn test_audit_backtracking_requirements() {
         ),
         ("dns.generic", HashSet::from(["dns-dig-safe"])),
         ("database.mongodb", HashSet::from(["mongodump-no-drop"])),
+        // `mysqldump\s+(?!.*--add-drop-database)(?!.*--add-drop-table)`: "dump
+        // without the drop flags" is only expressible as negative lookahead. It is
+        // the same shape already admitted one line above and one line below, for
+        // `mongodump-no-drop` and `pg-dump-no-clean`.
+        ("database.mysql", HashSet::from(["mysqldump-no-drop"])),
         ("database.postgresql", HashSet::from(["pg-dump-no-clean"])),
-        ("database.redis", HashSet::from(["shutdown"])),
+        // `config-set-maxmemory`'s trailing `(?!-)` is what separates bare
+        // `maxmemory` from `maxmemory-policy` and `maxmemory-samples`, which carry
+        // their own patterns and their own remediation text. `\b` alone does not
+        // separate them: y->- is itself a word boundary, so `CONFIG SET maxmemory\b`
+        // matches `CONFIG SET maxmemory-policy`. A lookahead-free rewrite would have
+        // to consume the following character, widening a Critical pattern's match
+        // span for no gain.
+        (
+            "database.redis",
+            HashSet::from(["shutdown", "config-set-maxmemory"]),
+        ),
         (
             "infrastructure.ansible",
             HashSet::from(["playbook-all-hosts"]),

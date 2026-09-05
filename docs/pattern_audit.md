@@ -1,5 +1,5 @@
 # Pattern Audit Report
-Generated: 2026-01-10T17:39:52.939979
+Generated: 2026-09-05T16:20:24.208688
 
 ## `src/packs/cicd/github_actions.rs`
 
@@ -35,12 +35,12 @@ Generated: 2026-01-10T17:39:52.939979
 | safe | `rm-fr-var-tmp` | Found '!' | `^rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+(?:/var/tmp/(?!...` |
 | safe | `rm-rf-tmpdir` | Found '!' | `^rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+(?:\$TMPDIR/(?!...` |
 | safe | `rm-fr-tmpdir` | Found '!' | `^rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+(?:\$TMPDIR/(?!...` |
-| safe | `rm-rf-tmpdir-brace` | Found '!' | `^rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+(?:\$\{TMPDIR(?...` |
-| safe | `rm-fr-tmpdir-brace` | Found '!' | `^rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+(?:\$\{TMPDIR(?...` |
+| safe | `rm-rf-tmpdir-brace` | Found '!' | `^rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+(?:\$\{TMPDIR\}...` |
+| safe | `rm-fr-tmpdir-brace` | Found '!' | `^rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+(?:\$\{TMPDIR\}...` |
 | safe | `rm-rf-tmpdir-quoted` | Found '!' | `^rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+(?:"\$TMPDIR/(?...` |
 | safe | `rm-fr-tmpdir-quoted` | Found '!' | `^rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+(?:"\$TMPDIR/(?...` |
-| safe | `rm-rf-tmpdir-brace-quoted` | Found '!' | `^rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+(?:"\$\{TMPDIR(...` |
-| safe | `rm-fr-tmpdir-brace-quoted` | Found '!' | `^rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+(?:"\$\{TMPDIR(...` |
+| safe | `rm-rf-tmpdir-brace-quoted` | Found '!' | `^rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+(?:"\$\{TMPDIR\...` |
+| safe | `rm-fr-tmpdir-brace-quoted` | Found '!' | `^rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+(?:"\$\{TMPDIR\...` |
 | safe | `rm-r-f-tmp` | Found '!' | `^rm\s+(-[a-zA-Z]+\s+)*-[rR]\s+(-[a-zA-Z]+\s+)*-f\s+(?:/tm...` |
 | safe | `rm-f-r-tmp` | Found '!' | `^rm\s+(-[a-zA-Z]+\s+)*-f\s+(-[a-zA-Z]+\s+)*-[rR]\s+(?:/tm...` |
 | safe | `rm-r-f-var-tmp` | Found '!' | `^rm\s+(-[a-zA-Z]+\s+)*-[rR]\s+(-[a-zA-Z]+\s+)*-f\s+(?:/va...` |
@@ -55,8 +55,8 @@ Generated: 2026-01-10T17:39:52.939979
 | safe | `rm-force-recursive-var-tmp` | Found '!' | `^rm\s+.*--force.*--recursive\s+(?:/var/tmp/(?!\.\.(?:/\|\...` |
 | safe | `rm-recursive-force-tmpdir` | Found '!' | `^rm\s+.*--recursive.*--force\s+(?:\$TMPDIR/(?!\.\.(?:/\|\...` |
 | safe | `rm-force-recursive-tmpdir` | Found '!' | `^rm\s+.*--force.*--recursive\s+(?:\$TMPDIR/(?!\.\.(?:/\|\...` |
-| safe | `rm-recursive-force-tmpdir-brace` | Found '!' | `^rm\s+.*--recursive.*--force\s+(?:\$\{TMPDIR(?!\.\.(?:/\|...` |
-| safe | `rm-force-recursive-tmpdir-brace` | Found '!' | `^rm\s+.*--force.*--recursive\s+(?:\$\{TMPDIR(?!\.\.(?:/\|...` |
+| safe | `rm-recursive-force-tmpdir-brace` | Found '!' | `^rm\s+.*--recursive.*--force\s+(?:\$\{TMPDIR\}/(?!\.\.(?:...` |
+| safe | `rm-force-recursive-tmpdir-brace` | Found '!' | `^rm\s+.*--force.*--recursive\s+(?:\$\{TMPDIR\}/(?!\.\.(?:...` |
 
 ## `src/packs/core/git.rs`
 
@@ -74,6 +74,12 @@ Generated: 2026-01-10T17:39:52.939979
 |------|------|--------|---------------|
 | safe | `mongodump-no-drop` | Found '!' | `mongodump\s+(?!.*--drop)` |
 
+## `src/packs/database/mysql.rs`
+
+| Kind | Name | Reason | Regex Preview |
+|------|------|--------|---------------|
+| safe | `mysqldump-no-drop` | Found '!' | `mysqldump\s+(?!.*--add-drop-database)(?!.*--add-drop-table)` |
+
 ## `src/packs/database/postgresql.rs`
 
 | Kind | Name | Reason | Regex Preview |
@@ -85,6 +91,13 @@ Generated: 2026-01-10T17:39:52.939979
 | Kind | Name | Reason | Regex Preview |
 |------|------|--------|---------------|
 | destructive | `shutdown` | Found '!' | `(?i)\bSHUTDOWN\b(?!\s+NOSAVE)` |
+| destructive | `config-set-maxmemory` | Found '!' | `(?i)\bCONFIG\s+SET\s+maxmemory(?!-)\b` |
+
+## `src/packs/dns/generic.rs`
+
+| Kind | Name | Reason | Regex Preview |
+|------|------|--------|---------------|
+| safe | `dns-dig-safe` | Found '!' | `\bdig\b(?!.*\baxfr\b)(?!.*\bixfr\b)` |
 
 ## `src/packs/infrastructure/ansible.rs`
 
@@ -141,6 +154,10 @@ Generated: 2026-01-10T17:39:52.939979
 | safe | `gh-release-list-view` | Found '!' | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo\|gist\...` |
 | safe | `gh-issue-list-view` | Found '!' | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo\|gist\...` |
 | safe | `gh-ssh-key-list` | Found '!' | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo\|gist\...` |
+| safe | `gh-secret-list` | Found '!' | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo\|gist\...` |
+| safe | `gh-variable-list` | Found '!' | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo\|gist\...` |
+| safe | `gh-auth-status` | Found '!' | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo\|gist\...` |
+| safe | `gh-status` | Found '!' | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo\|gist\...` |
 | safe | `gh-api-explicit-get` | Found '!' | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo\|gist\...` |
 | destructive | `gh-repo-delete` | Found '!' | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo\|gist\...` |
 | destructive | `gh-repo-archive` | Found '!' | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo\|gist\...` |
@@ -148,6 +165,15 @@ Generated: 2026-01-10T17:39:52.939979
 | destructive | `gh-release-delete` | Found '!' | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo\|gist\...` |
 | destructive | `gh-issue-delete` | Found '!' | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo\|gist\...` |
 | destructive | `gh-ssh-key-delete` | Found '!' | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo\|gist\...` |
+| destructive | `gh-secret-delete` | Found '!' | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo\|gist\...` |
+| destructive | `gh-variable-delete` | Found '!' | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo\|gist\...` |
+| destructive | `gh-repo-deploy-key-delete` | Found '!' | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo\|gist\...` |
+| destructive | `gh-run-cancel` | Found '!' | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo\|gist\...` |
+| destructive | `gh-api-delete-actions-secret` | Found '!' | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo\|gist\...` |
+| destructive | `gh-api-delete-actions-variable` | Found '!' | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo\|gist\...` |
+| destructive | `gh-api-delete-hook` | Found '!' | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo\|gist\...` |
+| destructive | `gh-api-delete-deploy-key` | Found '!' | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo\|gist\...` |
+| destructive | `gh-api-delete-release` | Found '!' | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo\|gist\...` |
 | destructive | `gh-api-delete-repo` | Found '!' | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo\|gist\...` |
 
 ## `src/packs/system/disk.rs`
