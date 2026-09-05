@@ -133,6 +133,13 @@ This requires additional confirmation because:
 2. Overriding it may indicate a mistake or policy conflict
 3. The action is logged for audit purposes
 
+That confirmation is interactive and cannot be waived. `--force` prompts for the
+literal word `FORCE`, and **`--yes` and `--json` do not answer it** — they answer
+only the ordinary `[y/N]` question on a pack denial. `dcg allow-once <CODE>
+--force --yes` is refused and writes nothing, so a non-interactive caller cannot
+clear a config blocklist with no human in the loop. `--dry-run` still previews
+without prompting, because it writes nothing.
+
 ---
 
 ## Managing Exceptions
@@ -229,12 +236,12 @@ Without disambiguation, the CLI will show a list of matching entries to choose f
 
 | Flag | Description |
 |------|-------------|
-| `--yes`, `-y` | Auto-confirm (non-interactive) |
+| `--yes`, `-y` | Auto-confirm the ordinary `[y/N]` prompt (non-interactive). Does **not** answer the `--force` FORCE confirmation |
 | `--json` | Output JSON for automation |
 | `--show-raw` | Show unredacted command text |
 | `--dry-run` | Preview without applying |
 | `--single-use` | Consumed after first allow |
-| `--force` | Override config blocklist |
+| `--force` | Override config blocklist. Always prompts for `FORCE`; not usable non-interactively |
 | `--pick <N>` | Select by index when codes collide |
 | `--hash <HASH>` | Select by full hash when codes collide |
 
@@ -321,6 +328,9 @@ The blocked command is in your config blocklist. Add `--force` if you're certain
 ```bash
 dcg allow-once 12345 --force
 ```
+
+Run that on a terminal: it prompts for `FORCE`, and `--yes` will not answer for
+you.
 
 ### Permissions Error
 

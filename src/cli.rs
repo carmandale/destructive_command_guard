@@ -9950,6 +9950,22 @@ fn handle_allow_once_command(
             "This denial came from your config blocklist; re-run with --force to override.".into(),
         );
     }
+    // A config blocklist entry is a human's explicit "never", and
+    // docs/allow-once-usage.md promises overriding one "requires additional
+    // confirmation". `--yes` is the batch answer to the ordinary [y/N]
+    // question; letting it also answer the FORCE question collapses two gates
+    // of different strength into one flag, so a non-interactive caller could
+    // clear the blocklist with no human anywhere in the loop. `--json` implies
+    // `--yes` or `--dry-run` and never prompts, so it is refused the same way.
+    // `--dry-run` writes nothing and stays exempt.
+    if is_config_block && cmd.force && !cmd.dry_run && (cmd.yes || cmd.json) {
+        return Err(
+            "Overriding a config blocklist needs the interactive FORCE confirmation; \
+             --yes and --json cannot answer it. Re-run `dcg allow-once <CODE> --force` \
+             on a terminal and type FORCE."
+                .into(),
+        );
+    }
     if cmd.json && !cmd.yes && !cmd.dry_run {
         return Err("JSON output requires --yes or --dry-run to avoid prompts.".into());
     }

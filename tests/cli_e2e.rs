@@ -745,6 +745,181 @@ block = [
         );
     }
 
+    /// `--yes` must not answer the FORCE confirmation that guards a config
+    /// blocklist override.
+    ///
+    /// Measured on 2026-09-03 under `.agent-config-eth3v`: `handle_allow_once_command`
+    /// gated the "Type 'FORCE' to confirm override:" prompt behind
+    /// `needs_prompt = !(cmd.yes || cmd.dry_run)`, so `dcg allow-once <code>
+    /// --force --yes` exited 0, printed "OK Allow-once entry created", and the
+    /// hook allowed the command afterwards -- with no human anywhere in the
+    /// loop. `--yes` is the batch answer to the ordinary `[y/N]` question on a
+    /// pack denial; letting it also answer FORCE collapsed two gates of
+    /// different strength into one flag, and made
+    /// `docs/allow-once-usage.md`'s "requires additional confirmation" untrue.
+    ///
+    /// The oracle here is the hook verdict after each redemption attempt, not
+    /// the CLI's exit code: an entry can be written and still not grant, and a
+    /// refusal that still wrote would be a bypass. Both arms run, because a
+    /// refusal proves nothing until the same path is shown able to succeed.
+    #[test]
+    fn config_block_force_yes_is_refused_but_typed_force_still_works() {
+        let env = FlowTestEnv::new();
+        let command = "git reset --hard";
+
+        let config_path = env.sandbox.root().join("dcg.toml");
+        std::fs::write(
+            &config_path,
+            r"
+[overrides]
+block = [
+  { pattern = '\bgit\s+reset\s+--hard\b', reason = 'test config block' },
+]
+",
+        )
+        .expect("write config");
+
+        // Hook mode, with the config in force. Returns the raw stdout: a denial
+        // is a JSON object, an allow is empty.
+        let run_hook_with_config = || -> String {
+            let input = payload::pre_tool_use(env.sandbox.root(), command);
+            let mut cmd = spawn::dcg_in(&env.sandbox);
+            cmd.env("DCG_PENDING_EXCEPTIONS_PATH", &env.pending_path)
+                .env("DCG_ALLOW_ONCE_PATH", &env.allow_once_path)
+                .env("DCG_CONFIG", &config_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let mut child = cmd.spawn().expect("failed to spawn dcg hook mode");
+            {
+                let stdin = child.stdin.as_mut().expect("failed to open stdin");
+                serde_json::to_writer(stdin, &input).expect("failed to write hook input JSON");
+            }
+            let out = child.wait_with_output().expect("failed to wait for dcg");
+            String::from_utf8_lossy(&out.stdout).to_string()
+        };
+
+        // `dcg allow-once <code> [args]` with a chosen stdin, as an agent's
+        // non-interactive shell would run it. Every hook run above appends
+        // another pending entry sharing this short code, so each arm passes
+        // `--pick 1`: without it a later arm fails on the collision instead of
+        // on the gate under test, and reads green for the wrong reason.
+        let redeem = |args: &[&str], stdin_text: Option<&str>| -> std::process::Output {
+            let mut cmd = spawn::dcg_in(&env.sandbox);
+            cmd.env_remove("DCG_PACKS")
+                .env("DCG_PENDING_EXCEPTIONS_PATH", &env.pending_path)
+                .env("DCG_ALLOW_ONCE_PATH", &env.allow_once_path)
+                .env("DCG_CONFIG", &config_path)
+                .args(args)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            match stdin_text {
+                // No terminal and nothing to read: EOF, exactly what a
+                // background agent's invocation gets.
+                None => {
+                    cmd.stdin(Stdio::null());
+                    cmd.output().expect("run dcg allow-once")
+                }
+                Some(text) => {
+                    cmd.stdin(Stdio::piped());
+                    let mut child = cmd.spawn().expect("spawn dcg allow-once");
+                    child
+                        .stdin
+                        .as_mut()
+                        .expect("open stdin")
+                        .write_all(text.as_bytes())
+                        .expect("write stdin");
+                    child.wait_with_output().expect("wait for dcg allow-once")
+                }
+            }
+        };
+
+        let denial = run_hook_with_config();
+        let code = extract_code_from_denial(&denial)
+            .expect("config block should emit an allow-once code");
+
+        // Arm 1: the bypass. --force --yes, no human.
+        let forced = redeem(&["allow-once", &code, "--force", "--yes", "--pick", "1"], None);
+        let forced_stderr = String::from_utf8_lossy(&forced.stderr);
+        assert!(
+            !forced.status.success(),
+            "`allow-once --force --yes` must be refused on a config block\n\
+             stdout: {}\nstderr: {forced_stderr}",
+            String::from_utf8_lossy(&forced.stdout)
+        );
+        assert!(
+            forced_stderr.contains("FORCE"),
+            "the refusal must name the FORCE confirmation it is protecting\n\
+             stderr: {forced_stderr}"
+        );
+
+        // The verdict, not the exit code, is what a bypass would change.
+        let after_forced = run_hook_with_config();
+        assert!(
+            extract_code_from_denial(&after_forced).is_some(),
+            "the config block must still deny after a refused --force --yes\n\
+             hook stdout: {after_forced}"
+        );
+
+        // Arm 2: --json is the other non-interactive door into the same room.
+        let forced_json = redeem(
+            &["allow-once", &code, "--force", "--yes", "--json", "--pick", "1"],
+            None,
+        );
+        let forced_json_stderr = String::from_utf8_lossy(&forced_json.stderr);
+        assert!(
+            !forced_json.status.success(),
+            "`allow-once --force --yes --json` must be refused too\nstdout: {}",
+            String::from_utf8_lossy(&forced_json.stdout)
+        );
+        assert!(
+            forced_json_stderr.contains("FORCE"),
+            "the --json refusal must be the FORCE gate, not some other error\n\
+             stderr: {forced_json_stderr}"
+        );
+        let after_json = run_hook_with_config();
+        assert!(
+            extract_code_from_denial(&after_json).is_some(),
+            "the config block must still deny after a refused --force --json\n\
+             hook stdout: {after_json}"
+        );
+
+        // Arm 3: "y" is not FORCE. This separates "a prompt ran" from "the
+        // FORCE prompt ran" -- if the ordinary [y/N] branch were taken here,
+        // this would succeed.
+        let typed_y = redeem(&["allow-once", &code, "--force", "--pick", "1"], Some("y\n"));
+        assert!(
+            !typed_y.status.success(),
+            "answering the config-block prompt with \"y\" must not override it\n\
+             stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&typed_y.stdout),
+            String::from_utf8_lossy(&typed_y.stderr)
+        );
+        let after_typed_y = run_hook_with_config();
+        assert!(
+            extract_code_from_denial(&after_typed_y).is_some(),
+            "the config block must still deny after a \"y\" answer\n\
+             hook stdout: {after_typed_y}"
+        );
+
+        // Arm 4: the control. Typing FORCE still overrides, so the arms above
+        // are refusing `--yes` specifically and not reporting a dead path.
+        let typed = redeem(&["allow-once", &code, "--force", "--pick", "1"], Some("FORCE\n"));
+        assert!(
+            typed.status.success(),
+            "typing FORCE must still override the config block\n\
+             stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&typed.stdout),
+            String::from_utf8_lossy(&typed.stderr)
+        );
+        let after_typed = run_hook_with_config();
+        assert!(
+            after_typed.trim().is_empty(),
+            "after a typed FORCE the hook should allow (empty stdout)\n\
+             hook stdout: {after_typed}"
+        );
+    }
+
     #[test]
     fn collision_handling_with_multiple_pending_entries() {
         let env = FlowTestEnv::new();
