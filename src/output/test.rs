@@ -384,7 +384,7 @@ impl TestResultBox {
         let _ = writeln!(
             output,
             "\x1b[{}m\u{256d}{}\u{256e}\x1b[0m",
-            &color_code,
+            color_code,
             "\u{2500}".repeat(width)
         );
 
@@ -392,18 +392,18 @@ impl TestResultBox {
         let _ = writeln!(
             output,
             "\x1b[{}m\u{2502}\x1b[0m\x1b[1;{}m{}\x1b[0m{}\x1b[{}m\u{2502}\x1b[0m",
-            &color_code,
-            &color_code,
+            color_code,
+            color_code,
             header,
             " ".repeat(top_pad),
-            &color_code
+            color_code
         );
 
         // Separator
         let _ = writeln!(
             output,
             "\x1b[{}m\u{251c}{}\u{2524}\x1b[0m",
-            &color_code,
+            color_code,
             "\u{2500}".repeat(width)
         );
 
@@ -491,7 +491,7 @@ impl TestResultBox {
         let _ = writeln!(
             output,
             "\x1b[{}m\u{2570}{}\u{256f}\x1b[0m",
-            &color_code,
+            color_code,
             "\u{2500}".repeat(width)
         );
 

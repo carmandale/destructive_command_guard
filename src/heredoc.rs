@@ -250,8 +250,8 @@ fn scan_dollar_paren_for_heredoc_recursive(
     let bytes = command.as_bytes();
     let len = bytes.len();
 
-    debug_assert!(bytes.get(start) == Some(&b'$'));
-    debug_assert!(bytes.get(start + 1) == Some(&b'('));
+    debug_assert_eq!(bytes.get(start), Some(&b'$'));
+    debug_assert_eq!(bytes.get(start + 1), Some(&b'('));
 
     let mut i = start + 2;
     let mut depth: u32 = 1;
@@ -331,7 +331,7 @@ fn scan_backticks_for_heredoc_recursive(
     let bytes = command.as_bytes();
     let len = bytes.len();
 
-    debug_assert!(bytes.get(start) == Some(&b'`'));
+    debug_assert_eq!(bytes.get(start), Some(&b'`'));
 
     let mut i = start + 1;
     while i < len {
@@ -3094,19 +3094,17 @@ fn parse_heredoc_delimiter(after_op: &str) -> Option<(String, usize, HeredocType
     // Handle quoted delimiters
     let (delimiter, delim_len, quoted) = if let Some(stripped) = delim_chars.strip_prefix('"') {
         // Find closing quote
-        if let Some(end) = stripped.find('"') {
+        {
+            let end = stripped.find('"')?;
             let (body, _) = stripped.split_at(end);
             (body.to_string(), end + 2, true)
-        } else {
-            return None;
         }
     } else if let Some(stripped) = delim_chars.strip_prefix('\'') {
         // Find closing quote
-        if let Some(end) = stripped.find('\'') {
+        {
+            let end = stripped.find('\'')?;
             let (body, _) = stripped.split_at(end);
             (body.to_string(), end + 2, true)
-        } else {
-            return None;
         }
     } else {
         // Unquoted - extract word. The outer shell EXPANDS this body.

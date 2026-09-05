@@ -1293,10 +1293,8 @@ fn contains_shell_command_substitution(s: &str) -> bool {
             '`' if !in_single => {
                 return true;
             }
-            '$' if !in_single => {
-                if chars.peek().copied() == Some('(') {
-                    return true;
-                }
+            '$' if !in_single && chars.peek().copied() == Some('(') => {
+                return true;
             }
             _ => {}
         }

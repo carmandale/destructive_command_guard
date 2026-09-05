@@ -260,7 +260,7 @@ impl DenialBox {
         let success_code = ansi_color_code(theme.success_color);
         let pattern_lines =
             format_pattern_lines(&self.pattern_id, theme.severity_label(self.severity));
-        let explanation_label = format!("\x1b[1;{}mExplanation:\x1b[0m", &severity_code);
+        let explanation_label = format!("\x1b[1;{}mExplanation:\x1b[0m", severity_code);
 
         // Top border with header
         let header = " \u{26d4}  BLOCKED: Destructive Command Detected ";
@@ -270,22 +270,22 @@ impl DenialBox {
         let _ = writeln!(
             output,
             "\x1b[{}m\u{256d}{}\u{256e}\x1b[0m",
-            &severity_code,
+            severity_code,
             "\u{2500}".repeat(width)
         );
         let _ = writeln!(
             output,
             "\x1b[{}m\u{2502}\x1b[0m\x1b[1;{}m{}\x1b[0m{}\x1b[{}m\u{2502}\x1b[0m",
-            &severity_code,
-            &severity_code,
+            severity_code,
+            severity_code,
             header,
             " ".repeat(top_pad),
-            &severity_code
+            severity_code
         );
         let _ = writeln!(
             output,
             "\x1b[{}m\u{251c}{}\u{2524}\x1b[0m",
-            &severity_code,
+            severity_code,
             "\u{2500}".repeat(width)
         );
 
@@ -300,27 +300,27 @@ impl DenialBox {
         let _ = writeln!(
             output,
             "\x1b[{}m\u{2502}\x1b[0m  {}{}  \x1b[{}m\u{2502}\x1b[0m",
-            &severity_code,
+            severity_code,
             highlighted.command_line,
             padding_for(&highlighted.command_line, width.saturating_sub(4)),
-            &severity_code
+            severity_code
         );
         let _ = writeln!(
             output,
             "\x1b[{}m\u{2502}\x1b[0m  {}{}  \x1b[{}m\u{2502}\x1b[0m",
-            &severity_code,
+            severity_code,
             highlighted.caret_line,
             padding_for(&highlighted.caret_line, width.saturating_sub(4)),
-            &severity_code
+            severity_code
         );
         if let Some(label) = &highlighted.label_line {
             let _ = writeln!(
                 output,
                 "\x1b[{}m\u{2502}\x1b[0m  {}{}  \x1b[{}m\u{2502}\x1b[0m",
-                &severity_code,
+                severity_code,
                 label,
                 padding_for(label, width.saturating_sub(4)),
-                &severity_code
+                severity_code
             );
         }
 
@@ -328,9 +328,9 @@ impl DenialBox {
         let _ = writeln!(
             output,
             "\x1b[{}m\u{2502}\x1b[0m{}  \x1b[{}m\u{2502}\x1b[0m",
-            &severity_code,
+            severity_code,
             " ".repeat(width.saturating_sub(2)),
-            &severity_code
+            severity_code
         );
 
         // Explanation
@@ -338,18 +338,18 @@ impl DenialBox {
             let _ = writeln!(
                 output,
                 "\x1b[{}m\u{2502}\x1b[0m{}  \x1b[{}m\u{2502}\x1b[0m",
-                &severity_code,
+                severity_code,
                 " ".repeat(width.saturating_sub(2)),
-                &severity_code
+                severity_code
             );
 
             let _ = writeln!(
                 output,
                 "\x1b[{}m\u{2502}\x1b[0m  {}{}  \x1b[{}m\u{2502}\x1b[0m",
-                &severity_code,
+                severity_code,
                 explanation_label,
                 padding_for(&explanation_label, width.saturating_sub(4)),
-                &severity_code
+                severity_code
             );
 
             // Word wrap explanation
@@ -357,10 +357,10 @@ impl DenialBox {
                 let _ = writeln!(
                     output,
                     "\x1b[{}m\u{2502}\x1b[0m  {}{}  \x1b[{}m\u{2502}\x1b[0m",
-                    &severity_code,
+                    severity_code,
                     line,
                     padding_for(&line, width.saturating_sub(4)),
-                    &severity_code
+                    severity_code
                 );
             }
         }
@@ -369,18 +369,18 @@ impl DenialBox {
         let _ = writeln!(
             output,
             "\x1b[{}m\u{2502}\x1b[0m{}  \x1b[{}m\u{2502}\x1b[0m",
-            &severity_code,
+            severity_code,
             " ".repeat(width.saturating_sub(2)),
-            &severity_code
+            severity_code
         );
         for pattern_line in pattern_lines {
             let _ = writeln!(
                 output,
                 "\x1b[{}m\u{2502}\x1b[0m  \x1b[2m{}\x1b[0m{}  \x1b[{}m\u{2502}\x1b[0m",
-                &severity_code,
+                severity_code,
                 pattern_line,
                 padding_for(&pattern_line, width.saturating_sub(4)),
-                &severity_code
+                severity_code
             );
         }
 
@@ -389,20 +389,20 @@ impl DenialBox {
             let _ = writeln!(
                 output,
                 "\x1b[{}m\u{2502}\x1b[0m{}  \x1b[{}m\u{2502}\x1b[0m",
-                &severity_code,
+                severity_code,
                 " ".repeat(width.saturating_sub(2)),
-                &severity_code
+                severity_code
             );
 
             let alt_header = "Safe alternatives:";
             let _ = writeln!(
                 output,
                 "\x1b[{}m\u{2502}\x1b[0m  \x1b[{}m{}\x1b[0m{}  \x1b[{}m\u{2502}\x1b[0m",
-                &severity_code,
-                &success_code,
+                severity_code,
+                success_code,
                 alt_header,
                 padding_for(alt_header, width.saturating_sub(4)),
-                &severity_code
+                severity_code
             );
 
             for alt in &self.alternatives {
@@ -410,11 +410,11 @@ impl DenialBox {
                 let _ = writeln!(
                     output,
                     "\x1b[{}m\u{2502}\x1b[0m    \x1b[{}m{}\x1b[0m{}  \x1b[{}m\u{2502}\x1b[0m",
-                    &severity_code,
-                    &success_code,
+                    severity_code,
+                    success_code,
                     bullet_line,
                     padding_for(&bullet_line, width.saturating_sub(6)),
-                    &severity_code
+                    severity_code
                 );
             }
         }
@@ -423,7 +423,7 @@ impl DenialBox {
         let _ = writeln!(
             output,
             "\x1b[{}m\u{2570}{}\u{256f}\x1b[0m",
-            &severity_code,
+            severity_code,
             "\u{2500}".repeat(width)
         );
 
@@ -550,7 +550,7 @@ impl DenialBox {
         let _ = writeln!(
             output,
             "\x1b[{}m\u{26d4}  BLOCKED\x1b[0m: Destructive Command Detected",
-            &severity_code
+            severity_code
         );
         let _ = writeln!(output);
 
@@ -573,7 +573,7 @@ impl DenialBox {
         // Explanation
         if let Some(explanation) = &self.explanation {
             let _ = writeln!(output);
-            let explanation_label = format!("\x1b[1;{}mExplanation:\x1b[0m", &severity_code);
+            let explanation_label = format!("\x1b[1;{}mExplanation:\x1b[0m", severity_code);
             let width = terminal_width().saturating_sub(4).max(40) as usize;
             let _ = writeln!(output, "  {explanation_label}");
             for line in wrap_text(explanation, width.saturating_sub(2)) {
@@ -590,9 +590,9 @@ impl DenialBox {
         // Alternatives
         if !self.alternatives.is_empty() {
             let _ = writeln!(output);
-            let _ = writeln!(output, "  \x1b[{}mSafe alternatives:\x1b[0m", &success_code);
+            let _ = writeln!(output, "  \x1b[{}mSafe alternatives:\x1b[0m", success_code);
             for alt in &self.alternatives {
-                let _ = writeln!(output, "    \x1b[{}m\u{2022}\x1b[0m {alt}", &success_code);
+                let _ = writeln!(output, "    \x1b[{}m\u{2022}\x1b[0m {alt}", success_code);
             }
         }
 

@@ -202,7 +202,7 @@ not valid json
     let results = parse_jsonl_output(&stdout);
 
     // Should have at least the first result before failing
-    assert!(!results.is_empty());
+    assert_ne!(results, [] as [serde_json::Value; 0]);
     assert_eq!(results[0]["decision"], "allow");
 
     // The second result should be an error (parse failure)

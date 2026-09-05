@@ -588,7 +588,7 @@ mod performance_tests {
             let duration = start.elapsed();
 
             assert_eq!(exit_code, 0);
-            assert!(stdout.trim().is_empty());
+            assert_eq!(stdout.trim(), "");
 
             total_time += duration;
         }

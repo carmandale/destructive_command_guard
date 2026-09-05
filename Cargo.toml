@@ -192,4 +192,7 @@ derivable_impls = "allow"
 single_match = "allow"
 len_zero = "allow"
 len_without_is_empty = "allow"
+# assert_is_empty: new pedantic lint (nightly 2026); fires on 103 existing
+# assert!(x.is_empty()) test assertions. Same family as len_zero above.
+assert_is_empty = "allow"
 doc_link_with_quotes = "allow"

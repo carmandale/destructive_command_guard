@@ -542,10 +542,8 @@ impl ContextClassifier {
                         b'"' => stack.push(TokenizerState::DoubleQuote),
                         b'\'' => stack.push(TokenizerState::SingleQuote),
                         b'`' => stack.push(TokenizerState::Backtick),
-                        b'#' => {
-                            if i == 0 || bytes[i - 1].is_ascii_whitespace() {
-                                stack.push(TokenizerState::Comment);
-                            }
+                        b'#' if (i == 0 || bytes[i - 1].is_ascii_whitespace()) => {
+                            stack.push(TokenizerState::Comment);
                         }
                         _ => {}
                     }
@@ -1932,8 +1930,8 @@ fn consume_dollar_paren_recursive(command: &str, start: usize, recursion_depth: 
     let bytes = command.as_bytes();
     let len = bytes.len();
 
-    debug_assert!(bytes.get(start) == Some(&b'$'));
-    debug_assert!(bytes.get(start + 1) == Some(&b'('));
+    debug_assert_eq!(bytes.get(start), Some(&b'$'));
+    debug_assert_eq!(bytes.get(start + 1), Some(&b'('));
 
     let mut i = start + 2;
     let mut depth: u32 = 1;
@@ -2002,7 +2000,7 @@ fn consume_backticks(command: &str, start: usize) -> usize {
     let bytes = command.as_bytes();
     let len = bytes.len();
 
-    debug_assert!(bytes.get(start) == Some(&b'`'));
+    debug_assert_eq!(bytes.get(start), Some(&b'`'));
 
     let mut i = start + 1;
     while i < len {

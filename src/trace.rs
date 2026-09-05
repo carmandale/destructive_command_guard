@@ -460,7 +460,7 @@ impl ExplainTrace {
         out.push_str(&format!(
             "{bold}─── Command ───────────────────────────────────────────────────────{reset}\n"
         ));
-        out.push_str(&format!("{cyan}Input:{reset}      {}\n", &self.command));
+        out.push_str(&format!("{cyan}Input:{reset}      {}\n", self.command));
 
         if let Some(ref normalized) = self.normalized_command {
             if normalized != &self.command {

@@ -9670,11 +9670,7 @@ fn run_smoke_test() -> bool {
         &allowlists,
         &heredoc_settings,
     );
-    if deny_result.is_allowed() {
-        return false;
-    }
-
-    true
+    !deny_result.is_allowed()
 }
 
 // ============================================================================

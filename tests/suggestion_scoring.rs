@@ -137,10 +137,10 @@ fn suggestion_reason_as_str() {
 #[test]
 fn suggestion_reason_description() {
     // All reasons should have non-empty descriptions
-    assert!(!SuggestionReason::HighFrequency.description().is_empty());
-    assert!(!SuggestionReason::PathClustered.description().is_empty());
-    assert!(!SuggestionReason::ManuallyBypassed.description().is_empty());
-    assert!(!SuggestionReason::SafePatternMatch.description().is_empty());
+    assert_ne!(SuggestionReason::HighFrequency.description(), "");
+    assert_ne!(SuggestionReason::PathClustered.description(), "");
+    assert_ne!(SuggestionReason::ManuallyBypassed.description(), "");
+    assert_ne!(SuggestionReason::SafePatternMatch.description(), "");
 
     // Descriptions should be human-readable (contain spaces)
     assert!(SuggestionReason::HighFrequency.description().contains(' '));
@@ -439,7 +439,7 @@ fn primary_reason_bypass_beats_path_clustering() {
 #[test]
 fn analyze_path_patterns_empty_input() {
     let (patterns, suggest_path_specific) = analyze_path_patterns(&[]);
-    assert!(patterns.is_empty());
+    assert_eq!(patterns, [] as [destructive_command_guard::PathPattern; 0]);
     assert!(!suggest_path_specific);
 }
 
@@ -447,7 +447,7 @@ fn analyze_path_patterns_empty_input() {
 fn analyze_path_patterns_single_dir() {
     let dirs = vec!["/data/projects/test".to_string()];
     let (patterns, _) = analyze_path_patterns(&dirs);
-    assert!(!patterns.is_empty());
+    assert_ne!(patterns, [] as [destructive_command_guard::PathPattern; 0]);
 }
 
 #[test]
@@ -459,7 +459,7 @@ fn analyze_path_patterns_clustered_dirs() {
         "/data/projects/myapp".to_string(),
     ];
     let (patterns, suggest_path_specific) = analyze_path_patterns(&dirs);
-    assert!(!patterns.is_empty());
+    assert_ne!(patterns, [] as [destructive_command_guard::PathPattern; 0]);
     // All in same dir should suggest path-specific
     assert!(suggest_path_specific);
 }
@@ -582,7 +582,10 @@ fn allowlist_suggestion_with_path_analysis() {
 
     let suggestion = AllowlistSuggestion::from_cluster(cluster).with_path_analysis(&working_dirs);
 
-    assert!(!suggestion.path_patterns.is_empty());
+    assert_ne!(
+        suggestion.path_patterns,
+        [] as [destructive_command_guard::PathPattern; 0]
+    );
     assert!(suggestion.suggest_path_specific);
     assert!(
         suggestion

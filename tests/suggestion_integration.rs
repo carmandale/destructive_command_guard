@@ -120,7 +120,10 @@ fn generate_enhanced_suggestions_clustered_paths() {
     let suggestion = &suggestions[0];
     // Should suggest path-specific allowlisting
     assert!(suggestion.suggest_path_specific);
-    assert!(!suggestion.path_patterns.is_empty());
+    assert_ne!(
+        suggestion.path_patterns,
+        [] as [destructive_command_guard::PathPattern; 0]
+    );
 }
 
 #[test]
