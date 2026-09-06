@@ -23,7 +23,7 @@ use tempfile::TempDir;
 
 fn sv_to_string(v: &SqliteValue) -> String {
     match v {
-        SqliteValue::Text(s) => s.clone(),
+        SqliteValue::Text(s) => s.as_str().to_owned(),
         SqliteValue::Integer(i) => i.to_string(),
         SqliteValue::Float(f) => f.to_string(),
         SqliteValue::Null => String::new(),
@@ -35,14 +35,14 @@ fn sv_to_i64(v: &SqliteValue) -> i64 {
     match v {
         SqliteValue::Integer(i) => *i,
         SqliteValue::Float(f) => *f as i64,
-        SqliteValue::Text(s) => s.parse().unwrap_or(0),
+        SqliteValue::Text(s) => s.as_str().parse().unwrap_or(0),
         _ => 0,
     }
 }
 
 fn sv_to_opt_string(v: &SqliteValue) -> Option<String> {
     match v {
-        SqliteValue::Text(s) => Some(s.clone()),
+        SqliteValue::Text(s) => Some(s.as_str().to_owned()),
         SqliteValue::Null => None,
         SqliteValue::Integer(i) => Some(i.to_string()),
         _ => None,

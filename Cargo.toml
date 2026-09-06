@@ -70,9 +70,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sha2 = "0.10"
 hmac = "0.12"  # HMAC for optional short-code hardening (ksk.1.10)
 fs2 = "0.4"
-fsqlite = { version = "0.1.1", features = ["fts5"] }  # FrankenSQLite with concurrent writing
-fsqlite-types = "0.1.1"  # SqliteValue type
-fsqlite-error = "0.1.1"  # FrankenError type
+# 0.1.19 floor is load-bearing, not cosmetic: fsqlite-vfs <=0.1.2 selects the legacy
+# `uring-fs` io_uring VFS on Linux, where a single ring panic poisons the runtime mutex and
+# every later read hits `lock().expect("io_uring runtime lock poisoned")`. With
+# RUST_BACKTRACE=1 that emitted 69,473 backtraces and a 724 MB job log, killing the CI runner
+# (.agent-config-yqaff). 0.1.19 drops `uring-fs` for the asupersync runtime, converts the
+# poisoned lock into an io::Error, and disables the backend on first failure with a unix
+# fallback. Do not lower these below 0.1.19.
+fsqlite = { version = "0.1.19", features = ["fts5"] }  # FrankenSQLite with concurrent writing
+fsqlite-types = "0.1.19"  # SqliteValue type
+fsqlite-error = "0.1.19"  # FrankenError type
 ctrlc = "3.5.1"
 flate2 = "1.0"  # Gzip compression for history export
 

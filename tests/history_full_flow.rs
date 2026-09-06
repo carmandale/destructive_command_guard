@@ -10,7 +10,7 @@ use fsqlite_types::value::SqliteValue;
 
 fn sv_to_string(v: &SqliteValue) -> String {
     match v {
-        SqliteValue::Text(s) => s.clone(),
+        SqliteValue::Text(s) => s.as_str().to_owned(),
         SqliteValue::Integer(i) => i.to_string(),
         SqliteValue::Float(f) => f.to_string(),
         SqliteValue::Null => String::new(),
