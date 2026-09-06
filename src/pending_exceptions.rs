@@ -60,12 +60,23 @@ const MAX_RETAINED_RECORDS: usize = 1000;
 /// with `XDG_CONFIG_HOME` pointed at a temp dir wrote 3422 bytes into the live
 /// `~/.config/dcg/pending_exceptions.jsonl` and left the temp dir empty. That
 /// is how ~150k measurement invocations grew the guard's own state file.
+///
+/// It resolves through [`resolve_config_path_value`] for the same reason
+/// [`crate::config::user_config_dir`] does, and not through a second hand-rolled
+/// `PathBuf::from`: the two have to name the same directory or dcg writes its
+/// state where it does not look for it. They did not. `PathBuf::from("~/cfg")`
+/// is a *relative* path whose first component is a literal `~`, so with
+/// `XDG_CONFIG_HOME='~/cfg'` — what a shell hands over whenever the value was
+/// quoted — the allowlist resolved to `$HOME/cfg/dcg` while this store created a
+/// directory named `~` under whatever the process cwd happened to be, and the
+/// short code dcg printed for a denial was unfindable by `dcg allow-once`
+/// (`.agent-config-piua5`). The empty-value check stays in
+/// `resolve_config_path_value`, which returns `None` for it.
 fn config_dir_override() -> Option<PathBuf> {
     let value = env::var(ENV_XDG_CONFIG_HOME).ok()?;
-    if value.trim().is_empty() {
-        return None;
-    }
-    Some(PathBuf::from(value).join("dcg"))
+    // `None` cwd, matching `user_config_dir`: a relative XDG_CONFIG_HOME stays
+    // relative in both, rather than one anchoring to the payload's cwd.
+    Some(resolve_config_path_value(&value, None)?.join("dcg"))
 }
 
 /// Scope kind for allow-once entries.
