@@ -244,10 +244,8 @@ fn expand_tilde_path(value: &str) -> (PathBuf, bool) {
 /// and read from another and the entry simply never took effect
 /// (`.agent-config-0kt9v`). One function is what keeps the two ends together.
 pub(crate) fn user_config_dir() -> PathBuf {
-    if let Ok(xdg_home) = env::var("XDG_CONFIG_HOME") {
-        if let Some(xdg_home) = resolve_config_path_value(&xdg_home, None) {
-            return xdg_home.join("dcg");
-        }
+    if let Some(dir) = config_dir_override() {
+        return dir;
     }
 
     if let Some(home) = dirs::home_dir() {
@@ -278,10 +276,8 @@ fn user_config_dir_candidates() -> Vec<PathBuf> {
         }
     };
 
-    if let Ok(xdg_home) = env::var("XDG_CONFIG_HOME") {
-        if let Some(xdg_home) = resolve_config_path_value(&xdg_home, None) {
-            push(xdg_home.join("dcg"));
-        }
+    if let Some(dir) = config_dir_override() {
+        push(dir);
     }
     if let Some(home) = dirs::home_dir() {
         push(home.join(".config").join("dcg"));
@@ -316,6 +312,45 @@ pub(crate) fn user_config_file(file_name: &str) -> PathBuf {
         }
     }
     user_config_dir().join(file_name)
+}
+
+/// Environment variable naming an alternate config root.
+pub const ENV_XDG_CONFIG_HOME: &str = "XDG_CONFIG_HOME";
+
+/// The dcg config directory `XDG_CONFIG_HOME` names, when it is set.
+///
+/// This is the single answer to "the user set `XDG_CONFIG_HOME`, where does dcg
+/// keep its things", and every resolver that honours the variable calls it —
+/// [`user_config_dir`], [`user_config_dir_candidates`], the pending-exception and
+/// allow-once stores, and the history database. It is one function because every
+/// time it has been two, the two disagreed and dcg wrote its state somewhere it
+/// did not read it:
+///
+/// - `.agent-config-0kt9v`: the allowlist was written through this resolution and
+///   read through `dirs::home_dir()` alone, so a user's own entry never took effect.
+/// - `.agent-config-piua5`: the stores hand-rolled `PathBuf::from(value).join("dcg")`,
+///   which for `XDG_CONFIG_HOME='~/cfg'` — what a shell hands over whenever the value
+///   was quoted — is a *relative* path whose first component is a literal `~`. dcg
+///   created a directory named `~` under its cwd while the allowlist expanded correctly.
+/// - `.agent-config-x2f60`: the history database honoured no `XDG_CONFIG_HOME` at all.
+///   Measured against the pre-fix binary, one hook run with the variable set read its
+///   `config.toml` from `$XDG_CONFIG_HOME/dcg/` and wrote the pending store there, while
+///   the history database landed in `$HOME/Library/Application Support/dcg/`. A harness
+///   that set the variable to isolate dcg — the 2026-09-02 incident where ~150k
+///   supposedly-isolated invocations grew the live pending store — still wrote the live
+///   history database.
+///
+/// An explicit `XDG_CONFIG_HOME` wins outright rather than being one candidate among
+/// several. That is deliberate and it is what makes isolation work: a candidate list
+/// that prefers whichever file already exists would send a harness straight back to the
+/// live state it was trying not to touch. [`user_config_file`] layers the
+/// read-every-candidate behaviour on top for files a *user* authors by hand, where
+/// orphaning someone's file is the worse failure.
+pub(crate) fn config_dir_override() -> Option<PathBuf> {
+    let value = env::var(ENV_XDG_CONFIG_HOME).ok()?;
+    // `None` cwd: a relative XDG_CONFIG_HOME stays relative in every caller, rather
+    // than one of them anchoring it to a payload's cwd and the rest to the process's.
+    Some(resolve_config_path_value(&value, None)?.join("dcg"))
 }
 
 /// Resolve a config path value, expanding `~` and resolving relative paths.

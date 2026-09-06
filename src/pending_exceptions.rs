@@ -16,7 +16,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use crate::config::resolve_config_path_value;
+use crate::config::{config_dir_override, resolve_config_path_value};
 use crate::logging::{RedactionConfig, redact_command};
 
 /// Environment override for pending exceptions file path.
@@ -27,8 +27,9 @@ pub const ENV_ALLOW_ONCE_PATH: &str = "DCG_ALLOW_ONCE_PATH";
 /// When set, codes cannot be forged without knowing the secret.
 pub const ENV_ALLOW_ONCE_SECRET: &str = "DCG_ALLOW_ONCE_SECRET";
 
-/// Alternate config root. Honoured by [`config_dir_override`].
-pub const ENV_XDG_CONFIG_HOME: &str = "XDG_CONFIG_HOME";
+/// Alternate config root. Re-exported from [`crate::config`], which owns the
+/// resolution every store and resolver shares.
+pub use crate::config::ENV_XDG_CONFIG_HOME;
 
 const PENDING_EXCEPTIONS_FILE: &str = "pending_exceptions.jsonl";
 const ALLOW_ONCE_FILE: &str = "allow_once.jsonl";
@@ -51,33 +52,6 @@ const PRUNE_THRESHOLD_BYTES: u64 = 4 * 1024 * 1024;
 /// The newest records are the ones an operator is about to quote back as an
 /// allow-once code, so the oldest are dropped first.
 const MAX_RETAINED_RECORDS: usize = 1000;
-
-/// Config directory selected by `XDG_CONFIG_HOME`, when it is set.
-///
-/// Resolution used to go straight to `dirs::home_dir()`, which ignores this
-/// variable on macOS. A harness that set it believed it had isolated the store
-/// while every write still landed in the live one: measured 2026-09-02, a run
-/// with `XDG_CONFIG_HOME` pointed at a temp dir wrote 3422 bytes into the live
-/// `~/.config/dcg/pending_exceptions.jsonl` and left the temp dir empty. That
-/// is how ~150k measurement invocations grew the guard's own state file.
-///
-/// It resolves through [`resolve_config_path_value`] for the same reason
-/// [`crate::config::user_config_dir`] does, and not through a second hand-rolled
-/// `PathBuf::from`: the two have to name the same directory or dcg writes its
-/// state where it does not look for it. They did not. `PathBuf::from("~/cfg")`
-/// is a *relative* path whose first component is a literal `~`, so with
-/// `XDG_CONFIG_HOME='~/cfg'` — what a shell hands over whenever the value was
-/// quoted — the allowlist resolved to `$HOME/cfg/dcg` while this store created a
-/// directory named `~` under whatever the process cwd happened to be, and the
-/// short code dcg printed for a denial was unfindable by `dcg allow-once`
-/// (`.agent-config-piua5`). The empty-value check stays in
-/// `resolve_config_path_value`, which returns `None` for it.
-fn config_dir_override() -> Option<PathBuf> {
-    let value = env::var(ENV_XDG_CONFIG_HOME).ok()?;
-    // `None` cwd, matching `user_config_dir`: a relative XDG_CONFIG_HOME stays
-    // relative in both, rather than one anchoring to the payload's cwd.
-    Some(resolve_config_path_value(&value, None)?.join("dcg"))
-}
 
 /// Scope kind for allow-once entries.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

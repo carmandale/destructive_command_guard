@@ -761,11 +761,52 @@ impl HistoryDb {
         Ok(db)
     }
 
-    /// Get the default database path.
+    /// Get the default database path, with nothing configured.
     #[must_use]
     pub fn default_path() -> PathBuf {
-        if let Ok(path) = env::var(super::ENV_HISTORY_DB_PATH) {
-            return PathBuf::from(path);
+        Self::resolve_path(None)
+    }
+
+    /// The one answer to "where is the history database".
+    ///
+    /// `configured` is `config.history.database_path`, already tilde-expanded by
+    /// `HistoryConfig::expanded_database_path`. Every caller — the hook that writes
+    /// and all four `dcg history`/`dcg stats`/`dcg suggest` readers — goes through
+    /// here, because when they resolved it themselves they disagreed three ways
+    /// (`.agent-config-x2f60`, each measured against the pre-fix binary):
+    ///
+    /// - `DCG_HISTORY_DB='~/hist/history.db'` was `PathBuf::from`'d, so dcg created a
+    ///   directory named `~` under its cwd: `<cwd>/~/hist/history.db`. Its sibling
+    ///   overrides `DCG_PENDING_EXCEPTIONS_PATH` and `DCG_ALLOW_ONCE_PATH` already
+    ///   expanded the tilde; this was the odd one out.
+    /// - `XDG_CONFIG_HOME` was honoured by `config.toml` and by the pending store but
+    ///   not here, so one hook run split dcg's own state across two roots: config and
+    ///   pending store under `$XDG_CONFIG_HOME/dcg/`, history database under
+    ///   `$HOME/Library/Application Support/dcg/`.
+    /// - Worst, precedence disagreed between the two ends. `main.rs` preferred
+    ///   `DCG_HISTORY_DB` over `config.history.database_path`; the readers passed the
+    ///   configured path to `open()` and so preferred the config. With both set, the
+    ///   hook wrote 1 row to the env path and `dcg history stats` reported
+    ///   `Total commands: 0` off the config path — the `.agent-config-0kt9v` shape,
+    ///   writing one file and reading another, in a subcommand whose whole job is to
+    ///   show you what dcg recorded.
+    ///
+    /// Order is the writer's old order, because that is the one that decided where the
+    /// bytes actually went: env, then config, then the directory defaults.
+    #[must_use]
+    pub fn resolve_path(configured: Option<PathBuf>) -> PathBuf {
+        if let Ok(value) = env::var(super::ENV_HISTORY_DB_PATH) {
+            if let Some(path) = crate::config::resolve_config_path_value(&value, None) {
+                return path;
+            }
+        }
+
+        if let Some(path) = configured {
+            return path;
+        }
+
+        if let Some(dir) = crate::config::config_dir_override() {
+            return dir.join(DEFAULT_DB_FILENAME);
         }
 
         // Check XDG-style path first (~/.config/dcg/), then platform-native

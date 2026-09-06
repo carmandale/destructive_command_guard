@@ -28,7 +28,7 @@ use destructive_command_guard::evaluator::{
 #[allow(unused_imports)]
 use destructive_command_guard::exit_codes::{EXIT_DENIED, EXIT_PARSE_ERROR, EXIT_SUCCESS};
 use destructive_command_guard::history::{
-    CommandEntry, ENV_HISTORY_DB_PATH, HistoryWriter, Outcome as HistoryOutcome,
+    CommandEntry, HistoryDb, HistoryWriter, Outcome as HistoryOutcome,
 };
 use destructive_command_guard::hook;
 use destructive_command_guard::load_default_allowlists;
@@ -75,11 +75,16 @@ fn configure_colors() {
 
 const HISTORY_AGENT_TYPE: &str = "claude_code";
 
+/// Where the hook writes history.
+///
+/// Delegates to `HistoryDb::resolve_path` rather than resolving here, so the hook
+/// and every `dcg history` reader cannot drift apart. They had: this function
+/// preferred `DCG_HISTORY_DB` while the readers preferred
+/// `config.history.database_path`, so with both set the hook wrote to one database
+/// and `dcg history stats` reported zero commands off the other
+/// (`.agent-config-x2f60`).
 fn history_db_path(config: &destructive_command_guard::config::HistoryConfig) -> Option<PathBuf> {
-    if let Ok(path) = std::env::var(ENV_HISTORY_DB_PATH) {
-        return Some(PathBuf::from(path));
-    }
-    config.expanded_database_path()
+    Some(HistoryDb::resolve_path(config.expanded_database_path()))
 }
 
 /// Pack label for a denial dcg issued without completing an evaluation.

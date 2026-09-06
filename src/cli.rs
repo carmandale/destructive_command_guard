@@ -3377,7 +3377,7 @@ fn log_interactive_allowlist_audit_event(
         return Ok(());
     }
 
-    let db_path = config.history.expanded_database_path();
+    let db_path = Some(HistoryDb::resolve_path(config.history.expanded_database_path()));
     let db = HistoryDb::open(db_path)?;
 
     let cwd = std::env::current_dir()
@@ -6173,7 +6173,7 @@ fn handle_stats_rules(
     use chrono::{Duration, Utc};
 
     // Open history database
-    let db_path = config.history.expanded_database_path();
+    let db_path = Some(HistoryDb::resolve_path(config.history.expanded_database_path()));
     let db = match HistoryDb::open(db_path) {
         Ok(db) => db,
         Err(err) => {
@@ -6637,7 +6637,7 @@ fn handle_suggest_allowlist_command(
     };
 
     // Open history database
-    let db_path = config.history.expanded_database_path();
+    let db_path = Some(HistoryDb::resolve_path(config.history.expanded_database_path()));
     let db = match HistoryDb::open(db_path) {
         Ok(db) => db,
         Err(err) => {
@@ -7107,7 +7107,7 @@ fn handle_history_command(
     config: &Config,
     action: HistoryAction,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let db_path = config.history.expanded_database_path();
+    let db_path = Some(HistoryDb::resolve_path(config.history.expanded_database_path()));
     let db = match HistoryDb::open(db_path) {
         Ok(db) => db,
         Err(err) => {
