@@ -437,7 +437,7 @@ test_malformed_input() {
 # This verifies that the pack-aware quick reject allows non-core packs to be evaluated
 test_command_with_packs() {
     local cmd="$1"
-    local expected="$2"  # "block" or "allow"
+    local expected="$2"  # "block" | "warn" | "log" | "allow"
     local packs="$3"     # comma-separated pack list
     local desc="$4"
 
@@ -454,16 +454,57 @@ test_command_with_packs() {
     local encoded
     encoded=$(echo -n "$json" | base64 -w 0)
 
-    # Run the binary with DCG_PACKS environment variable
-    local result
+    # Run the binary with DCG_PACKS environment variable.
+    # stderr is captured, not discarded: Medium-severity rules emit their whole
+    # decision there ("dcg WARNING"), so throwing it away makes warn and allow
+    # indistinguishable.
+    local result stderr_out _e_file
+    _e_file=$(mktemp)
     result=$(echo "$encoded" | base64 -d | \
         HOME="$TEST_ENV_HOME" \
         XDG_CONFIG_HOME="$TEST_ENV_XDG" \
         DCG_ALLOWLIST_SYSTEM_PATH="" \
         DCG_PACKS="$packs" \
-        "$BINARY" 2>/dev/null || true)
+        "$BINARY" 2>"$_e_file" || true)
+    stderr_out=$(cat "$_e_file")
+    rm -f "$_e_file"
 
-    # Check result
+    # Check result.
+    #
+    # Severity decides the channel, per Severity::default_mode() in src/packs/mod.rs:
+    #   Critical | High -> Deny  : permissionDecision JSON on stdout
+    #   Medium          -> Warn  : nothing on stdout, "dcg WARNING" on stderr
+    #   Low             -> Log   : nothing on either stream
+    # Asserting "block" against a Medium or Low rule can never pass; use warn/log.
+    if [[ "$expected" == "warn" ]]; then
+        if [[ -z "$result" ]] && echo "$stderr_out" | grep -q "dcg WARNING"; then
+            log_pass "WARNED (pack=$packs): $desc"
+        else
+            log_fail "Should WARN with pack=$packs: $desc" \
+                "stdout empty; stderr contains dcg WARNING" \
+                "stdout=${result:-<empty>} | stderr=${stderr_out:-<empty>}"
+        fi
+        return 0
+    fi
+
+    if [[ "$expected" == "log" ]]; then
+        # Low severity is silent on both streams, so silence alone would also pass
+        # if the rule stopped matching altogether. Ask `explain` whether the rule
+        # still fires, so this cannot go green over a dead pattern.
+        local explain_out
+        explain_out=$(HOME="$TEST_ENV_HOME" XDG_CONFIG_HOME="$TEST_ENV_XDG" \
+            DCG_ALLOWLIST_SYSTEM_PATH="" DCG_PACKS="$packs" \
+            "$BINARY" explain "$cmd" 2>/dev/null || true)
+        if [[ -z "$result" ]] && [[ -z "$stderr_out" ]] && echo "$explain_out" | grep -q "Rule ID:"; then
+            log_pass "LOGGED (pack=$packs): $desc"
+        else
+            log_fail "Should LOG with pack=$packs: $desc" \
+                "stdout and stderr empty, and explain reports a Rule ID" \
+                "stdout=${result:-<empty>} | stderr=${stderr_out:-<empty>} | explain_rules=$(echo "$explain_out" | grep -c 'Rule ID:')"
+        fi
+        return 0
+    fi
+
     if [[ "$expected" == "block" ]]; then
         if echo "$result" | grep -q '"permissionDecision"'; then
             if echo "$result" | grep -q '"deny"'; then
@@ -1102,7 +1143,7 @@ test_command_with_packs "scp file.txt user@host:/tmp/backup/" "allow" "remote.sc
 test_command_with_packs "aws cloudfront list-distributions" "allow" "cdn.cloudfront" "aws cloudfront list-distributions (cloudfront pack enabled, safe command)"
 test_command_with_packs "aws cloudfront get-distribution --id ABC" "allow" "cdn.cloudfront" "aws cloudfront get-distribution (cloudfront pack enabled, safe command)"
 test_command_with_packs "aws cloudfront delete-distribution --id ABC --if-match ETAG" "block" "cdn.cloudfront" "aws cloudfront delete-distribution (cloudfront pack enabled)"
-test_command_with_packs "aws cloudfront create-invalidation --distribution-id ABC --paths '/*'" "block" "cdn.cloudfront" "aws cloudfront create-invalidation (cloudfront pack enabled)"
+test_command_with_packs "aws cloudfront create-invalidation --distribution-id ABC --paths '/*'" "warn" "cdn.cloudfront" "aws cloudfront create-invalidation (cloudfront pack enabled)"
 
 # AWS SES pack tests
 test_command_with_packs "aws ses list-identities" "allow" "email.ses" "aws ses list-identities (ses pack enabled, safe command)"
@@ -1150,9 +1191,9 @@ test_command_with_packs "terraform plan" "allow" "infrastructure.terraform" "ter
 # GitHub Actions pack tests
 test_command_with_packs "gh secret delete FOO" "block" "cicd.github_actions" "gh secret delete (github actions pack enabled)"
 test_command_with_packs "gh -R owner/repo secret remove FOO" "block" "cicd.github_actions" "gh -R ... secret remove (github actions pack enabled)"
-test_command_with_packs "gh variable delete FOO" "block" "cicd.github_actions" "gh variable delete (github actions pack enabled)"
-test_command_with_packs "gh workflow disable 123" "block" "cicd.github_actions" "gh workflow disable (github actions pack enabled)"
-test_command_with_packs "gh run cancel 123" "block" "cicd.github_actions" "gh run cancel (github actions pack enabled)"
+test_command_with_packs "gh variable delete FOO" "warn" "cicd.github_actions" "gh variable delete (github actions pack enabled)"
+test_command_with_packs "gh workflow disable 123" "log" "cicd.github_actions" "gh workflow disable (github actions pack enabled)"
+test_command_with_packs "gh run cancel 123" "log" "cicd.github_actions" "gh run cancel (github actions pack enabled)"
 test_command_with_packs "gh api -X DELETE repos/o/r/actions/secrets/FOO" "block" "cicd.github_actions" "gh api -X DELETE .../actions/secrets (github actions pack enabled)"
 test_command_with_packs "gh secret list" "allow" "cicd.github_actions" "gh secret list (github actions pack enabled, safe command)"
 
@@ -1185,7 +1226,7 @@ test_command_with_packs "curl -X GET https://api.cloudflare.com/client/v4/zones"
 test_command_with_packs "aws route53 delete-hosted-zone --id Z123" "block" "dns.route53" "aws route53 delete-hosted-zone (route53 dns pack enabled)"
 test_command_with_packs "aws route53 change-resource-record-sets --hosted-zone-id Z123 --change-batch '{\"Changes\":[{\"Action\":\"DELETE\"}]}'" "block" "dns.route53" "aws route53 change-resource-record-sets DELETE (route53 dns pack enabled)"
 test_command_with_packs "aws route53 delete-health-check --health-check-id abc" "block" "dns.route53" "aws route53 delete-health-check (route53 dns pack enabled)"
-test_command_with_packs "aws route53 delete-query-logging-config --id abc" "block" "dns.route53" "aws route53 delete-query-logging-config (route53 dns pack enabled)"
+test_command_with_packs "aws route53 delete-query-logging-config --id abc" "warn" "dns.route53" "aws route53 delete-query-logging-config (route53 dns pack enabled)"
 test_command_with_packs "aws route53 delete-traffic-policy --id abc --version 1" "block" "dns.route53" "aws route53 delete-traffic-policy (route53 dns pack enabled)"
 test_command_with_packs "aws route53 delete-reusable-delegation-set --id N123" "block" "dns.route53" "aws route53 delete-reusable-delegation-set (route53 dns pack enabled)"
 test_command_with_packs "aws route53 list-hosted-zones" "allow" "dns.route53" "aws route53 list-hosted-zones (route53 dns pack enabled, safe command)"
@@ -1195,8 +1236,8 @@ test_command_with_packs "aws route53 test-dns-answer --hosted-zone-id Z123 --rec
 
 # Generic DNS tools pack tests
 test_command_with_packs "echo 'delete example.com' | nsupdate" "block" "dns.generic" "nsupdate delete via pipe (generic dns pack enabled)"
-test_command_with_packs "nsupdate -l" "block" "dns.generic" "nsupdate -l local update (generic dns pack enabled)"
-test_command_with_packs "dig axfr example.com" "block" "dns.generic" "dig axfr zone transfer (generic dns pack enabled)"
+test_command_with_packs "nsupdate -l" "warn" "dns.generic" "nsupdate -l local update (generic dns pack enabled)"
+test_command_with_packs "dig axfr example.com" "warn" "dns.generic" "dig axfr zone transfer (generic dns pack enabled)"
 test_command_with_packs "dig example.com" "allow" "dns.generic" "dig query (generic dns pack enabled, safe command)"
 test_command_with_packs "dig +short example.com" "allow" "dns.generic" "dig +short (generic dns pack enabled, safe command)"
 test_command_with_packs "host example.com" "allow" "dns.generic" "host lookup (generic dns pack enabled, safe command)"
