@@ -318,6 +318,91 @@ fn a_compound_piped_into_a_shell_is_denied_by_the_evaluator() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// A REDIRECT BETWEEN THE COMMAND WORD AND THE OPERATOR (`.agent-config-n8u79`).
+//
+// The rails above cover a redirect written BEFORE the command word
+// (`>out cat <<'EOF'`). This is the other side of the same walk, and it is the
+// single most common way an agent writes a file: `cat > path <<'EOF'`.
+//
+// NOT REPRODUCED on any build that ships today, and pinned anyway, because
+// nothing was watching it while it flipped twice. Replayed 2026-09-06 with
+// specs/333-dcg-heredoc-body-false-positives/artifacts/n8u79-receiver-redirect.py,
+// one PreToolUse envelope per row and a fresh DCG_PENDING_EXCEPTIONS_PATH per
+// invocation, against the archived binaries:
+//
+//   dcg-v0.4.2-34cbef71  `cat > f.rs`, `cat >> f.rs`, `cat 2> f.rs`,
+//                        `tee > f.rs`  ->  DENY   (the bead's own measurement)
+//   dcg-v0.4.2-d79302ce  all four      ->  ALLOW
+//   live cd5132eb        all four      ->  ALLOW
+//
+// So these rows separate a real build from a broken one: they were red on a
+// binary this fleet actually ran, and the two controls below denied on every
+// one of those builds, which is what makes the ALLOWs a measurement rather than
+// a guard that stopped firing.
+//
+// Asserted in BOTH postures. `HeredocSettings::default().enabled` is false and
+// configs/dcg/config.toml has no `[heredoc]` section, so the live machine-wide
+// guard runs tier-2 content analysis OFF -- which is the posture the 34cbef71
+// denials were measured in. `evaluate()` above pins ON only; a row asserted
+// only there would not have been red on the build that shipped the defect.
+// ---------------------------------------------------------------------------
+
+fn evaluate_with_analysis(cmd: &str, heredoc_analysis: bool) -> bool {
+    let mut config = Config::default();
+    config.heredoc.enabled = Some(heredoc_analysis);
+    config.packs.enabled = vec!["core".to_string()];
+    let overrides = config.overrides.compile();
+    let allowlists = LayeredAllowlist::default();
+    let enabled_packs = config.enabled_pack_ids();
+    let keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
+    evaluate_command(cmd, &config, &keywords, &overrides, &allowlists).is_denied()
+}
+
+#[test]
+fn a_redirect_before_the_operator_does_not_hide_the_receiver() {
+    // `.rs` on purpose: it is NOT in SHELL_SCRIPT_SINK_EXTENSIONS, so a denial
+    // here cannot be the `.agent-config-5xz9p` shell-script-sink veto wearing
+    // this bug's clothes. The `.sh` twin is the control below.
+    for prefix in [
+        "cat > /tmp/n8u79.rs",
+        "cat >/tmp/n8u79.rs",
+        "cat >> /tmp/n8u79.rs",
+        "cat 2> /tmp/n8u79.rs",
+        "tee > /tmp/n8u79.rs",
+    ] {
+        let cmd = format!("{prefix} <<'EOF'\n{}\nEOF\n", trigger());
+        for analysis in [true, false] {
+            assert!(
+                !evaluate_with_analysis(&cmd, analysis),
+                "the redirect target is not the receiver; `{prefix}` owns this \
+                 heredoc with a data sink (heredoc analysis {analysis}): {cmd:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_redirect_before_the_operator_still_does_not_hide_a_real_executor() {
+    // The control. Resolving the receiver through a redirect means MORE masking,
+    // so it is exactly the change that could mask an interpreter. Both rows were
+    // DENY on every archived build in the replay above, including the two where
+    // the test above was red -- without them, "ALLOW" would be indistinguishable
+    // from a gate that had simply stopped firing.
+    for cmd in [
+        format!("bash > /tmp/n8u79.log <<'EOF'\n{}\nEOF\n", trigger()),
+        format!("cat > /tmp/n8u79.sh <<'EOF'\n{}\nEOF\n", trigger()),
+    ] {
+        for analysis in [true, false] {
+            assert!(
+                evaluate_with_analysis(&cmd, analysis),
+                "a redirect must not turn an executor or a shell-script sink \
+                 into data (heredoc analysis {analysis}): {cmd:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn a_compound_that_does_not_pipe_is_still_allowed_by_the_evaluator() {
     // The control. Denying everything would satisfy the test above.

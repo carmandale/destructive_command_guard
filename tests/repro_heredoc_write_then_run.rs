@@ -25,13 +25,24 @@
 //! measures a different string than the binary does -- which is how such a test
 //! passed while the binary denied all four of its shapes (commit 141ed9a).
 //!
-//! The data cases write `>path` with no space on purpose. `cat > path` with one
-//! IS ALREADY UNMASKED, and not by anything here: `extract_heredoc_target_command`
-//! tokenizes the bare `>` as a word and returns it as the receiver, which is not a
-//! known data sink, so the body was never masked to begin with. A spaced-redirect
-//! control would therefore measure that unrelated quirk instead of this predicate,
-//! and would pass no matter what this predicate did. Left alone deliberately --
-//! repairing it would WIDEN masking, which is the opposite of this bead.
+//! The data cases write `>path` with no space, which was once load-bearing and is
+//! not any more. REVISED 2026-09-06 (`.agent-config-n8u79`): the paragraph here
+//! used to say `cat > path` with a space was permanently unmasked, because
+//! `extract_heredoc_target_command` returned the bare `>` as the receiver, and
+//! that a spaced control would therefore pass whatever this predicate did. That
+//! is false against every build that ships today. Measured across the archived
+//! binaries with one PreToolUse envelope per row
+//! (`specs/333-dcg-heredoc-body-false-positives/artifacts/n8u79-receiver-redirect.py`):
+//! `cat > f.rs <<'EOF'` carrying a destructive body was DENY on
+//! `dcg-v0.4.2-34cbef71` and ALLOW on `d79302ce`, `fc25273d`, `be9a7553` and the
+//! live `cd5132eb`. The walk resolves the receiver to `cat` through a redirect
+//! now, so both spellings are masked and both are honest controls here.
+//!
+//! The spelling stays `>path` regardless -- rewriting these rows would change
+//! what this file measures without adding a row. The property that paragraph
+//! feared losing is pinned where it belongs, in
+//! `repro_heredoc_receiver_reserved_word.rs`, under
+//! `a_redirect_before_the_operator_does_not_hide_the_receiver`.
 
 use destructive_command_guard::{Config, LayeredAllowlist, evaluate_command, packs::REGISTRY};
 
@@ -59,9 +70,10 @@ fn evaluate(
 /// this fleet's `configs/dcg/config.toml` has no `[heredoc]` section, so the
 /// live machine-wide guard runs tier-2 content analysis OFF -- masking is the
 /// only thing between a heredoc body and a pack there. Asserting only with it ON
-/// hides that: several shapes below deny under tier-2 for an unrelated reason
-/// (the receiver of `cat > path` tokenizes as the bare `>`, so those were never
-/// masked) and would pass whatever this predicate did.
+/// hides that: several shapes below deny under tier-2 for reasons of their own
+/// and would pass whatever this predicate did. (The reason once given here --
+/// that the receiver of `cat > path` tokenizes as the bare `>` -- is no longer
+/// true of any shipping build; see the REVISED note in the module header.)
 fn both(cmd: &str) -> [(bool, destructive_command_guard::evaluator::EvaluationResult); 2] {
     [(true, evaluate(cmd, true)), (false, evaluate(cmd, false))]
 }
