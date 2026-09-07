@@ -24,9 +24,9 @@ pub fn create_pack() -> Pack {
 
 fn create_safe_patterns() -> Vec<SafePattern> {
     vec![
-        safe_pattern!("rsync-dry-run", r"rsync\b.*\s--dry-run\b"),
-        safe_pattern!("rsync-short-dry-run", r"rsync\b.*\s+-[A-Za-z]*n[A-Za-z]*\b"),
-        safe_pattern!("rsync-list-only", r"rsync\b.*\s--list-only\b"),
+        safe_pattern!("rsync-dry-run", r"rsync\b[^;&|\n]*\s--dry-run\b"),
+        safe_pattern!("rsync-short-dry-run", r"rsync\b[^;&|\n]*\s+-[A-Za-z]*n[A-Za-z]*\b"),
+        safe_pattern!("rsync-list-only", r"rsync\b[^;&|\n]*\s--list-only\b"),
     ]
 }
 
@@ -34,7 +34,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
     vec![
         destructive_pattern!(
             "rsync-delete",
-            r"rsync\b.*\s--delete(?:-[a-z-]+)?\b",
+            r"rsync\b[^;&|\n]*\s--delete(?:-[a-z-]+)?\b",
             "rsync --delete removes destination files not present in source.",
             High,
             "The --delete flag removes files from the destination that don't exist in the \
@@ -47,7 +47,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
         destructive_pattern!(
             "rsync-del-short",
-            r"rsync\b.*\s--del\b",
+            r"rsync\b[^;&|\n]*\s--del\b",
             "rsync --del is a short alias for --delete and is destructive.",
             High,
             "The --del flag is shorthand for --delete-during, which deletes destination files \

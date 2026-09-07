@@ -505,6 +505,27 @@ impl Pack {
         self.safe_patterns.iter().any(|p| p.regex.is_match(cmd))
     }
 
+    /// Spans of every safe pattern that matches `cmd`.
+    ///
+    /// [`Self::matches_safe`] answers "is some safe pattern present anywhere in
+    /// this command", which is not the same question as "is THIS destructive
+    /// match safe". In a compound command they come apart: a harmless
+    /// `rsync --dry-run` after `&&` made the whole line match a safe pattern,
+    /// and the real `rsync --delete` in front of it was never checked
+    /// (`.agent-config-it2wk`). Callers use these spans to exempt only the
+    /// command the safe pattern actually covers.
+    ///
+    /// Returns every match rather than the first: two safe patterns can cover
+    /// two different commands in one line, and dropping either would deny a
+    /// command the pack considers safe.
+    #[must_use]
+    pub fn safe_spans(&self, cmd: &str) -> Vec<(usize, usize)> {
+        self.safe_patterns
+            .iter()
+            .filter_map(|p| p.regex.find(cmd))
+            .collect()
+    }
+
     /// Check if a command matches any destructive pattern.
     /// Returns the matched pattern's reason, name, severity, and explanation if found.
     #[must_use]

@@ -26,17 +26,17 @@ pub fn create_pack() -> Pack {
 fn create_safe_patterns() -> Vec<SafePattern> {
     vec![
         // Version/help
-        safe_pattern!("scp-help", r"scp\b.*\s--?h(elp)?\b"),
+        safe_pattern!("scp-help", r"scp\b[^;&|\n]*\s--?h(elp)?\b"),
         // Downloading from remote (remote:path first, local second)
-        safe_pattern!("scp-download", r"scp\b.*\s(?:\S+@)?\S+:\S+\s+\.\S*\s*$"),
+        safe_pattern!("scp-download", r"scp\b[^;&|\n]*\s(?:\S+@)?\S+:\S+\s+\.\S*\s*$"),
         // Copy to home directory
-        safe_pattern!("scp-to-home", r"scp\b.*\s(?:(?:\S+@)?\S+:)?~/\S+\s*$"),
+        safe_pattern!("scp-to-home", r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?~/\S+\s*$"),
         // Copy to /tmp
-        safe_pattern!("scp-to-tmp", r"scp\b.*\s(?:(?:\S+@)?\S+:)?/tmp/\S*\s*$"),
+        safe_pattern!("scp-to-tmp", r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/tmp/\S*\s*$"),
         // Copy to /var/tmp (safe scratch space under /var)
         safe_pattern!(
             "scp-to-var-tmp",
-            r"scp\b.*\s(?:(?:\S+@)?\S+:)?/var/tmp(?:/\S*)?\s*$"
+            r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/var/tmp(?:/\S*)?\s*$"
         ),
     ]
 }
@@ -46,7 +46,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // Recursive copy to root
         destructive_pattern!(
             "scp-recursive-root",
-            r"scp\b.*\s-[A-Za-z0-9]*r[A-Za-z0-9]*\b.*\s(?:(?:\S+@)?\S+:)?/\s*$",
+            r"scp\b[^;&|\n]*\s-[A-Za-z0-9]*r[A-Za-z0-9]*\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/\s*(?:$|[;&|])",
             "scp -r to root (/) is extremely dangerous.",
             Critical,
             "Recursive copy to the root filesystem can overwrite critical system files, \
@@ -60,7 +60,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // Copy to /etc
         destructive_pattern!(
             "scp-to-etc",
-            r"scp\b.*\s(?:(?:\S+@)?\S+:)?/etc(?:/\S*)?\s*$",
+            r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/etc(?:/\S*)?\s*(?:$|[;&|])",
             "scp to /etc/ can overwrite system configuration.",
             High,
             "The /etc directory contains critical system configuration files including passwd, \
@@ -74,7 +74,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // Copy to /var
         destructive_pattern!(
             "scp-to-var",
-            r"scp\b.*\s(?:(?:\S+@)?\S+:)?/var(?:/\S*)?\s*$",
+            r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/var(?:/\S*)?\s*(?:$|[;&|])",
             "scp to /var/ can overwrite system data.",
             High,
             "The /var directory contains variable data including logs, databases, mail spools, \
@@ -88,7 +88,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // Copy to /boot
         destructive_pattern!(
             "scp-to-boot",
-            r"scp\b.*\s(?:(?:\S+@)?\S+:)?/boot(?:/\S*)?\s*$",
+            r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/boot(?:/\S*)?\s*(?:$|[;&|])",
             "scp to /boot/ can corrupt boot configuration.",
             Critical,
             "The /boot directory contains the kernel, initramfs, and bootloader configuration. \
@@ -102,7 +102,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // Copy to /usr
         destructive_pattern!(
             "scp-to-usr",
-            r"scp\b.*\s(?:(?:\S+@)?\S+:)?/usr(?:/\S*)?\s*$",
+            r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/usr(?:/\S*)?\s*(?:$|[;&|])",
             "scp to /usr/ can overwrite system binaries.",
             High,
             "The /usr directory contains system binaries, libraries, and shared resources. \
@@ -115,7 +115,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // Copy to /bin or /sbin
         destructive_pattern!(
             "scp-to-bin",
-            r"scp\b.*\s(?:(?:\S+@)?\S+:)?/(?:bin|sbin)(?:/\S*)?\s*$",
+            r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/(?:bin|sbin)(?:/\S*)?\s*(?:$|[;&|])",
             "scp to /bin/ or /sbin/ can overwrite system binaries.",
             Critical,
             "The /bin and /sbin directories contain essential system binaries required for \
@@ -129,7 +129,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // Copy to /lib
         destructive_pattern!(
             "scp-to-lib",
-            r"scp\b.*\s(?:(?:\S+@)?\S+:)?/lib(?:64)?(?:/\S*)?\s*$",
+            r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/lib(?:64)?(?:/\S*)?\s*(?:$|[;&|])",
             "scp to /lib/ can overwrite system libraries.",
             Critical,
             "The /lib and /lib64 directories contain shared libraries required by system \

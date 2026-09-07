@@ -1587,6 +1587,10 @@ fn evaluate_packs_with_allowlists(
             return EvaluationResult::allowed_due_to_budget();
         }
 
+        // Spans of this pack's safe patterns. Empty means "nothing safe here",
+        // which is also the state when a pack is skipped wholesale below.
+        let mut safe_spans: Vec<(usize, usize)> = Vec::new();
+
         // Check safe patterns for this pack first.
         // If a safe pattern matches, skip this pack's destructive patterns only.
         // This prevents compound command bypass where one pack's safe pattern
@@ -1671,10 +1675,19 @@ fn evaluate_packs_with_allowlists(
                     );
                 }
             }
-        } else {
-            // Non-core.filesystem packs: check safe patterns before destructive
-            if pack.matches_safe(command_for_packs) {
-                continue; // Safe pattern match - skip this pack's destructive patterns
+        } else if pack.matches_safe(command_for_packs) {
+            // Non-core.filesystem packs: a safe pattern exempts the command it
+            // covers, NOT the whole compound command. `matches_safe` asks only
+            // whether a safe pattern appears somewhere in the line, so a
+            // harmless `rsync --dry-run` after `&&` used to whitelist the real
+            // `rsync --delete` in front of it (.agent-config-it2wk).
+            safe_spans = pack.safe_spans(command_for_packs);
+            if safe_spans.is_empty() {
+                // The RegexSet fast path said a safe pattern matched but no
+                // individual pattern yielded a span. Keep the old wholesale
+                // skip rather than turning an unexplained disagreement into a
+                // denial.
+                continue;
             }
         }
 
@@ -1694,6 +1707,20 @@ fn evaluate_packs_with_allowlists(
             let Some(span) = matched_span else {
                 continue;
             };
+
+            // A safe pattern covers this match only if the match STARTS inside
+            // it. Containment of the whole span is too strict: in
+            // `rsync --dry-run -a --delete src dst` the safe match ends at
+            // `--dry-run` while the destructive one runs on to `--delete`, and
+            // that command is genuinely safe. The start is the command word, so
+            // this asks "is the command this safe pattern matched the same
+            // command that is about to be blocked".
+            if safe_spans
+                .iter()
+                .any(|&(start, end)| span.start >= start && span.start < end)
+            {
+                continue;
+            }
 
             let reason = pattern.reason;
             let mapped_span = map_span_with_offset(span, normalized_offset, original_len);

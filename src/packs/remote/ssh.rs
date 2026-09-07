@@ -30,8 +30,8 @@ fn create_safe_patterns() -> Vec<SafePattern> {
         safe_pattern!("ssh-version", r"ssh\s+-V\b"),
         safe_pattern!("ssh-version-long", r"ssh\s+--version\b"),
         // Key fingerprint listing (read-only)
-        safe_pattern!("ssh-keygen-list", r"ssh-keygen\s+.*-l\b"),
-        safe_pattern!("ssh-keygen-fingerprint", r"ssh-keygen\s+.*-lf?\b"),
+        safe_pattern!("ssh-keygen-list", r"ssh-keygen\s+[^;&|\n]*-l\b"),
+        safe_pattern!("ssh-keygen-fingerprint", r"ssh-keygen\s+[^;&|\n]*-lf?\b"),
         // Key scanning (read-only)
         safe_pattern!("ssh-keyscan", r"ssh-keyscan\b"),
         // SSH agent operations (typically safe)
