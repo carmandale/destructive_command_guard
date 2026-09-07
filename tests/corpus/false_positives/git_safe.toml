@@ -146,3 +146,33 @@ expected = "allow"
 description = "git commit message containing rm -rf is safe"
 command = "git commit -m \"Fix rm -rf detection\""
 expected = "allow"
+
+# A -f/--force belonging to a LATER, unrelated command is not a force push.
+# Observed in real use 2026-09-02 (.agent-config-hmv9n): a compound command with
+# `git push origin main` early and an unrelated `mv -f` later was denied as
+# core.git:push-force-short. The rule's `.*` reached across the separator.
+
+[[case]]
+description = "git push then unrelated mv -f after && is safe"
+command = "git push origin main && printf x > $DST.new && mv -f $DST.new $DST"
+expected = "allow"
+
+[[case]]
+description = "git push then unrelated mv -f after ; is safe"
+command = "git push origin main; mv -f build.new build"
+expected = "allow"
+
+[[case]]
+description = "git push piped, then unrelated mv -f, is safe"
+command = "git push origin main | tee push.log && mv -f a b"
+expected = "allow"
+
+[[case]]
+description = "git push then unrelated --force on another command is safe"
+command = "git push origin main && brew reinstall --force node"
+expected = "allow"
+
+[[case]]
+description = "git push then unrelated rm -f is safe"
+command = "git push origin main && rm -f /tmp/scratch"
+expected = "allow"

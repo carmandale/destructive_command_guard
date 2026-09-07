@@ -70,3 +70,30 @@ description = "git push -f (short form)"
 command = "git push -f origin main"
 expected = "deny"
 rule_id = "core.git:push-force-short"
+
+# Narrowing push-force to the push's own arguments (.agent-config-hmv9n) must not
+# lose a real force push that follows a separator or trails its positional args.
+
+[[case]]
+description = "git push -f after a && separator still blocks"
+command = "cd /repo && git push -f origin main"
+expected = "deny"
+rule_id = "core.git:push-force-short"
+
+[[case]]
+description = "git push with -f trailing the positional args still blocks"
+command = "git push origin main -f"
+expected = "deny"
+rule_id = "core.git:push-force-short"
+
+[[case]]
+description = "git push with --force trailing the positional args still blocks"
+command = "git push origin main --force"
+expected = "deny"
+rule_id = "core.git:push-force-long"
+
+[[case]]
+description = "git push --force after a ; separator still blocks"
+command = "git fetch; git push --force origin main"
+expected = "deny"
+rule_id = "core.git:push-force-long"

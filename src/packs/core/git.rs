@@ -279,7 +279,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // force push can destroy remote history (CRITICAL - affects shared history)
         destructive_pattern!(
             "push-force-long",
-            r"git\s+(?:\S+\s+)*push\s+.*--force(?![-a-z])",
+            r"git\s+(?:\S+\s+)*push\s+[^;&|\n]*--force(?![-a-z])",
             "Force push can destroy remote history. Use --force-with-lease if necessary.",
             Critical,
             "git push --force overwrites remote history with your local history. This can \
@@ -312,7 +312,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
         destructive_pattern!(
             "push-force-short",
-            r"git\s+(?:\S+\s+)*push\s+.*-f\b",
+            r"git\s+(?:\S+\s+)*push\s+[^;&|\n]*-f\b",
             "Force push (-f) can destroy remote history. Use --force-with-lease if necessary.",
             Critical,
             "git push -f (short for --force) overwrites remote history with your local history. \
