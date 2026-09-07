@@ -19,23 +19,66 @@ mod tests {
         (config, enabled_keywords, compiled, allowlists)
     }
 
+    /// A backslash-escaped delimiter is a QUOTED delimiter, and is treated as one.
+    ///
+    /// This test used to assert the opposite — that `cat <<\EOF` with a
+    /// destructive body is DENIED — and it was correct when it was written,
+    /// before the spec 333 gate. It is stale for the same reason as the two in
+    /// `.agent-config-3kpp5`: the shipped contract is now "mask a heredoc body
+    /// when its delimiter is quoted and its receiver cannot execute it", and
+    /// the identically-shaped `<<'EOF'` and `<<"EOF"` spellings of this very
+    /// command have ALLOWED since that gate landed.
+    ///
+    /// Measured before this test was touched, on the untouched parent build and
+    /// on the then-live binary (artifacts/oiwua-testcontract-output.txt in
+    /// agent-config spec 333):
+    ///
+    ///   cat <<'EOF' / rm -rf / / EOF    ALLOW
+    ///   cat <<"EOF" / rm -rf / / EOF    ALLOW
+    ///   cat <<\EOF  / rm -rf / / EOF    DENY   <- this test
+    ///   cat <<EOF   / rm -rf / / EOF    DENY   (unquoted: by design)
+    ///
+    /// So the backslash row was not being PROTECTED, it was being MISSED: the
+    /// parser did not recognise the spelling, so the body was never masked and
+    /// the deny was an accident of that gap rather than a decision. Making it
+    /// agree with its own siblings is `.agent-config-oiwua`.
+    ///
+    /// The test keeps the job its name promises. The backslash spelling must
+    /// not become a way AROUND the receiver vetoes, so the rows that must still
+    /// deny are pinned here too — re-widening them turns this red instead of
+    /// widening allow in silence.
     #[test]
-    fn test_heredoc_backslash_delimiter_bypass() {
+    fn test_heredoc_backslash_delimiter_is_quoted() {
         let (config, keywords, compiled, allowlists) = get_eval_components();
 
-        // This uses backslash escaping for the delimiter, which is valid in bash
-        // and behaves like a quoted delimiter (no expansion).
-        // If the heredoc extractor regex doesn't support this, it will be missed.
-        let cmd = r"
-cat <<\EOF
-rm -rf /
-EOF
-";
-        let result = evaluate_command(cmd, &config, &keywords, &compiled, &allowlists);
+        // Quoted delimiter, receiver cannot execute the body: masked, allowed.
+        let inert = "\ncat <<\\EOF\nrm -rf /\nEOF\n";
+        let result = evaluate_command(inert, &config, &keywords, &compiled, &allowlists);
+        assert!(
+            !result.is_denied(),
+            "A backslash delimiter is quoted, so an inert receiver's body is data: {inert}"
+        );
+
+        // Same body, same delimiter, receiver that DOES execute it.
+        let piped = "cat <<\\EOF | bash\nrm -rf /\nEOF\n";
+        let result = evaluate_command(piped, &config, &keywords, &compiled, &allowlists);
         assert!(
             result.is_denied(),
-            "Should block heredoc with backslash-escaped delimiter: {cmd}"
+            "A backslash delimiter must not carry a body past an executor: {piped}"
         );
+
+        // The unquoted spelling stays denied — the outer shell expands it.
+        let unquoted = "\ncat <<EOF\nrm -rf /\nEOF\n";
+        let result = evaluate_command(unquoted, &config, &keywords, &compiled, &allowlists);
+        assert!(
+            result.is_denied(),
+            "An UNQUOTED delimiter is expanded before the sink sees it: {unquoted}"
+        );
+
+        // And the hazard issued directly is unaffected by any of this.
+        let direct = "rm -rf /";
+        let result = evaluate_command(direct, &config, &keywords, &compiled, &allowlists);
+        assert!(result.is_denied(), "control: {direct}");
     }
 
     #[test]

@@ -2452,7 +2452,9 @@ pub fn heredoc_substitution_result_is_executed(command: &str, heredoc_start: usi
             // destructure it: `main` added this call while the union branch was
             // widening the return type, and the text merge of the two compiled
             // cleanly as a conflict-free merge while being a type error.
-            if let Some((delim, off, ty, _quoted)) = parse_heredoc_delimiter(&command[i + 2..]) {
+            if let Some((delim, off, ty, _quoted, _word_end)) =
+                parse_heredoc_delimiter(&command[i + 2..])
+            {
                 let body_start = i + 2 + off;
                 if let Some(end) = find_heredoc_terminator(command, body_start, &delim, ty) {
                     i = next_char_boundary(command, end);
@@ -2971,8 +2973,6 @@ pub fn mask_non_executing_heredocs(command: &str) -> std::borrow::Cow<'_, str> {
             // Extract target command (what receives the heredoc)
             let target_cmd = extract_heredoc_target_command(command, heredoc_start);
 
-            // Parse the heredoc delimiter
-            let after_op = &command[heredoc_start + 2..];
             // GATE - spec 333 / .agent-config-u06z. Mask the body ONLY
             // when the delimiter is quoted (`<<'EOF'`, `<<"EOF"`). A quoted
             // delimiter suppresses expansion, so the body reaches the data
@@ -2984,43 +2984,69 @@ pub fn mask_non_executing_heredocs(command: &str) -> std::borrow::Cow<'_, str> {
             // every substitution spelling by construction -- dollar-paren
             // and backtick alike. Upstream v0.13.9 enumerated spellings
             // instead and missed backticks.
-            if let Some((delimiter, body_start_offset, heredoc_type, _quoted)) =
-                parse_heredoc_delimiter(after_op).filter(|parsed| parsed.3)
-            {
-                // Find the heredoc body end (terminating delimiter)
-                let body_start = heredoc_start + 2 + body_start_offset;
-                // READER 2 of `heredoc_body_is_inert`. Asked here rather than
-                // before the delimiter parse because `body_end` is not known
-                // until the terminator has been found, and
-                // `compound_output_reaches_executor` resumes from there. Every
-                // veto is a way the body still reaches an interpreter with a
-                // non-executing receiver, and none of them can see the others.
-                if let Some(body_end) = find_heredoc_terminator(
-                    command,
-                    body_start,
-                    &delimiter,
-                    heredoc_type,
-                )
-                .filter(|end| {
-                    heredoc_body_is_inert(command, target_cmd.as_deref(), heredoc_start, *end)
-                }) {
-                    // Mask the heredoc body while preserving length and newlines.
+            // Walk EVERY heredoc on this command line, in bash's order, rather
+            // than the first one only. The gate below is unchanged and still
+            // asked per heredoc: mask a body only when its own delimiter is
+            // quoted. An unquoted heredoc is stepped over, not masked, so the
+            // next body is located from the right place. `.agent-config-oiwua`.
+            if let Some((queue, body_region_start)) = collect_heredoc_queue(command, heredoc_start) {
+                // (body start, terminator line start, body end) per masked body.
+                let mut spans: Vec<(usize, usize, usize)> = Vec::new();
+                let mut cursor = body_region_start;
+
+                for (delimiter, heredoc_type, quoted) in &queue {
+                    // READER 2 of `heredoc_body_is_inert`. Asked here rather
+                    // than before the delimiter parse because `body_end` is not
+                    // known until the terminator has been found, and
+                    // `compound_output_reaches_executor` resumes from there.
+                    // Every veto is a way the body still reaches an interpreter
+                    // with a non-executing receiver, and none of them can see
+                    // the others.
+                    let Some(body_end) =
+                        find_heredoc_terminator(command, cursor, delimiter, *heredoc_type)
+                    else {
+                        // A terminator this line promised is absent. Stop —
+                        // every later body start is now unknown, and guessing
+                        // one is how a masker swallows text it was never given.
+                        break;
+                    };
+                    if *quoted
+                        && heredoc_body_is_inert(
+                            command,
+                            target_cmd.as_deref(),
+                            heredoc_start,
+                            body_end,
+                        )
+                    {
+                        let body_slice = &command[cursor..body_end];
+                        let terminator_rel = body_slice.rfind('\n').map_or(0, |idx| idx + 1);
+                        spans.push((cursor, cursor + terminator_rel, body_end));
+                    }
+                    cursor = body_end;
+                }
+
+                if !spans.is_empty() {
+                    let first_body = spans[0].0;
                     if result.is_empty() {
-                        result = command[..body_start].to_string();
+                        result = command[..first_body].to_string();
                     } else {
-                        result.push_str(&command[pos..body_start]);
+                        result.push_str(&command[pos..first_body]);
                     }
 
-                    // Identify the start of the terminator line so we keep it intact.
-                    let body_slice = &command[body_start..body_end];
-                    let terminator_rel = body_slice.rfind('\n').map_or(0, |idx| idx + 1);
-                    let terminator_abs = body_start + terminator_rel;
+                    let mut last = first_body;
+                    for (body_start, terminator_abs, body_end) in &spans {
+                        // Anything between the previous masked body and this
+                        // one is an UNMASKED body (an unquoted heredoc, or one
+                        // a veto declined) and is copied through verbatim.
+                        result.push_str(&command[last..*body_start]);
+                        result.push_str(&mask_preserve_newlines(
+                            &command[*body_start..*terminator_abs],
+                        ));
+                        result.push_str(&command[*terminator_abs..*body_end]);
+                        last = *body_end;
+                    }
 
-                    let masked_body = mask_preserve_newlines(&command[body_start..terminator_abs]);
-                    result.push_str(&masked_body);
-                    result.push_str(&command[terminator_abs..body_end]);
-
-                    pos = body_end;
+                    pos = last;
                     continue;
                 }
             }
@@ -3067,7 +3093,15 @@ fn mask_preserve_newlines(input: &str) -> String {
 /// quoted-delimiter body; an unquoted delimiter is expanded by the outer
 /// shell before the receiving command ever sees the bytes. v0.3.0 parsed
 /// this fact and then threw it away. Spec 333 / .agent-config-u06z.
-fn parse_heredoc_delimiter(after_op: &str) -> Option<(String, usize, HeredocType, bool)> {
+///
+/// The FIFTH element is the offset just past the delimiter WORD, before the
+/// skip to the newline. `collect_heredoc_queue` needs it to resume scanning
+/// the same command line for a second `<<`; the second element skips to the
+/// body and so scans past any later operator. Derived here rather than
+/// re-parsed by the caller, because two parsers for one grammar is the
+/// duplicate `.claude/rules/single-source.md` exists to prevent.
+/// `.agent-config-oiwua`.
+fn parse_heredoc_delimiter(after_op: &str) -> Option<(String, usize, HeredocType, bool, usize)> {
     let trimmed = after_op.trim_start_matches([' ', '\t']);
     let skip_whitespace = after_op.len() - trimmed.len();
 
@@ -3114,7 +3148,28 @@ fn parse_heredoc_delimiter(after_op: &str) -> Option<(String, usize, HeredocType
         if end == 0 {
             return None;
         }
-        (delim_chars[..end].to_string(), end, false)
+        let word = &delim_chars[..end];
+        // A BACKSLASH ANYWHERE IN THE DELIMITER WORD QUOTES IT, exactly as a
+        // surrounding quote does: POSIX says the body is expanded only when the
+        // delimiter word is entirely unquoted, and bash implements `<<\EOF` as
+        // the identical no-expansion heredoc `<<'EOF'` writes. Quote removal
+        // then strips the backslashes, so the line that terminates the body
+        // reads `EOF` and not `\EOF`.
+        //
+        // Reading the word literally got BOTH halves wrong at once, which is
+        // why the row denies: the gate below saw `quoted == false` and refused
+        // to mask, and `find_heredoc_terminator` searched for a `\EOF` line
+        // that a shell script can never contain. `.agent-config-oiwua`.
+        //
+        // Widening "quoted" widens what gets MASKED, so the must-deny arms in
+        // artifacts/oiwua-arms.py are the ones that license this: the receiver
+        // vetoes are asked after the parse, and a backslash delimiter feeding
+        // `| bash` or a `.sh` sink still denies.
+        if word.contains('\\') {
+            (word.replace('\\', ""), end, true)
+        } else {
+            (word.to_string(), end, false)
+        }
     };
 
     // Calculate total offset to body start (skip to newline)
@@ -3129,7 +3184,62 @@ fn parse_heredoc_delimiter(after_op: &str) -> Option<(String, usize, HeredocType
         total_delim_offset + newline_offset,
         heredoc_type,
         quoted,
+        total_delim_offset,
     ))
+}
+
+/// Every heredoc declared on ONE command line, in the order bash consumes them.
+///
+/// bash queues heredocs: all the operators sit on the command line and the
+/// bodies follow after its newline, first declared first. `<<'A' > f <<'B'`
+/// reads A's body, then B's. A linear scan for `<<` cannot find B, because B's
+/// operator sits BEFORE A's body — so the scan resumes past it and B's body is
+/// never masked (`.agent-config-oiwua`).
+///
+/// Returns the queue and the offset where the FIRST body begins. Unquoted
+/// heredocs are queued too, and deliberately: they are not masked, but their
+/// bodies still have to be stepped over to find where the next body starts.
+/// Dropping them is what let the masker take an unquoted body — the one the
+/// outer shell expands — for a later quoted one, which is a hole and not only
+/// a false positive.
+///
+/// Stops at the first operator that does not parse, returning what it has, so
+/// a `<<` inside a quoted word ends the queue rather than inventing an entry.
+fn collect_heredoc_queue(
+    command: &str,
+    first_op: usize,
+) -> Option<(Vec<(String, HeredocType, bool)>, usize)> {
+    let bytes = command.as_bytes();
+    let mut queue: Vec<(String, HeredocType, bool)> = Vec::new();
+    let mut i = first_op;
+
+    loop {
+        if !command[i..].starts_with("<<") || bytes.get(i + 2) == Some(&b'<') {
+            break;
+        }
+        let Some((delim, _body_off, ty, quoted, word_end)) =
+            parse_heredoc_delimiter(&command[i + 2..])
+        else {
+            break;
+        };
+        queue.push((delim, ty, quoted));
+
+        let scan_from = i + 2 + word_end;
+        if scan_from >= command.len() {
+            break;
+        }
+        let newline = command[scan_from..].find('\n').map(|o| scan_from + o);
+        let limit = newline.unwrap_or(command.len());
+        match command[scan_from..limit].find("<<") {
+            Some(rel) => i = scan_from + rel,
+            None => {
+                let body_start = newline.map_or(command.len(), |p| p + 1);
+                return Some((queue, body_start));
+            }
+        }
+    }
+
+    None
 }
 
 /// Find the end of a heredoc body (position after the terminating delimiter line).
@@ -5163,6 +5273,59 @@ fi"#;
             m4.contains(&rmrf),
             "an unquoted delimiter expands before cat reads it, so the body stays \
              visible on purpose: {m4:?}"
+        );
+    }
+
+    /// `.agent-config-oiwua` — bash queues heredocs, and so does the masker.
+    ///
+    /// `cat <<'A' > f <<'B'` reads A's body then B's. Every operator sits on the
+    /// command line and every body follows AFTER its newline, so a linear scan
+    /// for `<<` steps over B's operator on its way to A's body and never sees
+    /// it. That cost a false positive on B and, worse, a HOLE: with an unquoted
+    /// heredoc first, the masker took the FIRST body — the one the outer shell
+    /// expands — for the later quoted one, and masked it.
+    ///
+    /// The last case is the one that decides the shape. Dropping unquoted
+    /// heredocs from the queue would fix the false positive and leave the hole,
+    /// because the queue is not there to mask them, it is there to know where
+    /// their bodies END.
+    #[test]
+    fn every_heredoc_on_one_line_is_queued_in_order_oiwua() {
+        let rmrf = format!("{}{}{}", "rm", " -", "rf");
+
+        // 1. Second quoted body on the same line: masked (it was not, before).
+        let c1 = format!("cat <<'A1' > notes.md <<'A2'\nharmless\nA1\n{rmrf} /important\nA2");
+        let m1 = mask_non_executing_heredocs(&c1);
+        assert!(
+            !m1.contains(&rmrf),
+            "the SECOND quoted heredoc body on a line must be masked too: {m1:?}"
+        );
+
+        // 2. First quoted body still masked — the queue did not lose the head.
+        let c2 = format!("cat <<'B1' > notes.md <<'B2'\n{rmrf} /important\nB1\nharmless\nB2");
+        let m2 = mask_non_executing_heredocs(&c2);
+        assert!(
+            !m2.contains(&rmrf),
+            "the FIRST body must still be masked: {m2:?}"
+        );
+
+        // 3. THE HOLE. Unquoted first, quoted second. The unquoted body is
+        // expanded by the outer shell, so it must stay visible; masking it
+        // because a LATER delimiter happened to be quoted is a bypass.
+        let c3 = format!("cat <<A > notes.md <<'B'\n{rmrf} /important\nA\nharmless\nB");
+        let m3 = mask_non_executing_heredocs(&c3);
+        assert!(
+            m3.contains(&rmrf),
+            "an UNQUOTED first body must stay visible even when a later \
+             delimiter is quoted: {m3:?}"
+        );
+
+        // 4. A backslash delimiter is quoted (POSIX), and queues like one.
+        let c4 = format!("cat > notes.md <<\\EOF\n{rmrf} /important\nEOF");
+        let m4 = mask_non_executing_heredocs(&c4);
+        assert!(
+            !m4.contains(&rmrf),
+            "`<<\\EOF` is a quoted delimiter and its body is data: {m4:?}"
         );
     }
 
