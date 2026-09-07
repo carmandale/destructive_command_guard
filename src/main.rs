@@ -83,8 +83,8 @@ const HISTORY_AGENT_TYPE: &str = "claude_code";
 /// `config.history.database_path`, so with both set the hook wrote to one database
 /// and `dcg history stats` reported zero commands off the other
 /// (`.agent-config-x2f60`).
-fn history_db_path(config: &destructive_command_guard::config::HistoryConfig) -> Option<PathBuf> {
-    Some(HistoryDb::resolve_path(config.expanded_database_path()))
+fn history_db_path(config: &destructive_command_guard::config::HistoryConfig) -> PathBuf {
+    HistoryDb::resolve_path(config.expanded_database_path())
 }
 
 /// Pack label for a denial dcg issued without completing an evaluation.
@@ -530,7 +530,7 @@ fn main() {
 
     let history_writer = if config.history.enabled {
         Some(HistoryWriter::new(
-            history_db_path(&config.history),
+            Some(history_db_path(&config.history)),
             &config.history,
         ))
     } else {

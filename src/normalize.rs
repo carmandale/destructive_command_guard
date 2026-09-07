@@ -1786,11 +1786,10 @@ pub fn move_redirections_to_segment_end(command: &str) -> Cow<'_, str> {
     let mut out = String::with_capacity(len + 8);
     let mut copied = 0usize;
     for (segment_end, runs, last_word_byte) in segments {
-        let moving: Vec<&(Range<usize>, usize)> = last_word_byte.map_or_else(Vec::new, |word_end| {
-            runs.iter()
-                .filter(|(run, _)| run.end <= word_end)
-                .collect()
-        });
+        let moving: Vec<&(Range<usize>, usize)> = last_word_byte
+            .map_or_else(Vec::new, |word_end| {
+                runs.iter().filter(|(run, _)| run.end <= word_end).collect()
+            });
         if moving.is_empty() {
             continue;
         }
