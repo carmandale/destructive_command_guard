@@ -159,6 +159,38 @@ If you see errors, **carefully understand and resolve each issue**. Read suffici
 
 ---
 
+## CI on this fork — why the local checks above are not optional
+
+`carmandale/destructive_command_guard` is a **fork** of
+`Dicklesworthstone/destructive_command_guard`, and GitHub suppresses automatic
+workflow triggers in a fork: `push`, `pull_request` and `schedule` create no run
+at all, while a manual `workflow_dispatch` still runs. Nothing warns you. The run
+list just stays empty, so a red gate survives push after push.
+
+**The `state` field lies.** `GET .../actions/workflows` reported `state: active`
+for `ci.yml` across dozens of pushes that produced zero runs; the true
+`state: disabled_fork` surfaced only after toggling repository Actions off and on
+again. Never read `state` as proof that a trigger is live — read the runs:
+
+```bash
+# The ambient gsp-agent token cannot see these runs and reads as absence.
+export GH_TOKEN=$(gh auth token --user carmandale)
+R=repos/carmandale/destructive_command_guard
+
+# Proof. Zero here means the push trigger is dead, whatever `state` claims.
+gh api "$R/actions/runs?head_sha=$(git rev-parse HEAD)" --jq '.total_count'
+
+# True state, then the fix, per workflow id.
+gh api "$R/actions/workflows" --jq '.workflows[] | "\(.state)\t\(.id)\t\(.path)"'
+gh api -X PUT "$R/actions/workflows/<id>/enable"
+```
+
+Cleared 2026-09-07 under `.agent-config-9brj5`: `ci.yml`, `bench.yml` and
+`cli-version-audit.yml` were `disabled_fork`; all ten workflows are now `active`
+and a push to `main` produced this repo's first `event: push` run.
+
+---
+
 ## Testing
 
 ### Testing Policy
