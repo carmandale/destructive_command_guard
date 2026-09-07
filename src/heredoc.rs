@@ -2268,14 +2268,14 @@ const COMMAND_FOLLOWS: &[&str] = &[
 const DECLARATION_BUILTINS: &[&str] = &["export", "local", "declare", "readonly", "typeset"];
 
 /// A redirection, not a command word: `>out`, `2>&1`, `&>log`, `<in`, `>>log`.
-fn is_redirection_token(token: &str) -> bool {
+pub(crate) fn is_redirection_token(token: &str) -> bool {
     let rest = token.trim_start_matches(|c: char| c.is_ascii_digit());
     rest.starts_with(['<', '>']) || rest.starts_with("&>")
 }
 
 /// A bare redirection OPERATOR, whose target is the NEXT token: `>`, `2>`, `&>`,
 /// `>>`. `>out` carries its own target and does not consume the next token.
-fn is_bare_redirection_operator(token: &str) -> bool {
+pub(crate) fn is_bare_redirection_operator(token: &str) -> bool {
     is_redirection_token(token)
         && token
             .trim_start_matches(|c: char| c.is_ascii_digit())
