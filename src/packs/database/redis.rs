@@ -218,3 +218,41 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
     ]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `config-set-maxmemory`'s trailing `(?!-)` is the reason it sits in
+    /// tests/pattern_audit.rs's backtracking allowlist (937db53): it is the only
+    /// thing separating bare `maxmemory` from `maxmemory-policy` and
+    /// `maxmemory-samples`, which carry their own patterns and their own
+    /// remediation text. `\b` alone does not separate them — `y` to `-` is itself
+    /// a word boundary. Nothing asserted that until now, so the allowlist's
+    /// stated reason could rot without a red.
+    #[test]
+    fn test_maxmemory_lookahead_separates_the_suffixed_rules() {
+        let pack = create_pack();
+
+        let bare = pack
+            .matches_destructive("redis-cli CONFIG SET maxmemory 100mb")
+            .expect("bare `CONFIG SET maxmemory` must still be caught");
+        assert_eq!(
+            bare.name,
+            Some("config-set-maxmemory"),
+            "bare maxmemory matched the wrong rule"
+        );
+
+        // `config-set-maxmemory` is declared FIRST, so without `(?!-)` it would
+        // shadow these and hand back the wrong remediation.
+        let policy = pack
+            .matches_destructive("redis-cli CONFIG SET maxmemory-policy allkeys-lru")
+            .expect("`CONFIG SET maxmemory-policy` must still be caught");
+        assert_eq!(
+            policy.name,
+            Some("config-set-maxmemory-policy"),
+            "maxmemory-policy was swallowed by the bare-maxmemory rule; the (?!-) \
+             lookahead the audit allowlist cites is no longer doing its job"
+        );
+    }
+}
