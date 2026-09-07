@@ -1754,13 +1754,37 @@ fn tokenize_backwards(s: &str) -> Vec<String> {
 /// assumed.
 ///
 /// "Measured inert on this fleet" is exactly as narrow as it sounds: 69 of the
-/// 82 members were present to measure. THESE 13 WERE NOT INSTALLED AND ARE
-/// THEREFORE UNMEASURED, not cleared -- `ag`, `ack`, `yq`, `xclip`, `xsel`,
-/// `tac`, `shuf`, `sponge`, `pv`, `base32`, `basenc`, `b2sum`, `netcat`. Most
-/// are transforms with no program to supply, but `yq` takes an expression with
-/// `--from-file` and `ack` is Perl, so those two are program-takers admitted on
-/// family resemblance alone. Whichever of them lands on a machine first is due
-/// the same probe `awk` failed.
+/// 82 members the sweep saw were present to measure. THIRTEEN WERE NOT
+/// INSTALLED AND WERE THEREFORE UNMEASURED, not cleared. ELEVEN REMAIN ON THAT
+/// FOOTING, all of them transforms with no program to supply -- `ag`, `xclip`,
+/// `xsel`, `tac`, `shuf`, `sponge`, `pv`, `base32`, `basenc`, `b2sum`,
+/// `netcat`. The other two took a program, and they are gone.
+///
+/// `ack` and `yq` were REMOVED (`.agent-config-1xm1n`) rather than left to be
+/// probed if a binary ever lands, and the reason is `split`'s exactly, only
+/// stronger. `yq --from-file=-` reads an expression from stdin and `ack` is
+/// Perl, so either could take a program; neither was ever admitted on a
+/// measurement, only on sitting next to `rg` and `jq`. Waiting was the ending
+/// the bead itself proposed, and it was declined because nothing on this
+/// machine fires when a `brew install yq` succeeds -- the only guard would be a
+/// human remembering to re-run a probe, which is the footing
+/// `.agent-config-bvt4k` refused for `split`. `split` at least had two
+/// installed builds to re-measure first; these two have never been executed
+/// once, on either machine (checked on this laptop and the Mac mini).
+///
+/// The wait was also more defective than it looked. The probe the bead named --
+/// `mt4yo-residue-sweep.py`, GAP 2 -- does carry a row for each, but with no
+/// per-language positive control on either (`control=None`), so neither row
+/// could produce a readable "no"; and its `ack` spelling is `ack -f -`, where
+/// ack's `-f` LISTS FILES and reads no program at all. A binary landing would
+/// have bought an unreadable inert, not a clearance.
+///
+/// Priced before it was chosen, on the same two corpora (`zbzox-census.py`,
+/// 19,914 rows): `yq` and `ack` are each 0 as heredoc RECEIVER and 0 as a
+/// DOWNSTREAM stage, so no real row is defended by keeping them, and removal
+/// cannot raise a false positive these populations can see. That makes this a
+/// pure fail-open closure under the 2026-09-02 ruling the census cites, not an
+/// FP-surface change. Readmission is a measurement, never a family resemblance.
 ///
 /// WHY `awk` IS NOT HERE, and cannot be readmitted by narrowing a flag. It
 /// executes stdin as code in two independent ways, and only the first looks
@@ -1853,9 +1877,12 @@ const NON_EXECUTING_HEREDOC_COMMANDS: &[&str] = &[
     // Search and filter (the grep family, modern spellings)
     "rg",
     "ag",
-    "ack",
     "jq",
-    "yq",
+    // `ack` and `yq` were here until `.agent-config-1xm1n`. Both are
+    // program-takers -- `yq --from-file=-` reads an expression from stdin, and
+    // `ack` is Perl -- admitted on family resemblance and never measured,
+    // because neither binary exists on this fleet to probe. See the doc comment
+    // above. Do not re-add them without a measurement.
     // Pagers and viewers
     "less",
     "more",
@@ -5271,6 +5298,66 @@ fi"#;
             !mc.contains(&rmrf),
             "control: `| sort` is still a data sink, so its body must still be \
              masked: {mc:?}"
+        );
+    }
+
+    /// `.agent-config-1xm1n` — the arm for removing `ack` and `yq`.
+    ///
+    /// Both were program-takers admitted on family resemblance and never
+    /// measured, because neither binary is installed on either machine dcg
+    /// guards, so there was nothing to probe. Unlike the `awk` arm, then, these
+    /// spellings are NOT verified executing against a real binary here, and
+    /// unlike even the `split` arm there was no installed build to re-measure.
+    /// What is verified is the property that matters to dcg and needs no
+    /// binary: while they were members, both spellings masked their body out of
+    /// every pack in every layer. That is the hole; this closes it.
+    ///
+    /// Priced first, and the price is why this is an agent's call rather than
+    /// Dale's: `zbzox-census.py` counts each at 0 receiver / 0 downstream over
+    /// 19,914 rows, so the removal is a pure fail-open closure.
+    #[test]
+    fn ack_and_yq_are_unmeasured_program_takers_so_their_bodies_are_not_masked_1xm1n() {
+        let rmrf = format!("{}{}{}", "rm", " -", "rf");
+
+        // 1. `yq` downstream: it reads an expression from stdin with
+        //    `--from-file=-`, so the body is a candidate program.
+        let c1 = format!("cat <<'EOF' | yq --from-file=-\n{rmrf} /important\nEOF");
+        let m1 = mask_non_executing_heredocs(&c1);
+        assert!(
+            m1.contains(&rmrf),
+            "`| yq --from-file=-` takes a program on stdin and was never \
+             measured; body must stay visible: {m1:?}"
+        );
+
+        // 2. `yq` as the direct receiver — the same route, no pipe.
+        let c2 = format!("yq --from-file=- <<'EOF'\n{rmrf} /important\nEOF");
+        let m2 = mask_non_executing_heredocs(&c2);
+        assert!(
+            m2.contains(&rmrf),
+            "`yq --from-file=-` as the receiver reads its stdin as an \
+             expression; body must stay visible: {m2:?}"
+        );
+
+        // 3. `ack` came out with it — Perl, admitted on family resemblance,
+        //    and never executed once on this fleet.
+        let c3 = format!("cat <<'EOF' | ack --match .\n{rmrf} /important\nEOF");
+        let m3 = mask_non_executing_heredocs(&c3);
+        assert!(
+            m3.contains(&rmrf),
+            "`ack` is out of the list too; body must stay visible: {m3:?}"
+        );
+
+        // Control — the instrument can still mask, so a green above is not
+        // green-over-nothing. `jq` is the sharpest control available: it is the
+        // ADJACENT program-taker that stayed, and it stayed because it was
+        // measured (1.8.1 has no `system` builtin at all). If someone removes
+        // it without updating this arm, this line says so.
+        let ctrl = format!("cat <<'EOF' | jq -f -\n{rmrf} /important\nEOF");
+        let mc = mask_non_executing_heredocs(&ctrl);
+        assert!(
+            !mc.contains(&rmrf),
+            "control: `| jq -f -` was measured inert and is still a member, so \
+             its body must still be masked: {mc:?}"
         );
     }
 }
