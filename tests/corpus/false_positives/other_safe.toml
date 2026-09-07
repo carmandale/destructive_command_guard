@@ -81,3 +81,38 @@ expected = "allow"
 description = "make is safe"
 command = "make all"
 expected = "allow"
+
+# ============================================================================
+# Redirections that are ordinary, wherever they sit
+# ============================================================================
+#
+# The .agent-config-y1h6c fix moves a redirection to the end of its simple
+# command before the patterns run. Moving text is a rewrite, so these rows pin
+# the two ways it could over-block: a benign command whose redirection is
+# interposed must stay allowed, and a redirection already at the end must be
+# left exactly where its own patterns expect to find it.
+
+[[case]]
+description = "trailing redirection on a safe command"
+command = "ls -la > out.txt"
+expected = "allow"
+
+[[case]]
+description = "interposed redirection on a safe git subcommand"
+command = "git >/dev/null status"
+expected = "allow"
+
+[[case]]
+description = "trailing redirection plus fd duplication"
+command = "git status >/dev/null 2>&1"
+expected = "allow"
+
+[[case]]
+description = "interposed redirection on a non-destructive rm"
+command = "rm >/dev/null -f ./build/artifact.o"
+expected = "allow"
+
+[[case]]
+description = "a destructive-looking string inside quoted data stays data"
+command = 'echo "rm >/dev/null -rf /" > note.txt'
+expected = "allow"

@@ -35,3 +35,29 @@ expected = "allow"
 description = "digit-suffixed program name with a glued redirection is not git"
 command = "git2>/dev/null reset --hard"
 expected = "allow"
+
+# ============================================================================
+# A hyphenated lookalike WITH an interposed redirection
+# ============================================================================
+#
+# Parking a redirection between the command word and its arguments is a real
+# bypass (.agent-config-y1h6c), and the fix moves the redirection to the end of
+# its simple command so the patterns see a contiguous command line. That
+# rewrite must not hand a hyphenated lookalike to a pattern that would
+# otherwise have rejected it: `my-git` is still not git once `>/dev/null` moves
+# out from between its words.
+
+[[case]]
+description = "hyphenated lookalike with a redirection ahead of its arguments"
+command = "my-git >/dev/null reset --hard"
+expected = "allow"
+
+[[case]]
+description = "hyphenated lookalike with a redirection inside its arguments"
+command = "my-git reset >/dev/null --hard"
+expected = "allow"
+
+[[case]]
+description = "hyphenated lookalike with a redirection ahead of its subcommand"
+command = "docker-compose >/dev/null down"
+expected = "allow"

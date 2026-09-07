@@ -64,3 +64,86 @@ description = "hyphenated lookalike ahead of a real destructive command"
 command = "my-git status && git reset --hard"
 expected = "deny"
 rule_id = "core.git:reset-hard"
+
+# ============================================================================
+# A redirection parked BETWEEN the command word and its arguments
+# ============================================================================
+#
+# The rows above are about tokenization: the glued spelling never reached the
+# matcher. These rows fail in the SPACED spelling too, so they are about the
+# patterns themselves (.agent-config-y1h6c). A pack pattern spells a command
+# and its arguments as one run of tokens -- `rm\s+...-rf`, `reset\s+--hard` --
+# and a redirection is legal anywhere in a simple command, so one parked
+# between those tokens split them apart and walked through. The shell strips
+# the operator and its target out of the argument list before the program is
+# executed, so every row here ran the destructive command for real.
+#
+# `git >/dev/null reset --hard` denied even before the fix, because the git
+# pattern's `(?:\S+\s+)*` happens to absorb one word there. There is no such
+# absorber between `reset` and `--hard`, and none at all after `rm`.
+
+[[case]]
+description = "redirection between rm and its flags"
+command = "rm >/dev/null -rf /"
+expected = "deny"
+rule_id = "core.filesystem:rm-rf-root-home"
+
+[[case]]
+description = "redirection with a spaced target between rm and its flags"
+command = "rm > /dev/null -rf /"
+expected = "deny"
+rule_id = "core.filesystem:rm-rf-root-home"
+
+[[case]]
+description = "append redirection between rm and its flags"
+command = "rm >>build.log -rf /"
+expected = "deny"
+rule_id = "core.filesystem:rm-rf-root-home"
+
+[[case]]
+description = "stdin redirection between rm and its flags"
+command = "rm </dev/null -rf /"
+expected = "deny"
+rule_id = "core.filesystem:rm-rf-root-home"
+
+[[case]]
+description = "fd-duplicating redirection between rm and its flags"
+command = "rm 2>&1 -rf /"
+expected = "deny"
+rule_id = "core.filesystem:rm-rf-root-home"
+
+[[case]]
+description = "both-streams redirection between rm and its flags"
+command = "rm &>/dev/null -rf /"
+expected = "deny"
+rule_id = "core.filesystem:rm-rf-root-home"
+
+[[case]]
+description = "redirection ahead of the command word"
+command = ">/dev/null rm -rf /"
+expected = "deny"
+rule_id = "core.filesystem:rm-rf-root-home"
+
+[[case]]
+description = "redirection between a git subcommand and its flag"
+command = "git reset >/dev/null --hard"
+expected = "deny"
+rule_id = "core.git:reset-hard"
+
+[[case]]
+description = "fd-prefixed redirection between a git subcommand and its flag"
+command = "git reset 2>/dev/null --hard"
+expected = "deny"
+rule_id = "core.git:reset-hard"
+
+[[case]]
+description = "interposed redirection in the second command of a list"
+command = "ls -la; rm >/dev/null -rf /"
+expected = "deny"
+rule_id = "core.filesystem:rm-rf-root-home"
+
+[[case]]
+description = "interposed redirection on the far side of a pipe"
+command = "echo hi | xargs rm >/dev/null -rf /"
+expected = "deny"
+rule_id = "core.filesystem:rm-rf-root-home"

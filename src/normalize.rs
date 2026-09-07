@@ -1657,6 +1657,236 @@ pub fn split_glued_redirections(command: &str) -> Cow<'_, str> {
     }
 }
 
+/// A pipeline operator, a list operator, a newline, a grouping paren or a
+/// command substitution backtick all end the simple command a redirection
+/// belongs to, and so bound how far it may move.
+#[inline]
+const fn ends_simple_command(b: u8) -> bool {
+    matches!(b, b';' | b'\n' | b'|' | b'&' | b'(' | b')' | b'`')
+}
+
+/// Move each redirection to the end of the simple command it belongs to.
+///
+/// A redirection is position-independent: `rm >/dev/null -rf /` runs exactly
+/// what `rm -rf / >/dev/null` runs, because the shell strips the operator and
+/// its target out of the argument list before `rm` is executed. Pack patterns
+/// spell a command and its arguments as one run of tokens (`rm\s+-rf`,
+/// `reset\s+--hard`), so a redirection parked between them walked through the
+/// guard while the trailing spelling denied (`.agent-config-y1h6c`). Rewriting
+/// the command the way the shell reads it lets every existing pattern see the
+/// command line it was written for, instead of teaching each pattern an
+/// optional redirection absorber at every token boundary.
+///
+/// Moved, not deleted, because some patterns match ON a redirection --
+/// `sqlite3 <db> < dump.sql` is one -- and the end of the command is exactly
+/// where those patterns already look for it.
+///
+/// Left exactly as written:
+/// - any command carrying a heredoc or here-string operator (`<<`, `<<<`),
+///   whose body is data the masker reads verbatim and whose tokenization it
+///   owns -- moving a word across it would rewrite the body;
+/// - quoted and backslash-escaped `>`/`<`, which are data, not operators;
+/// - a redirection that already ends its command, which is where it belongs.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn move_redirections_to_segment_end(command: &str) -> Cow<'_, str> {
+    let bytes = command.as_bytes();
+    if !bytes.iter().any(|b| matches!(b, b'>' | b'<')) {
+        return Cow::Borrowed(command);
+    }
+
+    let len = bytes.len();
+    // Per segment: where it ends, the redirections in it (own bytes, plus the
+    // end of the whitespace to swallow when one is cut), and the last byte in
+    // it that belongs to an ordinary word.
+    type Segment = (usize, Vec<(Range<usize>, usize)>, Option<usize>);
+    let mut segments: Vec<Segment> = Vec::new();
+    let mut runs: Vec<(Range<usize>, usize)> = Vec::new();
+    let mut last_word_byte: Option<usize> = None;
+    let mut i = 0usize;
+
+    while i < len {
+        match bytes[i] {
+            b'\\' => {
+                // Escaped byte: `\>` is a literal, not an operator.
+                i = (i + 2).min(len);
+                last_word_byte = Some(i.saturating_sub(1));
+            }
+            b'\'' => {
+                i += 1;
+                while i < len && bytes[i] != b'\'' {
+                    i += 1;
+                }
+                if i < len {
+                    i += 1;
+                }
+                last_word_byte = Some(i.saturating_sub(1));
+            }
+            b'"' => {
+                i += 1;
+                while i < len {
+                    match bytes[i] {
+                        b'"' => {
+                            i += 1;
+                            break;
+                        }
+                        b'\\' => i = (i + 2).min(len),
+                        _ => i += 1,
+                    }
+                }
+                last_word_byte = Some(i.saturating_sub(1));
+            }
+            // Heredoc (`<<`) or here-string (`<<<`): the body below is data this
+            // rewrite must not reach, so the whole command is left alone.
+            b'<' if i + 1 < len && bytes[i + 1] == b'<' => return Cow::Borrowed(command),
+            // `&>` is a redirection operator; a lone `&` ends the command.
+            b'>' | b'<' | b'&' if bytes[i] != b'&' || (i + 1 < len && bytes[i + 1] == b'>') => {
+                let (run, cut_end) = consume_redirection_run(bytes, i, len);
+                i = run.end;
+                // A file-descriptor prefix (`2>&1`) was read as an ordinary word
+                // one byte at a time before the operator identified it. It is
+                // part of the redirection, not an argument that follows one.
+                if last_word_byte.is_some_and(|w| w >= run.start) {
+                    last_word_byte = None;
+                }
+                runs.push((run, cut_end));
+            }
+            b if ends_simple_command(b) => {
+                segments.push((i, std::mem::take(&mut runs), last_word_byte.take()));
+                i += 1;
+            }
+            b => {
+                if !b.is_ascii_whitespace() {
+                    last_word_byte = Some(i);
+                }
+                i += 1;
+            }
+        }
+    }
+    segments.push((len, runs, last_word_byte));
+
+    // A redirection moves only when an ordinary word follows it in the same
+    // command. One that is already last -- including one trailed only by more
+    // redirections, whose ORDER is the shell's own (`>out 2>&1` is not
+    // `2>&1 >out`) -- is left byte for byte where it was written.
+    let mut moved_any = false;
+    for (_, runs, last_word_byte) in &segments {
+        let Some(word_end) = *last_word_byte else {
+            continue;
+        };
+        if runs.iter().any(|(run, _)| run.end <= word_end) {
+            moved_any = true;
+            break;
+        }
+    }
+    if !moved_any {
+        return Cow::Borrowed(command);
+    }
+
+    let mut out = String::with_capacity(len + 8);
+    let mut copied = 0usize;
+    for (segment_end, runs, last_word_byte) in segments {
+        let moving: Vec<&(Range<usize>, usize)> = last_word_byte.map_or_else(Vec::new, |word_end| {
+            runs.iter()
+                .filter(|(run, _)| run.end <= word_end)
+                .collect()
+        });
+        if moving.is_empty() {
+            continue;
+        }
+        for (run, cut_end) in &moving {
+            out.push_str(&command[copied..run.start]);
+            copied = *cut_end;
+        }
+        // The whitespace that ended the segment separates it from the operator
+        // that follows, so it goes back on AFTER the redirections land.
+        let body = &command[copied..segment_end];
+        let trimmed = body.trim_end_matches([' ', '\t']);
+        out.push_str(trimmed);
+        copied = segment_end;
+        for (run, _) in &moving {
+            if !out.is_empty() && !out.ends_with(char::is_whitespace) {
+                out.push(' ');
+            }
+            out.push_str(&command[run.clone()]);
+        }
+        out.push_str(&body[trimmed.len()..]);
+    }
+    out.push_str(&command[copied..]);
+    Cow::Owned(out)
+}
+
+/// Read one redirection, starting at its operator's first byte.
+///
+/// Returns the run's own byte range, and the byte the caller resumes copying
+/// from if it cuts the run out: that swallows the whitespace separating the run
+/// from what follows, so removing it does not leave a double space behind.
+fn consume_redirection_run(bytes: &[u8], at: usize, len: usize) -> (Range<usize>, usize) {
+    let mut start = at;
+    let mut i = at;
+
+    if bytes[i] == b'&' {
+        // `&>` / `&>>`: the `&` belongs to the operator.
+        i += 1;
+    } else {
+        // A file-descriptor prefix (`2>`, `10>>`) counts only when it opens the
+        // word; digits glued to a command word are part of that word.
+        let mut k = i;
+        while k > 0 && bytes[k - 1].is_ascii_digit() {
+            k -= 1;
+        }
+        if k < i && (k == 0 || bytes[k - 1].is_ascii_whitespace()) {
+            start = k;
+        }
+    }
+
+    let op_start = i;
+    while i < len && matches!(bytes[i], b'>' | b'<') {
+        i += 1;
+    }
+    // `>|` overrides noclobber; the `|` is the operator's, not a pipeline's.
+    if i == op_start + 1 && bytes[op_start] == b'>' && i < len && bytes[i] == b'|' {
+        i += 1;
+    }
+
+    let mut has_target = true;
+    if i < len && bytes[i] == b'&' {
+        // `>&1`, `<&3`, `>&-`: the duplicated descriptor is the target.
+        let mut f = i + 1;
+        if f < len && bytes[f] == b'-' {
+            f += 1;
+        } else {
+            while f < len && bytes[f].is_ascii_digit() {
+                f += 1;
+            }
+        }
+        if f > i + 1 {
+            i = f;
+            has_target = false;
+        } else {
+            i += 1;
+        }
+    }
+
+    if has_target {
+        let mut t = i;
+        while t < len && (bytes[t] == b' ' || bytes[t] == b'\t') {
+            t += 1;
+        }
+        let word_end = consume_word_token(bytes, t, len);
+        if word_end > t {
+            i = word_end;
+        }
+    }
+
+    let mut cut_end = i;
+    while cut_end < len && (bytes[cut_end] == b' ' || bytes[cut_end] == b'\t') {
+        cut_end += 1;
+    }
+
+    (start..i, cut_end)
+}
+
 /// Normalize a command by stripping absolute paths from common binaries.
 ///
 /// Returns the original command unchanged if normalization fails (fail-open).
@@ -1665,9 +1895,16 @@ pub fn normalize_command(cmd: &str) -> Cow<'_, str> {
     // 0. Restore the word break an unquoted redirection already makes, so the
     //    command word is visible to every later step (tokenizer, path
     //    normalizers, pack patterns).
-    match split_glued_redirections(cmd) {
-        Cow::Borrowed(_) => normalize_command_inner(cmd),
-        Cow::Owned(split) => Cow::Owned(normalize_command_inner(&split).into_owned()),
+    let spaced = split_glued_redirections(cmd);
+    // 0b. Park every redirection at the end of its own simple command, where the
+    //     shell already puts it, so one parked mid-command no longer splits a
+    //     command word from the arguments a pattern spells beside it.
+    match move_redirections_to_segment_end(spaced.as_ref()) {
+        Cow::Borrowed(_) => match spaced {
+            Cow::Borrowed(_) => normalize_command_inner(cmd),
+            Cow::Owned(split) => Cow::Owned(normalize_command_inner(&split).into_owned()),
+        },
+        Cow::Owned(moved) => Cow::Owned(normalize_command_inner(&moved).into_owned()),
     }
 }
 
@@ -2176,4 +2413,139 @@ fn test_mixed_quoting_normalization() {
         "git reset --hard",
         "g'i't command should normalize"
     );
+}
+
+#[cfg(test)]
+mod redirection_position_tests {
+    use super::{move_redirections_to_segment_end, normalize_command};
+    use std::borrow::Cow;
+
+    /// The rows measured on `.agent-config-y1h6c`: a redirection parked between
+    /// the command word and its arguments, in every spelling the shell accepts.
+    #[test]
+    fn interposed_redirection_moves_to_the_end_of_its_command() {
+        for (input, expected) in [
+            ("rm >/dev/null -rf /", "rm -rf / >/dev/null"),
+            ("rm > /dev/null -rf /", "rm -rf / > /dev/null"),
+            ("rm >>build.log -rf /", "rm -rf / >>build.log"),
+            ("rm </dev/null -rf /", "rm -rf / </dev/null"),
+            ("rm 2>/dev/null -rf /", "rm -rf / 2>/dev/null"),
+            ("rm 2>&1 -rf /", "rm -rf / 2>&1"),
+            ("rm &>/dev/null -rf /", "rm -rf / &>/dev/null"),
+            (">/dev/null rm -rf /", "rm -rf / >/dev/null"),
+            ("git reset >/dev/null --hard", "git reset --hard >/dev/null"),
+        ] {
+            assert_eq!(
+                move_redirections_to_segment_end(input).as_ref(),
+                expected,
+                "{input}"
+            );
+        }
+    }
+
+    /// A redirection may not cross out of the simple command it belongs to: the
+    /// operator applies to one program, and moving it past a list or pipeline
+    /// operator would attach it to a different one.
+    #[test]
+    fn a_redirection_stays_inside_its_own_simple_command() {
+        for (input, expected) in [
+            ("ls -la; rm >/dev/null -rf /", "ls -la; rm -rf / >/dev/null"),
+            (
+                "echo hi | xargs rm >/dev/null -rf /",
+                "echo hi | xargs rm -rf / >/dev/null",
+            ),
+            (
+                "rm >/dev/null -rf / && echo done",
+                "rm -rf / >/dev/null && echo done",
+            ),
+            ("(rm >/dev/null -rf /)", "(rm -rf / >/dev/null)"),
+            (
+                "rm >/dev/null -rf /\necho done",
+                "rm -rf / >/dev/null\necho done",
+            ),
+        ] {
+            assert_eq!(
+                move_redirections_to_segment_end(input).as_ref(),
+                expected,
+                "{input}"
+            );
+        }
+    }
+
+    /// Moving is not deleting. Patterns that match ON a redirection --
+    /// `sqlite3 <db> < dump.sql` is one -- look for it at the end of the
+    /// command, which is where it already is, so those commands come back
+    /// borrowed and byte-identical.
+    #[test]
+    fn a_redirection_that_already_ends_its_command_is_left_alone() {
+        for input in [
+            "rm -rf / >/dev/null",
+            "sqlite3 mydb.db < dump.sql",
+            "ls -la > out.txt",
+            "git status >/dev/null 2>&1",
+            "npm run build 2>&1 | tee build.log",
+            "make > build.log; echo done",
+        ] {
+            let moved = move_redirections_to_segment_end(input);
+            assert!(
+                matches!(moved, Cow::Borrowed(_)),
+                "{input} should not be rewritten"
+            );
+            assert_eq!(moved.as_ref(), input, "{input}");
+        }
+    }
+
+    /// A heredoc body is data the masker reads verbatim, and its tokenization
+    /// is the masker's to own. Moving a word out of a body would rewrite what
+    /// the receiver is handed, so a command carrying `<<` or `<<<` is left
+    /// exactly as written -- including one whose body contains a redirection.
+    #[test]
+    fn a_heredoc_command_is_left_exactly_as_written() {
+        for input in [
+            "cat <<EOF > /tmp/x.txt\nhello\nEOF",
+            "cat <<'EOF'\nrm >/dev/null -rf /\nEOF",
+            "bash <<< 'rm >/dev/null -rf /'",
+        ] {
+            let moved = move_redirections_to_segment_end(input);
+            assert!(
+                matches!(moved, Cow::Borrowed(_)),
+                "{input:?} should not be rewritten"
+            );
+        }
+    }
+
+    /// `>` and `<` inside quotes or behind a backslash are data, not operators.
+    #[test]
+    fn quoted_and_escaped_angle_brackets_are_not_operators() {
+        for input in [
+            r#"echo "a > b" && echo c"#,
+            "echo 'x < y' && echo c",
+            r"echo a \> b && echo c",
+        ] {
+            let moved = move_redirections_to_segment_end(input);
+            assert!(
+                matches!(moved, Cow::Borrowed(_)),
+                "{input:?} should not be rewritten"
+            );
+        }
+    }
+
+    /// The whole point: after normalization the pack patterns see a command
+    /// word sitting next to the arguments they spell.
+    #[test]
+    fn normalize_command_parks_the_redirection_at_the_end() {
+        assert_eq!(
+            normalize_command("rm >/dev/null -rf /").as_ref(),
+            "rm -rf / >/dev/null"
+        );
+        // Glued spelling first (.agent-config-6yt2i), then the move.
+        assert_eq!(
+            normalize_command("rm>/dev/null -rf /").as_ref(),
+            "rm -rf / >/dev/null"
+        );
+        assert_eq!(
+            normalize_command("git>/dev/null reset --hard").as_ref(),
+            "git reset --hard >/dev/null"
+        );
+    }
 }
