@@ -131,6 +131,10 @@ hello_write.txt
 .beads/*.tmp
 .beads/daemon-error
 .beads/issues.jsonl.pre-conflict-fix-*
+.beads/.landing.lock
+.beads/.brexport-*
+.beads.pre-cutover-*/
+.beads/.pre-migration-backup/
 
 .gate-*-timestamp
 .gate-producers
@@ -143,8 +147,6 @@ scripts/wiki-pipeline-verify-oneshot.log
 
 specs/000-test-*/
 thoughts/shared/handoffs/test-lifecycle-run/
-thoughts/shared/handoffs/current.md
-thoughts/shared/handoffs/events/
 **/.goalbuddy-board/
 tools/codex-skill-review/live-probe.json
 
