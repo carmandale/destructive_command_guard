@@ -3289,7 +3289,12 @@ mod tests {
                 &destructive,
             )
         };
-        let paths: [(&str, &dyn Fn(&str) -> EvaluationResult); 2] = [
+        // A `type` alias, not an `#[allow]`: the pair is exactly what the
+        // loop below ranges over, so naming it satisfies clippy's
+        // `type_complexity` instead of silencing it (`.agent-config-4z76d`).
+        type NamedEvaluator<'a> = (&'a str, &'a dyn Fn(&str) -> EvaluationResult);
+
+        let paths: [NamedEvaluator<'_>; 2] = [
             ("evaluate_command", &via_current),
             ("evaluate_command_with_legacy", &via_legacy),
         ];
