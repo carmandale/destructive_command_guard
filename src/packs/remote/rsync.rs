@@ -25,7 +25,10 @@ pub fn create_pack() -> Pack {
 fn create_safe_patterns() -> Vec<SafePattern> {
     vec![
         safe_pattern!("rsync-dry-run", r"rsync\b[^;&|\n]*\s--dry-run\b"),
-        safe_pattern!("rsync-short-dry-run", r"rsync\b[^;&|\n]*\s+-[A-Za-z]*n[A-Za-z]*\b"),
+        safe_pattern!(
+            "rsync-short-dry-run",
+            r"rsync\b[^;&|\n]*\s+-[A-Za-z]*n[A-Za-z]*\b"
+        ),
         safe_pattern!("rsync-list-only", r"rsync\b[^;&|\n]*\s--list-only\b"),
     ]
 }

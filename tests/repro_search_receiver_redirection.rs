@@ -110,7 +110,14 @@ fn non_search_receivers_were_never_affected_and_still_are_not() {
     // The rows that were already correct. They are here so a regression in the
     // shared heredoc masker shows up in this file too, rather than only in a
     // suite nobody runs alongside it.
-    for cmd in ["cat", "head", "sort", "tee /tmp/y5eor-pin.md", "jq .", "sed -n p"] {
+    for cmd in [
+        "cat",
+        "head",
+        "sort",
+        "tee /tmp/y5eor-pin.md",
+        "jq .",
+        "sed -n p",
+    ] {
         let full = format!("{cmd} <<'EOF'\n{HAZ}\nEOF");
         let seen = packs_would_see(&full);
         assert!(
