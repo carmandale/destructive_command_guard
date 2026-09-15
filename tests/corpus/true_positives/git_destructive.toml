@@ -97,3 +97,37 @@ description = "git push --force after a ; separator still blocks"
 command = "git fetch; git push --force origin main"
 expected = "deny"
 rule_id = "core.git:push-force-long"
+
+# git global options can hold ; & | inside $(...), quotes or escapes. A candidate
+# fix for .agent-config-qv9dy that stopped the option skipper at those characters
+# was measured letting every command below through; they pin the skipper's reach.
+
+[[case]]
+description = "git -C $(cd \"$(dirname ...)\" && pwd) still blocks push --force"
+command = 'git -C "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" push --force origin main'
+expected = "deny"
+rule_id = "core.git:push-force-long"
+
+[[case]]
+description = "git -C $(cd a && pwd) still blocks restore"
+command = 'git -C $(cd a && pwd) restore f.txt'
+expected = "deny"
+rule_id = "core.git:restore-worktree"
+
+[[case]]
+description = "git -c with an escaped ; still blocks checkout <ref> --"
+command = 'git -c a.b=x\;y checkout HEAD -- f.txt'
+expected = "deny"
+rule_id = "core.git:checkout-ref-discard"
+
+[[case]]
+description = "git -c with a quoted value holding ; still blocks checkout <ref> --"
+command = "git -c alias.x='a;b' checkout HEAD -- f.txt"
+expected = "deny"
+rule_id = "core.git:checkout-ref-discard"
+
+[[case]]
+description = "git -c with a quoted value holding | still blocks push --force"
+command = "git -c user.name=\"a|b\" push origin main --force"
+expected = "deny"
+rule_id = "core.git:push-force-long"

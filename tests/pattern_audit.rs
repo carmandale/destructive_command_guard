@@ -41,15 +41,12 @@ fn test_audit_backtracking_requirements() {
                 "rm-force-recursive-tmpdir-brace",
             ]),
         ),
+        // checkout-ref-discard, restore-worktree and push-force-long left this set when
+        // their lookahead was spelled out (.agent-config-qv9dy): on the backtracking
+        // engine their option skipper ran out of backtracks on long harmless scripts.
         (
             "core.git",
-            HashSet::from([
-                "restore-staged-long",
-                "restore-staged-short",
-                "checkout-ref-discard",
-                "restore-worktree",
-                "push-force-long",
-            ]),
+            HashSet::from(["restore-staged-long", "restore-staged-short"]),
         ),
         (
             "cicd.github_actions",

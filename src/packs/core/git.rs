@@ -86,9 +86,19 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
                 ]
             }
         ),
+        // checkout-ref-discard, restore-worktree and push-force-long are spelled without
+        // lookahead so they run on the linear engine. With lookahead they ran on the
+        // backtracking engine, which counts backtracks over a whole search; the skipper
+        // re-walks the rest of the command from every `git`, so long harmless git
+        // scripts ran out (.agent-config-qv9dy). Each matches the same commands as its
+        // lookahead form (the test below holds those forms as the oracle), but a match
+        // can end later: these spellings consume what the lookahead only looked at.
+        //
+        // The ref is any word except `-b` or `--orphan` as a whole option, which is
+        // what `(?!-b\b)(?!--orphan\b)[^\s]+` said.
         destructive_pattern!(
             "checkout-ref-discard",
-            r"git\s+(?:\S+\s+)*checkout\s+(?!-b\b)(?!--orphan\b)[^\s]+\s+--\s+",
+            r"git\s+(?:\S+\s+)*checkout\s+(?:[^\s-]\S*|-(?:[^\s\-b]\S*|b\w\S*|-(?:[^\so]\S*|o(?:[^\sr]\S*|r(?:[^\sp]\S*|p(?:[^\sh]\S*|h(?:[^\sa]\S*|a(?:[^\sn]\S*|n\w\S*)?)?)?)?)?)?)?)\s+--\s+",
             "git checkout <ref> -- <path> overwrites working tree. Use 'git stash' first.",
             High,
             "git checkout <ref> -- <path> replaces your working tree files with versions from \
@@ -115,10 +125,12 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
                 ]
             }
         ),
-        // restore without --staged affects working tree
+        // restore without --staged affects working tree. After `restore` and one blank:
+        // another blank, the end, or anything but `--staged`/`-S` as a whole option,
+        // which is what `restore\s+(?!--staged\b)(?!-S\b)` said.
         destructive_pattern!(
             "restore-worktree",
-            r"git\s+(?:\S+\s+)*restore\s+(?!--staged\b)(?!-S\b)",
+            r"git\s+(?:\S+\s+)*restore\s(?:\s|$|[^\s-]|-(?:$|[^-S]|S\w)|--(?:$|[^s]|s(?:$|[^t]|t(?:$|[^a]|a(?:$|[^g]|g(?:$|[^e]|e(?:$|[^d]|d\w)))))))",
             "git restore discards uncommitted changes. Use 'git stash' or 'git diff' first.",
             High,
             "git restore <path> discards uncommitted changes in your working directory, \
@@ -276,10 +288,11 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
                 ]
             }
         ),
-        // force push can destroy remote history (CRITICAL - affects shared history)
+        // force push can destroy remote history (CRITICAL - affects shared history).
+        // `(?:$|[^-a-z])` is `(?![-a-z])`, consuming the character it checks.
         destructive_pattern!(
             "push-force-long",
-            r"git\s+(?:\S+\s+)*push\s+[^;&|\n]*--force(?![-a-z])",
+            r"git\s+(?:\S+\s+)*push\s+[^;&|\n]*--force(?:$|[^-a-z])",
             "Force push can destroy remote history. Use --force-with-lease if necessary.",
             Critical,
             "git push --force overwrites remote history with your local history. This can \
@@ -686,5 +699,220 @@ mod tests {
 
         let many_spaces = format!("git{}status", " ".repeat(100));
         assert_matches_within_budget(&pack, &many_spaces);
+    }
+
+    /// Repeat `unit` until the text reaches `bytes`.
+    fn repeat_to(unit: &str, bytes: usize) -> String {
+        unit.repeat(bytes.div_ceil(unit.len()))
+    }
+
+    /// With lookahead these three rules ran on the backtracking engine, which gives up
+    /// after a fixed number of backtracks over one search and then cannot say "no
+    /// match": 'git status' x400, 4,400 bytes, was already too much
+    /// (.agent-config-qv9dy). The linear engine has no limit to reach. Every shape
+    /// stays under the hook's 64 KiB command limit, so the hook can reach it.
+    #[test]
+    fn test_lookahead_free_rules_run_on_the_linear_engine() {
+        use crate::packs::regex_engine::{CompiledRegex, needs_backtracking_engine};
+
+        let pack = create_pack();
+        let loop_unit = "cd ~/dev/repo && git fetch origin && git status -sb && cd -\n";
+        let harmless = [
+            ("git status x400", "git status\n".repeat(400)),
+            (
+                "bash heredoc multi-repo loop 60 KiB",
+                format!("bash <<'SH'\n{}SH\n", repeat_to(loop_unit, 60 * 1024)),
+            ),
+            (
+                "one-line chain 60 KiB",
+                repeat_to(
+                    "cd repo && git add -A && git commit -m wip && cd - ; ",
+                    60 * 1024,
+                ),
+            ),
+            ("one line of 'git status ' x300", "git status ".repeat(300)),
+            (
+                "python heredoc 16 KiB",
+                format!(
+                    "python3 - <<'PY'\nimport os\n{}PY\n",
+                    repeat_to("os.system('git log -1 --oneline')\n", 16 * 1024)
+                ),
+            ),
+        ];
+
+        // Collect every failure before asserting, so one run names each rule that regressed.
+        let mut failures = Vec::new();
+        for (name, destructive) in [
+            ("checkout-ref-discard", "git checkout HEAD -- f.txt"),
+            ("restore-worktree", "git restore f.txt"),
+            ("push-force-long", "git push origin main --force"),
+        ] {
+            let pattern = pack
+                .destructive_patterns
+                .iter()
+                .find(|p| p.name == Some(name))
+                .unwrap_or_else(|| panic!("core.git:{name} is missing"));
+            let source = pattern.regex.as_str();
+            if needs_backtracking_engine(source)
+                || !CompiledRegex::new(source).is_ok_and(|re| !re.uses_backtracking())
+            {
+                failures.push(format!("core.git:{name} is on the backtracking engine"));
+            }
+            for (label, text) in &harmless {
+                if pattern.regex.is_match(text) {
+                    failures.push(format!("core.git:{name} matches {label}"));
+                }
+                for sep in ["\n", "; "] {
+                    if !pattern.regex.is_match(&format!("{text}{sep}{destructive}")) {
+                        failures.push(format!(
+                            "core.git:{name} misses `{destructive}` after {label} + {sep:?}"
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// Through the evaluator, which denies when a search gives up (.agent-config-ryyfo).
+    /// With lookahead each script here was denied as core.git:checkout-ref-discard because
+    /// the search ran out, not because anything matched (.agent-config-qv9dy).
+    #[test]
+    fn test_evaluator_allows_long_harmless_git_scripts() {
+        use crate::allowlist::LayeredAllowlist;
+        use crate::config::{CompiledOverrides, Config};
+        use crate::evaluator::evaluate_command;
+
+        let config = Config::default();
+        let overrides = CompiledOverrides::default();
+        let allowlists = LayeredAllowlist::default();
+        let scripts = [
+            ("git status x400", "git status\n".repeat(400)),
+            (
+                "bash heredoc multi-repo loop 16 KiB",
+                format!(
+                    "bash <<'SH'\n{}SH\n",
+                    repeat_to(
+                        "cd ~/dev/repo && git fetch origin && git status -sb && cd -\n",
+                        16 * 1024
+                    )
+                ),
+            ),
+            (
+                "git add/commit lines 16 KiB",
+                repeat_to("git add f.txt && git commit -m wip\n", 16 * 1024),
+            ),
+            (
+                "fetch/push lines 16 KiB",
+                repeat_to("git fetch origin && git push origin HEAD\n", 16 * 1024),
+            ),
+        ];
+
+        let mut failures = Vec::new();
+        for (label, script) in &scripts {
+            let result = evaluate_command(script, &config, &["git"], &overrides, &allowlists);
+            if !result.is_allowed() {
+                let rule = result.pattern_info.and_then(|p| p.pattern_name);
+                failures.push(format!("{label}: denied as core.git:{rule:?}"));
+            }
+            let with_real = format!("{script}git checkout HEAD -- f.txt\n");
+            let result = evaluate_command(&with_real, &config, &["git"], &overrides, &allowlists);
+            let rule = result.pattern_info.and_then(|p| p.pattern_name);
+            if rule.as_deref() != Some("checkout-ref-discard") {
+                failures.push(format!(
+                    "{label} + `git checkout HEAD -- f.txt`: {rule:?}, want checkout-ref-discard"
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// The lookahead forms these rules replaced, kept as the oracle for "matches exactly
+    /// what it matched" (.agent-config-qv9dy). The texts are the edges of each lookahead
+    /// and the git-option spellings a narrower skipper was measured to miss.
+    #[test]
+    fn test_lookahead_free_rules_match_their_lookahead_forms() {
+        let pack = create_pack();
+        let texts = [
+            "git restore f.txt",
+            "git restore --staged f.txt",
+            "git restore  --staged f.txt",
+            "git restore -S f.txt",
+            "git restore -Sx f.txt",
+            "git restore --staged=x f.txt",
+            "git restore --stagedx f.txt",
+            "git restore -s f.txt",
+            "git restore -- f.txt",
+            "git restore ",
+            "git restore -",
+            "git restore --",
+            "git restore --sta",
+            "git restore --staged",
+            "git restore -S",
+            "git restore -S\n",
+            "git restore --staged\nx",
+            "git restore\t--staged f",
+            "git restore -\n",
+            "git restore\n",
+            "git checkout HEAD -- f",
+            "git checkout -b -- f",
+            "git checkout -b.x -- f",
+            "git checkout -bx -- f",
+            "git checkout -b_x -- f",
+            "git checkout --orphan -- f",
+            "git checkout --orphan=x -- f",
+            "git checkout --orphanx -- f",
+            "git checkout --orp -- f",
+            "git checkout - -- f",
+            "git checkout -- -- f",
+            "git checkout --b -- f",
+            "git checkout  -b -- f",
+            "git checkout --orphan\t-- f",
+            "git push --force",
+            "git push --force-with-lease",
+            "git push --forcex",
+            "git push --force=1",
+            "git push --force\n",
+            "git push --force;",
+            "git push --forceA",
+            "git push origin --force main",
+            r#"git -C "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" push --force origin main"#,
+            "git -C $(cd a && pwd) restore f.txt",
+            r"git -c a.b=x\;y checkout HEAD -- f.txt",
+            "git -c alias.x='a;b' checkout HEAD -- f.txt",
+            "git -C repo \\\n  checkout HEAD -- f.txt",
+        ];
+
+        let mut failures = Vec::new();
+        for (name, before) in [
+            (
+                "checkout-ref-discard",
+                r"git\s+(?:\S+\s+)*checkout\s+(?!-b\b)(?!--orphan\b)[^\s]+\s+--\s+",
+            ),
+            (
+                "restore-worktree",
+                r"git\s+(?:\S+\s+)*restore\s+(?!--staged\b)(?!-S\b)",
+            ),
+            (
+                "push-force-long",
+                r"git\s+(?:\S+\s+)*push\s+[^;&|\n]*--force(?![-a-z])",
+            ),
+        ] {
+            let before = fancy_regex::Regex::new(before).expect("the oracle compiles");
+            let pattern = pack
+                .destructive_patterns
+                .iter()
+                .find(|p| p.name == Some(name))
+                .unwrap_or_else(|| panic!("core.git:{name} is missing"));
+            for text in texts {
+                let want = before
+                    .is_match(text)
+                    .expect("a short text stays under the backtrack limit");
+                if pattern.regex.is_match(text) != want {
+                    failures.push(format!("core.git:{name} on {text:?}: want {want}"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }
