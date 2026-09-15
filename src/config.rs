@@ -400,7 +400,10 @@ pub struct HeredocConfig {
     /// Enable heredoc/inline-script scanning.
     pub enabled: Option<bool>,
 
-    /// Timeout budget for Tier 2 extraction (milliseconds).
+    /// Timeout budget for Tier 2 extraction (milliseconds), for direct callers
+    /// of `heredoc::extract_content`. Command evaluation does not use it: there,
+    /// extraction is bounded by the evaluation deadline, because a shorter
+    /// private clock read its timeout as "no match" (`.agent-config-6cwlr`).
     pub timeout_ms: Option<u64>,
 
     /// Maximum bytes extracted from heredoc bodies.
@@ -431,7 +434,11 @@ pub struct HeredocConfig {
     /// Fail-open when AST parsing fails for embedded code.
     pub fallback_on_parse_error: Option<bool>,
 
-    /// Fail-open when extraction/parsing exceeds the timeout budget.
+    /// What an extraction or AST-matching timeout does. Both are bounded by the
+    /// evaluation deadline, so a timeout means the deadline is spent. `true`
+    /// (the default) leaves it to the budget path, which the hook denies;
+    /// `false` can deny at once with a heredoc-specific reason. Neither reads a
+    /// timeout as "no match".
     pub fallback_on_timeout: Option<bool>,
 
     /// Content-based allowlist for heredocs (patterns, hashes, commands).

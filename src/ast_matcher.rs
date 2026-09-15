@@ -11,25 +11,26 @@
 //!      ▼
 //! ┌─────────────────┐
 //! │   AstMatcher    │ ─── Parse error ──► ALLOW + diagnostic
-//! │   (ast-grep)    │ ─── Timeout ──► ALLOW + diagnostic
+//! │   (ast-grep)    │ ─── Timeout ──► caller's budget path (hook: DENY)
 //! │   <5ms typical  │ ─── No match ──► ALLOW
-//! │   20ms max      │ ─── Match ──► BLOCK
+//! │                 │ ─── Match ──► BLOCK
 //! └─────────────────┘
 //! ```
 //!
 //! # Error Handling
 //!
-//! All errors result in fail-open behavior (ALLOW) with diagnostics:
-//! - Parse errors: Language syntax not recognized
-//! - Timeouts: Pattern matching exceeded time budget
-//! - Unknown language: No grammar available
+//! Parse errors and unknown languages result in fail-open behavior (ALLOW)
+//! with diagnostics. A timeout is different: it means the code was not judged.
+//! The evaluator passes the rest of its deadline as the budget
+//! ([`AstMatcher::find_matches_within`]), so a timeout there is a spent
+//! deadline, which the hook denies (`.agent-config-6cwlr`).
 //!
 //! # Performance
 //!
 //! - Pattern compilation: One-time at startup
 //! - Parse: <2ms for typical heredoc sizes
 //! - Match: <1ms typical
-//! - Hard timeout: 20ms
+//! - Default timeout for [`AstMatcher::find_matches`]: 20ms
 
 use crate::heredoc::ScriptLanguage;
 use ast_grep_core::{AstGrep, Pattern};
@@ -40,7 +41,8 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
-/// Hard timeout for AST operations (20ms as per ADR).
+/// Default timeout for [`AstMatcher::find_matches`] (20ms as per ADR). The hook
+/// evaluator does not use it; it passes its own remaining deadline.
 ///
 /// Tests use a more generous budget because CI/debug builds are slower
 /// than optimised release binaries.
@@ -239,15 +241,34 @@ impl AstMatcher {
     /// - Parse failure
     /// - Timeout
     ///
-    /// All errors are non-fatal; callers should fail-open (allow the command).
-    #[allow(clippy::cast_possible_truncation)] // Timeout values are always small
+    /// A timeout is not "no match": a caller on a blocking path must not read
+    /// it as one (see [`Self::find_matches_within`]).
     pub fn find_matches(
         &self,
         code: &str,
         language: ScriptLanguage,
     ) -> Result<Vec<PatternMatch>, MatchError> {
+        self.find_matches_within(code, language, self.timeout)
+    }
+
+    /// [`Self::find_matches`] under a caller-supplied time budget.
+    ///
+    /// The hook evaluator passes what is left of its own deadline. A timeout
+    /// is "not judged", never "no match", and only the evaluator knows which
+    /// way a guard must fail when it runs out of time (`.agent-config-6cwlr`).
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Self::find_matches`].
+    #[allow(clippy::cast_possible_truncation)] // Only used in the error message
+    pub fn find_matches_within(
+        &self,
+        code: &str,
+        language: ScriptLanguage,
+        timeout: Duration,
+    ) -> Result<Vec<PatternMatch>, MatchError> {
         let start_time = Instant::now();
-        let budget_ms = self.timeout.as_millis() as u64;
+        let budget_ms = timeout.as_millis() as u64;
 
         // Helper to create timeout error
         let timeout_err = |start: Instant| MatchError::Timeout {
@@ -257,7 +278,7 @@ impl AstMatcher {
 
         // Perl is not supported by ast-grep-language; use a conservative regex fallback.
         if language == ScriptLanguage::Perl {
-            return find_matches_perl(code, start_time, self.timeout, budget_ms);
+            return find_matches_perl(code, start_time, timeout, budget_ms);
         }
 
         // Check language support FIRST (before patterns, so we report unsupported properly)
@@ -278,7 +299,7 @@ impl AstMatcher {
         let root = ast.root();
 
         // Check timeout after parsing
-        if start_time.elapsed() > self.timeout {
+        if start_time.elapsed() > timeout {
             return Err(timeout_err(start_time));
         }
 
@@ -287,14 +308,14 @@ impl AstMatcher {
         // Match each pattern
         for compiled in patterns {
             // Check timeout before each pattern
-            if start_time.elapsed() > self.timeout {
+            if start_time.elapsed() > timeout {
                 return Err(timeout_err(start_time));
             }
 
             // Find all matches for this pattern
             for node in root.find_all(&compiled.pattern) {
                 // Check timeout during matching (a single pattern can match many nodes)
-                if start_time.elapsed() > self.timeout {
+                if start_time.elapsed() > timeout {
                     return Err(timeout_err(start_time));
                 }
 
@@ -331,6 +352,7 @@ impl AstMatcher {
     /// Check if any blocking patterns match (convenience method).
     ///
     /// Returns the first blocking match, or None if no blocking patterns match.
+    /// A timeout also returns None, so this is not for a blocking path.
     #[must_use]
     pub fn has_blocking_match(&self, code: &str, language: ScriptLanguage) -> Option<PatternMatch> {
         self.find_matches(code, language)

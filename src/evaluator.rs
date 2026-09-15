@@ -1066,6 +1066,24 @@ fn remaining_below(deadline: Option<&Deadline>, budget: &crate::perf::Budget) ->
     deadline.is_some_and(|d| !d.has_budget_for(budget))
 }
 
+/// The budget for a heredoc step that keeps its own clock: what is left of the
+/// evaluation deadline, or no limit when there is no deadline.
+///
+/// Extraction (`[heredoc] timeout_ms`, 50ms) and the AST matcher (20ms) each
+/// kept a private, shorter clock, and the default `fallback_on_timeout = true`
+/// read a timeout on either as "no match". So a python heredoc ending in a
+/// destructive call was ALLOWED once it was long enough, or the machine busy
+/// enough, to cross that clock. Measured at 19,664 bytes with a 5000ms hook
+/// budget nowhere near spent (`.agent-config-6cwlr`). Bounded by the deadline,
+/// a timeout means the deadline itself has passed, and the hook denies what
+/// it could not finish judging (`deny_unevaluated`).
+#[inline]
+fn sub_step_budget(deadline: Option<&Deadline>) -> std::time::Duration {
+    deadline.map_or(std::time::Duration::MAX, |d| {
+        d.remaining().unwrap_or(std::time::Duration::ZERO)
+    })
+}
+
 fn resolve_project_path(
     heredoc_settings: &crate::config::HeredocSettings,
     project_path: Option<&Path>,
@@ -2134,8 +2152,20 @@ fn evaluate_heredoc(
         }
     }
 
+    // Extraction's clock is the evaluation deadline, not `[heredoc] timeout_ms`
+    // (see `sub_step_budget`). Rounded up to whole milliseconds, so a timeout
+    // still means the deadline has passed.
+    let deadline_bounded_extraction_limits = crate::heredoc::ExtractionLimits {
+        timeout_ms: u64::try_from(
+            sub_step_budget(context.deadline)
+                .as_nanos()
+                .div_ceil(1_000_000),
+        )
+        .unwrap_or(u64::MAX),
+        ..context.heredoc_settings.limits
+    };
     let (contents, fallback_needed) =
-        match extract_content(command, &context.heredoc_settings.limits) {
+        match extract_content(command, &deadline_bounded_extraction_limits) {
             ExtractionResult::Extracted(contents) => (contents, false),
             ExtractionResult::NoContent => return None,
             ExtractionResult::Skipped(reasons) => {
@@ -2393,7 +2423,11 @@ fn evaluate_heredoc(
             }
         }
 
-        let matches = match DEFAULT_MATCHER.find_matches(&content.content, content.language) {
+        let matches = match DEFAULT_MATCHER.find_matches_within(
+            &content.content,
+            content.language,
+            sub_step_budget(context.deadline),
+        ) {
             Ok(matches) => matches,
             Err(err) => {
                 let is_timeout = matches!(err, crate::ast_matcher::MatchError::Timeout { .. });
@@ -2407,17 +2441,17 @@ fn evaluate_heredoc(
                     return Some(EvaluationResult::denied_by_legacy(&reason));
                 }
 
+                // A timeout means the deadline is spent, and the next deadline
+                // check (loop top, or after `evaluate_heredoc`) denies it.
                 continue;
             }
         };
 
+        // No budget check here: the matches are already found, and judging
+        // them costs nothing. Dropping a found rule for a budget denial told
+        // the agent "could not finish evaluating — use allow-once" about a
+        // command dcg had just matched.
         for m in matches {
-            if deadline_exceeded(context.deadline)
-                || remaining_below(context.deadline, &crate::perf::FULL_HEREDOC_PIPELINE)
-            {
-                return Some(EvaluationResult::allowed_due_to_budget());
-            }
-
             if !m.severity.blocks_by_default() {
                 continue;
             }

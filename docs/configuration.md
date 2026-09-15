@@ -132,7 +132,7 @@ Heredoc scanning can be enabled or configured with:
 ```toml
 [heredoc]
 enabled = true
-timeout_ms = 50
+timeout_ms = 50  # ignored by command evaluation, which bounds extraction by its deadline
 max_body_bytes = 1048576
 max_body_lines = 10000
 max_heredocs = 10

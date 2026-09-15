@@ -4555,6 +4555,81 @@ mod fail_closed_tests {
         );
     }
 
+    /// The shape `.agent-config-6cwlr` measured: a python heredoc of `padding`
+    /// harmless call lines, ending in one destructive call. At 400 lines it is
+    /// 19,664 bytes, well under the 64 KiB command limit.
+    fn padded_python_heredoc(padding: usize) -> String {
+        let keyword = format!("{}{}{}", "sh", "util.rmt", "ree");
+        let mut body = vec!["import os, shutil".to_string()];
+        body.extend(
+            (0..padding).map(|_| "os.getcwd(); shutil.copy(a,b); os.path.join(a,b)".into()),
+        );
+        body.push(format!("{keyword}('/srv/data')"));
+        format!("python3 <<'EOF'\n{}\nEOF\n", body.join("\n"))
+    }
+
+    /// An AST matcher that runs out of time has not judged the heredoc, so it
+    /// must not report "no match".
+    ///
+    /// The matcher kept a private 20ms budget and the evaluator read its
+    /// timeout as nothing found. Measured 2026-09-15 on a release build: this
+    /// shape denied at 250 and 300 padding lines and was ALLOWED at 400 and
+    /// 800, 3/3 each, with the hook's own budget at 5000ms and nowhere near
+    /// spent. Given a full budget the matcher must finish and deny on the rule,
+    /// at every size the command limit admits.
+    #[test]
+    fn ast_matcher_timeout_is_not_read_as_no_match() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = write_config(temp.path(), 20_000);
+
+        for padding in [400, 800, 1200] {
+            let command = padded_python_heredoc(padding);
+            assert!(
+                command.len() < 64 * 1024,
+                "{padding} lines exceeds the command limit"
+            );
+            assert_denied_on_the_rule(&command, &config, padding);
+        }
+    }
+
+    /// Extraction kept its own clock as well (`[heredoc] timeout_ms`, 50ms by
+    /// default), and its timeout was read the same way. `timeout_ms = 0` forces
+    /// that path at a size nowhere near any limit: before `.agent-config-6cwlr`
+    /// this ALLOWED, and the cold review measured the shipped 50ms clock letting
+    /// the 58 KB shape through 3/180 under load.
+    #[test]
+    fn extraction_timeout_is_not_read_as_no_match() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = temp.path().join("dcg-config.toml");
+        std::fs::write(
+            &config,
+            "[general]\nhook_timeout_ms = 20000\n\n[heredoc]\ntimeout_ms = 0\n",
+        )
+        .expect("write config");
+
+        assert_denied_on_the_rule(&padded_python_heredoc(50), &config, 50);
+    }
+
+    fn assert_denied_on_the_rule(command: &str, config: &std::path::Path, padding: usize) {
+        let run = run_dcg_hook_with_env(command, &[("DCG_CONFIG", config.as_os_str())]);
+        let stdout = run.stdout_str();
+        assert!(
+            !stdout.trim().is_empty(),
+            "{padding} padding lines ({} bytes) came back ALLOWED (stderr={})",
+            command.len(),
+            run.stderr_str()
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(stdout.trim()).expect("denial must be valid JSON");
+        assert_eq!(
+            json["hookSpecificOutput"]["ruleId"]
+                .as_str()
+                .unwrap_or_default(),
+            "heredoc.python:shutil_rmtree",
+            "{padding} padding lines must deny on the rule itself: {stdout}"
+        );
+    }
+
     /// A command too large to evaluate must be denied, not waved through.
     ///
     /// Measured 2026-09-02 against v0.4.2: an 86300-byte command carrying a

@@ -360,7 +360,7 @@ pub enum Command {
         #[arg(long = "no-heredoc-scan", conflicts_with = "heredoc_scan")]
         no_heredoc_scan: bool,
 
-        /// Timeout budget for heredoc extraction (milliseconds)
+        /// Timeout budget for heredoc extraction (milliseconds); ignored by command evaluation, which bounds extraction by its deadline
         #[arg(long = "heredoc-timeout", value_name = "MS")]
         heredoc_timeout_ms: Option<u64>,
 

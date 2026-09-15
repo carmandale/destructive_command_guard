@@ -369,7 +369,7 @@ Heredoc scanning configuration:
 # Enable scanning for heredocs and inline scripts (python -c, bash -c, etc.).
 enabled = true
 
-# Extraction timeout budget (milliseconds).
+# Extraction timeout budget (milliseconds); ignored by command evaluation, which bounds extraction by its deadline.
 timeout_ms = 50
 
 # Resource limits for extracted bodies.
@@ -898,7 +898,7 @@ dcg test --explain "git reset --hard"
 - `--no-color`: disable ANSI color output
 - `--heredoc-scan`: force-enable heredoc/inline-script scanning
 - `--no-heredoc-scan`: force-disable heredoc/inline-script scanning
-- `--heredoc-timeout <MS>`: override heredoc extraction timeout budget
+- `--heredoc-timeout <MS>`: override heredoc extraction timeout budget (ignored by command evaluation, which bounds extraction by its deadline)
 - `--heredoc-languages <LANG1,LANG2>`: limit heredoc AST scanning languages
 
 #### Output Formats

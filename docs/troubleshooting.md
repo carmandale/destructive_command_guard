@@ -38,7 +38,7 @@ Also verify environment overrides:
 
 For heredoc or large script parsing:
 - Lower `max_body_bytes` or `max_body_lines`.
-- Increase `timeout_ms` if needed.
+- Increase `hook_timeout_ms` if needed. (`[heredoc] timeout_ms` no longer bounds evaluation: extraction and AST matching share the hook deadline.)
 - Ensure `fallback_on_parse_error` is true for hook mode.
 
 ## Performance concerns
