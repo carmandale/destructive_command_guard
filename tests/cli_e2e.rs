@@ -3854,6 +3854,75 @@ reason = "test fixture allowlist entry"
             );
         }
     }
+
+    /// A pack this command can never reach, so the only rules in play are the
+    /// core packs the harness enables and the heredoc AST rules.
+    const INERT_PACK: &str = r#"
+schema_version: 1
+id: custom.inert
+name: Inert Pack
+version: 1.0.0
+keywords:
+  - zzznotinanycommand
+destructive_patterns:
+  - name: never
+    pattern: zzznotinanycommand
+    severity: critical
+    description: never matches anything this test runs
+"#;
+
+    /// Allowlisting one heredoc AST rule used to allow every pack denial sharing
+    /// the command line, so `... && git reset --hard` reached the shell
+    /// (.agent-config-4lazh). Through the hook, end to end.
+    #[test]
+    fn heredoc_allowlist_does_not_allow_a_pack_denial_in_the_same_command() {
+        let allowlist = r#"
+[[allow]]
+rule = "heredoc.python:shutil_rmtree"
+reason = "test fixture allowlist entry"
+"#;
+        let allowlisted = r#"python3 -c "import shutil; shutil.rmtree('/tmp/dcg-probe-x')""#;
+        let with_reset = format!("{allowlisted} && git reset --hard");
+
+        let (_temp, output) =
+            setup_custom_pack_env_with_allowlist(INERT_PACK, Some(allowlist), &with_reset);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+            panic!("{with_reset:?} should produce a hook decision ({e})\nstdout:\n{stdout}")
+        });
+        assert_eq!(
+            json["hookSpecificOutput"]["permissionDecision"], "deny",
+            "an allowlisted heredoc rule must not allow `git reset --hard`\nstdout:\n{stdout}"
+        );
+        assert_eq!(
+            json["hookSpecificOutput"]["ruleId"], "core.git:reset-hard",
+            "the denial names the rule that actually matched\nstdout:\n{stdout}"
+        );
+
+        // Control: the allowlist still does its own job, so the assertions above
+        // cannot be passing because the heredoc entry stopped working entirely.
+        let (_temp, output) =
+            setup_custom_pack_env_with_allowlist(INERT_PACK, Some(allowlist), allowlisted);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.trim().is_empty(),
+            "the allowlisted heredoc rule stays allowed on its own\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+
+        // Control: without the allowlist, that heredoc rule is what blocks it.
+        let (_temp, output) = setup_custom_pack_env_with_allowlist(INERT_PACK, None, allowlisted);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+            panic!(
+                "{allowlisted:?} should be denied without the allowlist ({e})\nstdout:\n{stdout}"
+            )
+        });
+        assert_eq!(
+            json["hookSpecificOutput"]["ruleId"], "heredoc.python:shutil_rmtree",
+            "the fixture only means anything if this rule is the one allowlisted\nstdout:\n{stdout}"
+        );
+    }
 }
 
 // ============================================================================

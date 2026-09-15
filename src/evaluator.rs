@@ -1517,7 +1517,16 @@ fn evaluate_at_path_impl(
         None,
         project_path,
     );
-    if result.allowlist_override.is_none() {
+    // A heredoc allowlist hit explains why an otherwise-clean command is allowed. It must
+    // never convert a pack result that does not allow into an allow: the pack blocked a
+    // DIFFERENT rule, which the user never allowlisted, so one allowlisted heredoc rule
+    // would let every destructive command sharing the line through (.agent-config-4lazh).
+    // `skipped_due_to_budget` is excluded for the same reason: the hook turns a budget
+    // skip into a denial, and relabelling it as an allowlist allow would discard that.
+    if result.allowlist_override.is_none()
+        && result.decision == EvaluationDecision::Allow
+        && !result.skipped_due_to_budget
+    {
         if let Some((matched, layer, reason)) = heredoc_allowlist_hit {
             return EvaluationResult::allowed_by_allowlist(matched, layer, reason);
         }
@@ -2049,7 +2058,16 @@ where
         None,
         None, // project_path: legacy function, path-aware allowlisting unavailable
     );
-    if result.allowlist_override.is_none() {
+    // A heredoc allowlist hit explains why an otherwise-clean command is allowed. It must
+    // never convert a pack result that does not allow into an allow: the pack blocked a
+    // DIFFERENT rule, which the user never allowlisted, so one allowlisted heredoc rule
+    // would let every destructive command sharing the line through (.agent-config-4lazh).
+    // `skipped_due_to_budget` is excluded for the same reason: the hook turns a budget
+    // skip into a denial, and relabelling it as an allowlist allow would discard that.
+    if result.allowlist_override.is_none()
+        && result.decision == EvaluationDecision::Allow
+        && !result.skipped_due_to_budget
+    {
         if let Some((matched, layer, reason)) = heredoc_allowlist_hit {
             return EvaluationResult::allowed_by_allowlist(matched, layer, reason);
         }
@@ -3179,6 +3197,84 @@ mod tests {
             Some("fs_rmsync.catastrophic")
         );
         assert_eq!(override_info.matched.source, MatchSource::HeredocAst);
+    }
+
+    /// A heredoc allowlist entry covers the rule it names, not the whole command
+    /// line. One allowlisted AST rule used to turn every pack denial sharing the
+    /// command into an allow, so `... && git reset --hard` ran unblocked
+    /// (.agent-config-4lazh).
+    ///
+    /// Both evaluate paths carried the defect and are pinned here:
+    /// `evaluate_command` (the hook, scan, explain and MCP body) and
+    /// `evaluate_command_with_legacy`.
+    #[test]
+    fn heredoc_allowlist_does_not_override_a_pack_denial_in_the_same_command() {
+        let config = default_config();
+        let compiled = default_compiled_overrides();
+        let allowlists = project_allowlists_for_rule("heredoc.python:shutil_rmtree", "local dev");
+
+        let allowlisted = "python3 -c \"import shutil; shutil.rmtree('/tmp/dcg-probe-x')\"";
+        let with_reset = format!("{allowlisted} && git reset --hard");
+
+        let safe: [crate::packs::SafePattern; 0] = [];
+        let destructive: [crate::packs::DestructivePattern; 0] = [];
+
+        let via_current =
+            |cmd: &str| evaluate_command(cmd, &config, &["git"], &compiled, &allowlists);
+        let via_legacy = |cmd: &str| {
+            evaluate_command_with_legacy(
+                cmd,
+                &config,
+                &["git"],
+                &compiled,
+                &allowlists,
+                &safe,
+                &destructive,
+            )
+        };
+        let paths: [(&str, &dyn Fn(&str) -> EvaluationResult); 2] = [
+            ("evaluate_command", &via_current),
+            ("evaluate_command_with_legacy", &via_legacy),
+        ];
+
+        for (path, evaluate) in paths {
+            let denied = evaluate(&with_reset);
+            assert!(
+                denied.is_denied(),
+                "{path}: an allowlisted heredoc rule must not allow `git reset --hard`"
+            );
+            let matched = denied
+                .pattern_info
+                .as_ref()
+                .unwrap_or_else(|| panic!("{path}: a denial names the rule it matched"));
+            assert_eq!(matched.pack_id.as_deref(), Some("core.git"), "{path}");
+            assert_eq!(
+                matched.pattern_name.as_deref(),
+                Some("reset-hard"),
+                "{path}"
+            );
+            assert!(
+                denied.allowlist_override.is_none(),
+                "{path}: the denied rule was never allowlisted"
+            );
+
+            // Control: the allowlist still does its own job when nothing else matches,
+            // so the guard above cannot be passing by refusing every allowlist hit.
+            let allowed = evaluate(allowlisted);
+            assert!(
+                allowed.is_allowed(),
+                "{path}: the allowlisted heredoc rule stays allowed on its own"
+            );
+            let override_info = allowed
+                .allowlist_override
+                .as_ref()
+                .unwrap_or_else(|| panic!("{path}: that allow is an allowlist allow"));
+            assert_eq!(
+                override_info.matched.source,
+                MatchSource::HeredocAst,
+                "{path}"
+            );
+        }
     }
 
     #[test]
