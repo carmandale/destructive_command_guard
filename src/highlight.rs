@@ -289,6 +289,50 @@ pub fn format_highlighted_command_multi(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
+    /// Serializes the tests that force `colored`'s process-global color switch.
+    ///
+    /// `colored` decides at `Display` time from one process-wide value
+    /// (`control::SHOULD_COLORIZE`), so every test below that forces color on
+    /// and every neighbour that clears it write the same variable. Run in
+    /// parallel — libtest's default — a neighbour's clear lands between this
+    /// test's force and its assertion, the value falls back to TTY detection
+    /// (false under `cargo test`), and the test reports a red about code that
+    /// was never wrong. Measured at 77 of 100 runs of these four tests at
+    /// `--test-threads=4` (.agent-config-miagk; the same race was seen on
+    /// `test_colorize_command_produces_ansi_codes` and left unowned in
+    /// .agent-config-0kt9v).
+    static COLOR_OVERRIDE: Mutex<()> = Mutex::new(());
+
+    /// Forces color on for one test and restores the default when it ends.
+    ///
+    /// The lock is held for the whole test, so no neighbour can move the switch
+    /// mid-test. `Drop` also runs while unwinding, so a failing assertion still
+    /// restores the default instead of leaving color forced on for the rest of
+    /// the binary.
+    struct ForcedColor {
+        _guard: MutexGuard<'static, ()>,
+    }
+
+    impl ForcedColor {
+        fn on() -> Self {
+            // A failing assertion poisons the lock. The guarded data is `()`, so
+            // there is no broken invariant to protect, and taking the inner
+            // guard is what keeps one real red from cascading into its siblings.
+            let guard = COLOR_OVERRIDE
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            colored::control::set_override(true);
+            Self { _guard: guard }
+        }
+    }
+
+    impl Drop for ForcedColor {
+        fn drop(&mut self) {
+            colored::control::unset_override();
+        }
+    }
 
     #[test]
     fn test_highlight_span_new() {
@@ -731,8 +775,7 @@ mod tests {
 
     #[test]
     fn test_ansi_escapes_present_when_color_enabled() {
-        // Force color on for this test
-        colored::control::set_override(true);
+        let _color = ForcedColor::on();
 
         let cmd = "git reset --hard HEAD";
         let span = HighlightSpan::with_label(0, 16, "Dangerous");
@@ -746,15 +789,11 @@ mod tests {
             result.caret_line.contains(ansi_escape),
             "Caret line should contain ANSI escapes when color is enabled"
         );
-
-        // Reset color override
-        colored::control::unset_override();
     }
 
     #[test]
     fn test_colorize_command_produces_ansi_codes() {
-        // Force color on for this test
-        colored::control::set_override(true);
+        let _color = ForcedColor::on();
 
         let cmd = "git reset --hard";
         let span = WindowedSpan { start: 0, end: 16 };
@@ -766,9 +805,6 @@ mod tests {
             result.contains(ansi_escape),
             "Colorized command should contain ANSI escapes"
         );
-
-        // Reset color override
-        colored::control::unset_override();
     }
 
     #[test]
@@ -783,8 +819,7 @@ mod tests {
 
     #[test]
     fn test_color_for_build_caret_line() {
-        // Force color on for this test
-        colored::control::set_override(true);
+        let _color = ForcedColor::on();
 
         let span = WindowedSpan { start: 3, end: 8 };
         let result = build_caret_line(&span, true);
@@ -793,9 +828,6 @@ mod tests {
         assert!(result.contains('\x1b'));
         // Should still have carets
         assert!(result.contains('^'));
-
-        // Reset color override
-        colored::control::unset_override();
     }
 
     #[test]
@@ -811,8 +843,7 @@ mod tests {
 
     #[test]
     fn test_color_for_build_label_line() {
-        // Force color on for this test
-        colored::control::set_override(true);
+        let _color = ForcedColor::on();
 
         let span = WindowedSpan { start: 5, end: 10 };
         let result = build_label_line(&span, "Test Label", true);
@@ -820,9 +851,6 @@ mod tests {
         // Should contain ANSI codes
         assert!(result.contains('\x1b'));
         assert!(result.contains("Test Label"));
-
-        // Reset color override
-        colored::control::unset_override();
     }
 
     // =========================================================================
