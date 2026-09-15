@@ -204,6 +204,15 @@ pub(crate) fn parse_rm_command(command: &str) -> RmParseDecision {
         return RmParseDecision::NoMatch;
     }
 
+    // EVERY `rm` segment on the line is judged, not just the first one
+    // (.agent-config-6nnw8). Returning the first segment's decision meant a
+    // demonstrably safe leading `rm -rf` under /tmp produced `Allow`, and the
+    // evaluator skips the whole core.filesystem pack on `Allow` -- so a
+    // destructive `rm` appended to a harmless one was permitted while the same
+    // destructive `rm` alone was blocked. A Deny anywhere on the line wins.
+    let mut deny: Option<RmParseMatch> = None;
+    let mut saw_allow = false;
+
     let mut i = 0;
     while i < tokens.len() {
         let current = &tokens[i];
@@ -218,7 +227,21 @@ pub(crate) fn parse_rm_command(command: &str) -> RmParseDecision {
         };
 
         if text == "rm" {
-            return parse_rm_segment(command, &tokens, i + 1);
+            match parse_rm_segment(command, &tokens, i + 1) {
+                RmParseDecision::Deny(hit) => {
+                    // Keep the most serious hit, so a Critical segment behind a
+                    // High one is still reported as Critical -- severity decides
+                    // whether an allowlist may override the denial.
+                    let held_is_critical = deny
+                        .as_ref()
+                        .is_some_and(|held| held.severity == Severity::Critical);
+                    if deny.is_none() || (!held_is_critical && hit.severity == Severity::Critical) {
+                        deny = Some(hit);
+                    }
+                }
+                RmParseDecision::Allow => saw_allow = true,
+                RmParseDecision::NoMatch => {}
+            }
         }
 
         // Skip to the next separator before scanning for another command word.
@@ -226,6 +249,13 @@ pub(crate) fn parse_rm_command(command: &str) -> RmParseDecision {
         while i < tokens.len() && tokens[i].kind != NormalizeTokenKind::Separator {
             i += 1;
         }
+    }
+
+    if let Some(hit) = deny {
+        return RmParseDecision::Deny(hit);
+    }
+    if saw_allow {
+        return RmParseDecision::Allow;
     }
 
     RmParseDecision::NoMatch
