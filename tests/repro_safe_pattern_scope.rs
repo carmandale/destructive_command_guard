@@ -29,7 +29,10 @@ use destructive_command_guard::packs::REGISTRY;
 /// Evaluate with `core` + `remote` enabled, the shape this machine actually runs.
 fn is_denied(command: &str) -> bool {
     let config = Config::default();
-    let enabled: HashSet<String> = ["core", "remote"].iter().map(|s| (*s).to_string()).collect();
+    let enabled: HashSet<String> = ["core", "remote"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
     let keywords = REGISTRY.collect_enabled_keywords(&enabled);
     let ordered = REGISTRY.expand_enabled_ordered(&enabled);
     let index = REGISTRY

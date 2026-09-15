@@ -28,11 +28,20 @@ fn create_safe_patterns() -> Vec<SafePattern> {
         // Version/help
         safe_pattern!("scp-help", r"scp\b[^;&|\n]*\s--?h(elp)?\b"),
         // Downloading from remote (remote:path first, local second)
-        safe_pattern!("scp-download", r"scp\b[^;&|\n]*\s(?:\S+@)?\S+:\S+\s+\.\S*\s*$"),
+        safe_pattern!(
+            "scp-download",
+            r"scp\b[^;&|\n]*\s(?:\S+@)?\S+:\S+\s+\.\S*\s*$"
+        ),
         // Copy to home directory
-        safe_pattern!("scp-to-home", r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?~/\S+\s*$"),
+        safe_pattern!(
+            "scp-to-home",
+            r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?~/\S+\s*$"
+        ),
         // Copy to /tmp
-        safe_pattern!("scp-to-tmp", r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/tmp/\S*\s*$"),
+        safe_pattern!(
+            "scp-to-tmp",
+            r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/tmp/\S*\s*$"
+        ),
         // Copy to /var/tmp (safe scratch space under /var)
         safe_pattern!(
             "scp-to-var-tmp",
