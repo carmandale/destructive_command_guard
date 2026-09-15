@@ -549,13 +549,24 @@ pub fn format_denial_message(
             format!("If this is a false positive: dcg allow-once {code}\n\n")
         });
 
+    // The command appears ONCE, inside the `Tip:` line. It used to appear twice —
+    // here and in a bare `Command: {command}` line — so this string grew as
+    // 2*len(command) + K. A PreToolUse decision is replayed in the agent
+    // transcript on every later turn of that session, so the second echo was
+    // paid per turn and carried no information the caller lacked: it just wrote
+    // the command. Measured over a 38-day corpus (569 blocks) that echo was
+    // ~29% of dcg's whole transcript cost. Keeping the `Tip:` copy rather than
+    // the bare `Command:` line preserves the one form that is also runnable.
+    // Upstream made the same choice in 44f4d43 (Dicklesworthstone#299); this
+    // fork predates that commit, so it is applied here in the same shape to
+    // keep the two trees rebasable. Guarded by
+    // `denial_message_echoes_command_once`.
     format!(
         "BLOCKED by dcg\n\n\
          {explain_hint}\n\n\
          Reason: {reason}\n\n\
          {explanation_block}\n\n\
          {rule_line}\
-         Command: {command}\n\n\
          {allow_once_line}\
          If this operation is truly needed, ask the user for explicit \
          permission and have them run the command manually."
@@ -1268,6 +1279,42 @@ mod tests {
         assert!(message.contains("Explanation: This is irreversible."));
         assert!(message.contains("Rule: core.git:reset-hard"));
         assert!(message.contains("Tip: dcg explain"));
+    }
+
+    /// The blocked command appears exactly ONCE in the text an agent reads.
+    ///
+    /// `permissionDecisionReason` is replayed into the transcript on every later
+    /// turn of that session, so a second echo is paid per turn forever. It used
+    /// to appear twice — the `Tip:` line and a bare `Command:` line — making the
+    /// message 2*len(command) + K. The marker is a string no other part of the
+    /// message can produce, so a count of 1 is a real count and not a substring
+    /// coincidence, and the `\nCommand: ` assertion names the exact line that
+    /// must not come back.
+    #[test]
+    fn denial_message_echoes_command_once() {
+        let command = "git reset --hard UNIQUEMARKER7f3a";
+        let message = format_denial_message(
+            command,
+            "destructive",
+            Some("This is irreversible."),
+            Some("core.git"),
+            Some("reset-hard"),
+            Some("35836"),
+        );
+
+        assert_eq!(
+            message.matches("UNIQUEMARKER7f3a").count(),
+            1,
+            "the command must be echoed exactly once, got:\n{message}"
+        );
+        assert!(
+            message.contains("Tip: dcg explain"),
+            "the one surviving echo is the runnable Tip: line, got:\n{message}"
+        );
+        assert!(
+            !message.contains("\nCommand: "),
+            "the bare Command: echo is redundant with the Tip: line, got:\n{message}"
+        );
     }
 
     /// The denial text an agent reads must name the escape hatch.
