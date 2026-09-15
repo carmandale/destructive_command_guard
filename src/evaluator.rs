@@ -1630,6 +1630,13 @@ fn evaluate_packs_with_allowlists(
     // The rm_parse optimization for core.filesystem is handled inline.
     let mut first_allowlist_hit: Option<(PatternMatch, AllowlistLayer, String)> = None;
     let mut gave_up: Option<(&str, &crate::packs::DestructivePattern)> = None;
+    // A real match on a rule that only warns or logs is held, not returned: the
+    // first destructive match used to decide the whole command, so putting a
+    // Medium rule in front of a Critical one downgraded it -- `git stash drop &&
+    // git stash clear` warned and ran, while `git stash clear` alone was denied
+    // (.agent-config-3ktl8). Scanning continues so a rule that blocks can still
+    // be found; this is returned only when none was.
+    let mut pending_non_blocking: Option<EvaluationResult> = None;
 
     for &(pack_id, pack) in &candidate_packs {
         if deadline_exceeded(deadline) || remaining_below(deadline, &crate::perf::PATTERN_MATCH) {
@@ -1836,8 +1843,8 @@ fn evaluate_packs_with_allowlists(
                     continue;
                 }
 
-                if let Some(mapped_span) = mapped_span {
-                    return EvaluationResult::denied_by_pack_pattern_with_span(
+                let decision = if let Some(mapped_span) = mapped_span {
+                    EvaluationResult::denied_by_pack_pattern_with_span(
                         pack_id,
                         pattern_name,
                         reason,
@@ -1846,17 +1853,28 @@ fn evaluate_packs_with_allowlists(
                         pattern.suggestions,
                         original_command,
                         mapped_span,
-                    );
+                    )
+                } else {
+                    EvaluationResult::denied_by_pack_pattern(
+                        pack_id,
+                        pattern_name,
+                        reason,
+                        pattern.explanation,
+                        pattern.severity,
+                        pattern.suggestions,
+                    )
+                };
+
+                if pattern.severity.blocks_by_default() {
+                    return decision;
                 }
 
-                return EvaluationResult::denied_by_pack_pattern(
-                    pack_id,
-                    pattern_name,
-                    reason,
-                    pattern.explanation,
-                    pattern.severity,
-                    pattern.suggestions,
-                );
+                // Keep the first warn/log match to report if nothing blocks, and
+                // carry on looking for a rule that does.
+                if pending_non_blocking.is_none() {
+                    pending_non_blocking = Some(decision);
+                }
+                continue;
             }
 
             if let Some(mapped_span) = mapped_span {
@@ -1877,6 +1895,11 @@ fn evaluate_packs_with_allowlists(
     // as what it is rather than as the rule's finding (.agent-config-ryyfo).
     if let Some((pack_id, pattern)) = gave_up {
         return denied_because_search_gave_up(pack_id, pattern);
+    }
+
+    // Nothing blocked, so the warn/log match held above is the answer after all.
+    if let Some(decision) = pending_non_blocking {
+        return decision;
     }
 
     if let Some((matched, layer, reason)) = first_allowlist_hit {

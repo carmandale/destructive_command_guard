@@ -384,3 +384,93 @@ fn test_hook_output_remediation_safe_alternative() {
         }
     }
 }
+
+/// The first destructive match used to decide the whole command, so a
+/// warn-only rule in front of a blocking one downgraded it: `git stash clear`
+/// alone was denied, but `git stash drop && git stash clear` was allowed with a
+/// warning, because core.git lists stash-drop (Medium) before stash-clear
+/// (Critical). The evaluator now holds a warn/log match and keeps scanning, so
+/// the rule that blocks is the rule that decides (.agent-config-3ktl8).
+#[test]
+fn test_warn_rule_in_front_does_not_downgrade_a_blocking_rule() {
+    let (stdout, stderr, exit_code) = run_hook_mode("git stash drop && git stash clear");
+
+    assert_eq!(
+        exit_code, 0,
+        "hook mode should exit 0 even on deny\nstderr: {stderr}"
+    );
+    assert!(
+        !stdout.is_empty(),
+        "a blocking rule anywhere in the command must produce hook JSON, \
+         not a bare stderr warning\nstderr: {stderr}"
+    );
+
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("hook output should be valid JSON");
+    let hook_output = &json["hookSpecificOutput"];
+
+    assert!(
+        hook_output.get("permissionDecision").is_some(),
+        "permissionDecision field required in output\nstdout: {stdout}"
+    );
+    assert_eq!(
+        hook_output["permissionDecision"], "deny",
+        "the Critical stash-clear must decide, not the Medium stash-drop in \
+         front of it\nstdout: {stdout}"
+    );
+    assert!(
+        hook_output.get("ruleId").is_some(),
+        "ruleId field required in output\nstdout: {stdout}"
+    );
+    assert_eq!(
+        hook_output["ruleId"], "core.git:stash-clear",
+        "the denial must name the rule that blocks\nstdout: {stdout}"
+    );
+}
+
+/// Control for the test above: the same blocking rule on its own. If this ever
+/// stops denying, the test above is passing for the wrong reason.
+#[test]
+fn test_blocking_stash_rule_alone_still_denies() {
+    let (stdout, stderr, _exit_code) = run_hook_mode("git stash clear");
+
+    assert!(
+        !stdout.is_empty(),
+        "git stash clear must produce hook JSON\nstderr: {stderr}"
+    );
+
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("hook output should be valid JSON");
+    let hook_output = &json["hookSpecificOutput"];
+
+    assert_eq!(hook_output["permissionDecision"], "deny");
+    assert_eq!(hook_output["ruleId"], "core.git:stash-clear");
+}
+
+/// Second control: the warn-only rule on its own must still be allowed. Denying
+/// every Medium match would make the test above pass while breaking the policy
+/// layer it is supposed to leave alone.
+#[test]
+fn test_warn_only_stash_rule_alone_is_still_allowed() {
+    let (stdout, stderr, exit_code) = run_hook_mode("git stash drop stash@{0}");
+
+    assert_eq!(
+        exit_code, 0,
+        "a warn-only match exits 0\nstderr: {stderr}\nstdout: {stdout}"
+    );
+
+    if stdout.is_empty() {
+        assert!(
+            stderr.contains("stash"),
+            "a warn-only match warns on stderr about the rule it matched\n\
+             stderr: {stderr}"
+        );
+    } else {
+        let json: serde_json::Value =
+            serde_json::from_str(&stdout).expect("hook output should be valid JSON");
+        assert_ne!(
+            json["hookSpecificOutput"]["permissionDecision"], "deny",
+            "git stash drop is Medium and must not be denied\nstdout: {stdout}"
+        );
+    }
+}
