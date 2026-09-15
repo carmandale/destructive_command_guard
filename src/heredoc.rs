@@ -1141,7 +1141,14 @@ pub fn extract_content(command: &str, limits: &ExtractionLimits) -> ExtractionRe
         return if extracted.is_empty() {
             ExtractionResult::Skipped(skip_reasons)
         } else {
-            ExtractionResult::Extracted(extracted)
+            // Content was extracted AND content went unread. Reporting only the
+            // extracted half tells the evaluator the command was fully judged,
+            // which is how unread content reaches a shell unjudged
+            // (`.agent-config-1227x`).
+            ExtractionResult::Partial {
+                extracted,
+                skipped: skip_reasons,
+            }
         };
     }
 
@@ -1158,7 +1165,14 @@ pub fn extract_content(command: &str, limits: &ExtractionLimits) -> ExtractionRe
         return if extracted.is_empty() {
             ExtractionResult::Skipped(skip_reasons)
         } else {
-            ExtractionResult::Extracted(extracted)
+            // Content was extracted AND content went unread. Reporting only the
+            // extracted half tells the evaluator the command was fully judged,
+            // which is how unread content reaches a shell unjudged
+            // (`.agent-config-1227x`).
+            ExtractionResult::Partial {
+                extracted,
+                skipped: skip_reasons,
+            }
         };
     }
 
@@ -1196,16 +1210,50 @@ pub fn extract_content(command: &str, limits: &ExtractionLimits) -> ExtractionRe
             ExtractionResult::Extracted(extracted)
         }
         (false, false) => {
-            // Partial extraction with some skips - return what we got
-            debug!(
+            // Some content was extracted and some was NOT. `Extracted` claims the
+            // whole command was judged, so every skip reason -- a count limit, a
+            // size limit, a timeout -- was silently discarded here and the unread
+            // content reached the shell with no check at all. Ten
+            // `python3 -c 'print(1)';` calls ahead of a `shutil.rmtree` heredoc
+            // were ALLOWED by exactly this line (`.agent-config-1227x`).
+            warn!(
                 elapsed_us,
                 count = extracted.len(),
                 skip_count = skip_reasons.len(),
                 "tier2_complete: partial extraction with skips"
             );
-            ExtractionResult::Extracted(extracted)
+            ExtractionResult::Partial {
+                extracted,
+                skipped: skip_reasons,
+            }
         }
     }
+}
+
+/// Record that the extraction cap stopped us, at most once.
+///
+/// Every extractor bails the moment `extracted` is full, and two of the three
+/// used to bail SILENTLY -- `// Already hit limit, don't add another skip
+/// reason` -- on the reasoning that whoever filled the cap had already recorded
+/// it. Nobody necessarily had. A pass only records the cap when it is the one
+/// that runs INTO it; a pass that fills the last slot exactly ends its loop
+/// normally and records nothing. Ten `python3 -c` scripts do exactly that, so
+/// the heredoc behind them was dropped with no reason attached, extraction
+/// reported a clean `Extracted`, and a `shutil.rmtree` reached the shell
+/// unjudged (`.agent-config-1227x`).
+///
+/// The cap is one fact about one extraction, so callers record it freely and
+/// the de-duplication lives here rather than in six call sites.
+fn record_heredoc_limit(limits: &ExtractionLimits, skip_reasons: &mut Vec<SkipReason>) {
+    if skip_reasons
+        .iter()
+        .any(|r| matches!(r, SkipReason::ExceededHeredocLimit { .. }))
+    {
+        return;
+    }
+    skip_reasons.push(SkipReason::ExceededHeredocLimit {
+        limit: limits.max_heredocs,
+    });
 }
 
 /// Extract inline scripts from -c/-e flags.
@@ -1221,9 +1269,7 @@ fn extract_inline_scripts(
         return;
     }
     if extracted.len() >= limits.max_heredocs {
-        skip_reasons.push(SkipReason::ExceededHeredocLimit {
-            limit: limits.max_heredocs,
-        });
+        record_heredoc_limit(limits, skip_reasons);
         return;
     }
 
@@ -1293,9 +1339,7 @@ fn extract_inline_scripts(
     extract_from_pattern(&INLINE_SCRIPT_DOUBLE_QUOTE);
 
     if hit_limit {
-        skip_reasons.push(SkipReason::ExceededHeredocLimit {
-            limit: limits.max_heredocs,
-        });
+        record_heredoc_limit(limits, skip_reasons);
     }
 }
 
@@ -1312,7 +1356,8 @@ fn extract_herestrings(
         return;
     }
     if extracted.len() >= limits.max_heredocs {
-        return; // Already hit limit, don't add another skip reason
+        record_heredoc_limit(limits, skip_reasons);
+        return;
     }
 
     let mut hit_limit = false;
@@ -1361,9 +1406,7 @@ fn extract_herestrings(
     extract_quoted(&HERESTRING_UNQUOTED, false);
 
     if hit_limit {
-        skip_reasons.push(SkipReason::ExceededHeredocLimit {
-            limit: limits.max_heredocs,
-        });
+        record_heredoc_limit(limits, skip_reasons);
     }
 }
 
@@ -1380,7 +1423,8 @@ fn extract_heredocs(
         return;
     }
     if extracted.len() >= limits.max_heredocs {
-        return; // Already hit limit
+        record_heredoc_limit(limits, skip_reasons);
+        return;
     }
 
     let mut hit_limit = false;
@@ -1391,6 +1435,23 @@ fn extract_heredocs(
         if extracted.len() >= limits.max_heredocs {
             hit_limit = true;
             break;
+        }
+
+        // `<<<` CONTAINS `<<`, so this regex matches at offset 1 of every
+        // here-string and invents a heredoc whose delimiter is the here-string's
+        // payload -- which then goes unterminated, because a here-string has no
+        // terminator line. `extract_herestrings` already extracted and judged
+        // that content, so the phantom is not unread content; it is the same
+        // content, mis-seen.
+        //
+        // Harmless while skip reasons were being discarded. Once they are
+        // reported, a phantom `UnterminatedHeredoc` makes a fully judged command
+        // look partially read, and the golden false-positive row
+        // `cat <<<"<a recursive delete of a home path>"` -- DATA, quoted into a
+        // here-string -- denies (`.agent-config-1227x`).
+        let match_start = cap.get(0).map_or(0, |m| m.start());
+        if match_start > 0 && command.as_bytes()[match_start - 1] == b'<' {
+            continue;
         }
 
         let operator_variant = cap.get(1).map(|m| m.as_str());
@@ -1458,9 +1519,7 @@ fn extract_heredocs(
     }
 
     if hit_limit {
-        skip_reasons.push(SkipReason::ExceededHeredocLimit {
-            limit: limits.max_heredocs,
-        });
+        record_heredoc_limit(limits, skip_reasons);
     }
 }
 
@@ -3535,6 +3594,23 @@ mod tests {
     #[allow(unused_imports)]
     use proptest::prelude::*;
 
+    /// The extracted half of a result, whatever shape it came back in.
+    ///
+    /// `extract_content` reports `Partial` when it read some content AND
+    /// skipped some. Matching on `Extracted` alone therefore stops asserting the
+    /// moment a command has any skip reason -- silently, where the `if let` has
+    /// no `else`. That is how a guard test goes vacuous (`.agent-config-1227x`).
+    fn extracted_contents(result: ExtractionResult) -> Option<Vec<ExtractedContent>> {
+        match result {
+            ExtractionResult::Extracted(contents)
+            | ExtractionResult::Partial {
+                extracted: contents,
+                ..
+            } => Some(contents),
+            _ => None,
+        }
+    }
+
     // ========================================================================
     // Tier 1: Trigger Detection Tests
     // ========================================================================
@@ -3900,13 +3976,10 @@ mod tests {
         #[test]
         fn extracts_here_string() {
             let result = extract_content("cat <<< 'hello world'", &ExtractionLimits::default());
-            if let ExtractionResult::Extracted(contents) = result {
-                assert_eq!(contents.len(), 1);
-                assert_eq!(contents[0].content, "hello world");
-                assert_eq!(contents[0].heredoc_type, Some(HeredocType::HereString));
-            } else {
-                panic!("Expected Extracted result");
-            }
+            let contents = extracted_contents(result).expect("expected extracted content");
+            assert_eq!(contents.len(), 1);
+            assert_eq!(contents[0].content, "hello world");
+            assert_eq!(contents[0].heredoc_type, Some(HeredocType::HereString));
         }
 
         #[test]
@@ -4115,26 +4188,20 @@ mod tests {
                 r#"cat <<< 'hello "world" test'"#,
                 &ExtractionLimits::default(),
             );
-            if let ExtractionResult::Extracted(contents) = result {
-                assert_eq!(contents.len(), 1);
-                assert_eq!(contents[0].content, r#"hello "world" test"#);
-                assert!(contents[0].quoted);
-            } else {
-                panic!("Expected Extracted result");
-            }
+            let contents = extracted_contents(result).expect("expected extracted content");
+            assert_eq!(contents.len(), 1);
+            assert_eq!(contents[0].content, r#"hello "world" test"#);
+            assert!(contents[0].quoted);
 
             // Here-string with single quotes inside double quotes
             let result = extract_content(
                 r#"cat <<< "hello 'world' test""#,
                 &ExtractionLimits::default(),
             );
-            if let ExtractionResult::Extracted(contents) = result {
-                assert_eq!(contents.len(), 1);
-                assert_eq!(contents[0].content, "hello 'world' test");
-                assert!(contents[0].quoted);
-            } else {
-                panic!("Expected Extracted result");
-            }
+            let contents = extracted_contents(result).expect("expected extracted content");
+            assert_eq!(contents.len(), 1);
+            assert_eq!(contents[0].content, "hello 'world' test");
+            assert!(contents[0].quoted);
         }
 
         #[test]
@@ -4629,17 +4696,30 @@ mod tests {
 
         #[test]
         fn enforces_heredoc_limit() {
-            // Create a command with many heredocs
-            let cmd = "cmd1 << A\na\nA && cmd2 << B\nb\nB && cmd3 << C\nc\nC";
+            // Three heredocs, each terminated on its OWN line.
+            //
+            // The previous fixture chained them with `&&` on the terminator
+            // lines, which yields one extraction plus two UnterminatedHeredoc
+            // reasons -- it never reached a cap of 2, so this test had never
+            // exercised the limit it is named for (`.agent-config-1227x`).
+            let cmd = "cat << A\na\nA\ncat << B\nb\nB\ncat << C\nc\nC";
             let limits = ExtractionLimits {
                 max_heredocs: 2, // Only allow 2
                 ..Default::default()
             };
             let result = extract_content(cmd, &limits);
-            if let ExtractionResult::Extracted(contents) = result {
-                assert!(contents.len() <= limits.max_heredocs);
-            }
-            // Otherwise, skip result is also acceptable
+            // Was `if let ... { }` with no else and "skip result is also
+            // acceptable", which asserted nothing the moment the shape changed.
+            let ExtractionResult::Partial { extracted, skipped } = result else {
+                panic!("three heredocs against a cap of two must report Partial: {result:?}");
+            };
+            assert!(extracted.len() <= limits.max_heredocs);
+            assert!(
+                skipped
+                    .iter()
+                    .any(|r| matches!(r, SkipReason::ExceededHeredocLimit { .. })),
+                "the cap is what stopped it, so it must be named: {skipped:?}"
+            );
         }
 
         #[test]
@@ -5004,7 +5084,9 @@ fi"#;
             };
 
             let extracted = extract_content(&cmd, &limits);
-            if let ExtractionResult::Extracted(contents) = extracted {
+            // Partial counts too: content that WAS extracted is content tier 1
+            // must have triggered on, whatever else got skipped alongside it.
+            if let Some(contents) = extracted_contents(extracted) {
                 if !contents.is_empty() {
                     prop_assert_eq!(
                         check_triggers(&cmd),

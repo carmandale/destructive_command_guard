@@ -30,4 +30,15 @@ fn main() {
     if let Err(e) = emitter.emit() {
         eprintln!("cargo:warning=vergen emit failed: {e}");
     }
+
+    // vergen narrows cargo's rerun set to build.rs plus VERGEN_IDEMPOTENT and
+    // SOURCE_DATE_EPOCH, so editing src/ recompiles the binary WITHOUT re-running
+    // this script: VERGEN_BUILD_TIMESTAMP stays frozen at whenever build.rs last
+    // ran, and `dcg --version` reports a build date older than the binary it is
+    // describing. Freshness after installing a fix is the one question --version
+    // exists to answer, so widen the watch set back over the crate's own inputs.
+    // (.agent-config-9gf4e)
+    println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-changed=Cargo.toml");
+    println!("cargo:rerun-if-changed=Cargo.lock");
 }

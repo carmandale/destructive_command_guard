@@ -2195,12 +2195,15 @@ fn evaluate_heredoc(
                     return Some(EvaluationResult::denied_by_legacy(&reason));
                 }
 
-                // Fallback check: if skipped due to size limits, perform a rudimentary
-                // substring check for critical patterns that would otherwise be missed.
-                if reasons
-                    .iter()
-                    .any(|r| matches!(r, SkipReason::ExceededSizeLimit { .. }))
-                {
+                // Fallback check: content went unread, so run the rudimentary
+                // substring check for critical patterns over the raw command.
+                //
+                // Keyed on "anything was skipped", never on a list of reasons.
+                // This previously named only `ExceededSizeLimit`, so a count
+                // limit, a line limit or binary content skipped the check that
+                // exists for precisely this case, and a new `SkipReason` variant
+                // would have been missed the same way (`.agent-config-1227x`).
+                if !reasons.is_empty() {
                     if let Some(blocked) = check_fallback_patterns(command) {
                         return Some(blocked);
                     }
@@ -2236,11 +2239,10 @@ fn evaluate_heredoc(
                     return Some(EvaluationResult::denied_by_legacy(&reason));
                 }
 
-                // We have partial content. Analyze what we extracted first (high fidelity).
-                // Then if no block, run fallback checks on the whole command if size limit was exceeded.
-                let fallback_needed = skipped
-                    .iter()
-                    .any(|r| matches!(r, SkipReason::ExceededSizeLimit { .. }));
+                // We have partial content. Analyze what we extracted first (high
+                // fidelity). Then, because the rest went UNREAD, run the fallback
+                // check over the whole raw command -- whatever the reason was.
+                let fallback_needed = !skipped.is_empty();
 
                 (extracted, fallback_needed)
             }
@@ -2534,15 +2536,25 @@ fn check_fallback_patterns(command: &str) -> Option<EvaluationResult> {
         .expect("fallback patterns must compile")
     });
 
-    // Sanitize the command first to mask comments and safe arguments (e.g. commit messages).
-    // This prevents false positives where a destructive command is mentioned in a comment
-    // inside a large heredoc.
-    let sanitized = sanitize_for_pattern_matching(command);
+    // Mask INERT heredoc bodies first. This check reads the raw command, so
+    // without it a `cat >> notes.md <<'EOF'` body that merely MENTIONS a
+    // destructive command matches and denies -- documentation text judged as
+    // code, the exact false positive spec 333 exists to prevent. Measured
+    // 2026-09-15: widening this check's trigger without masking moved two real
+    // `expected_verdict: allow` rows of `heredoc-blocks.jsonl` to DENY
+    // (6282e467884ba582, 11ddfc7847fefd14), both prose in a `cat` body.
+    //
+    // Scoped by INERTNESS, like every other reader in this pipeline: a
+    // `python3 <<'PY'` body really does reach an interpreter, stays visible
+    // here, and still denies (`.agent-config-1227x`).
+    let masked = crate::heredoc::mask_non_executing_heredocs(command);
+    // Then sanitize to mask comments and safe arguments (e.g. commit messages).
+    let sanitized = sanitize_for_pattern_matching(masked.as_ref());
     let check_target = sanitized.as_ref();
 
     if FALLBACK_PATTERNS.is_match(check_target) {
         return Some(EvaluationResult::denied_by_legacy(
-            "Oversized command contains destructive pattern (fallback check)",
+            "Unjudged command content contains destructive pattern (fallback check)",
         ));
     }
 

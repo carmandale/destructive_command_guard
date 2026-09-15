@@ -256,6 +256,44 @@ fn install_history_shutdown_handler(
 // NOTE: Denial output functions (format_denial_message, print_colorful_warning, deny)
 // are now in the hook module. Use hook::output_denial() for all denial responses.
 
+/// Inner width of the version box border, in columns between the two `│`.
+const VERSION_BOX_WIDTH: usize = 41;
+
+/// Print one `│  Label: value  │` row of the version box, padded so the box closes.
+///
+/// The pad is measured on the uncolored strings: the ANSI codes the `colored`
+/// calls add occupy no columns, so padding after coloring would count them.
+fn print_version_row(label: &str, value: &str) {
+    let pad = VERSION_BOX_WIDTH.saturating_sub(2 + label.len() + 1 + value.len());
+    eprintln!(
+        "  {}  {} {}{}{}",
+        "│".bright_black(),
+        label.bright_black(),
+        value.white(),
+        " ".repeat(pad),
+        "│".bright_black()
+    );
+}
+
+/// Render vergen's RFC3339 build timestamp as `YYYY-MM-DD HH:MM:SSZ`.
+///
+/// The time of day is load-bearing, not decoration: two builds on the same day
+/// are the normal case when someone is testing a fix, so a date alone cannot
+/// distinguish the binary they just built from the one they replaced.
+fn format_build_timestamp(ts: &str) -> String {
+    match ts.split_once('T') {
+        Some((date, time)) => {
+            let seconds = time
+                .split('.')
+                .next()
+                .unwrap_or(time)
+                .trim_end_matches('Z');
+            format!("{date} {seconds}Z")
+        }
+        None => ts.to_string(),
+    }
+}
+
 /// Print version information and exit.
 fn print_version() {
     // ASCII art logo - compact shield design
@@ -284,33 +322,13 @@ fn print_version() {
 
     // Build info
     if let Some(ts) = BUILD_TIMESTAMP {
-        // Extract just the date part for cleaner display
-        let date = ts.split('T').next().unwrap_or(ts);
-        eprintln!(
-            "  {}  {} {}                   {}",
-            "│".bright_black(),
-            "Built:".bright_black(),
-            date.white(),
-            "│".bright_black()
-        );
+        print_version_row("Built:", &format_build_timestamp(ts));
     }
     if let Some(rustc) = RUSTC_SEMVER {
-        eprintln!(
-            "  {}  {} {}                      {}",
-            "│".bright_black(),
-            "Rustc:".bright_black(),
-            rustc.white(),
-            "│".bright_black()
-        );
+        print_version_row("Rustc:", rustc);
     }
     if let Some(target) = CARGO_TARGET {
-        eprintln!(
-            "  {}  {} {}         {}",
-            "│".bright_black(),
-            "Target:".bright_black(),
-            target.white(),
-            "│".bright_black()
-        );
+        print_version_row("Target:", target);
     }
 
     eprintln!(
