@@ -26,28 +26,42 @@ pub fn create_pack() -> Pack {
 }
 
 fn create_safe_patterns() -> Vec<SafePattern> {
+    // The skipper between `git` and the safe subcommand walks only its OWN
+    // command: `[^\s;&|]` stops at a separator and at a newline, `[^\S\n]`
+    // gaps stop at a newline. With `(?:\S+\s+)*` and `\s+` gaps the leftmost
+    // match started at the FIRST `git` on the line and ran through `&&` to the
+    // safe subcommand, so the span covered a destructive git command in front
+    // of it and the start-inside-span rule exempted that command: `git push
+    // --force origin main && git checkout -b feat` was allowed
+    // (.agent-config-t17jx, the safe-side half of .agent-config-it2wk).
     vec![
         // Branch creation is safe
-        safe_pattern!("checkout-new-branch", r"git\s+(?:\S+\s+)*checkout\s+-b\s+"),
+        safe_pattern!(
+            "checkout-new-branch",
+            r"git[^\S\n]+(?:[^\s;&|]+[^\S\n]+)*checkout\s+-b\s+"
+        ),
         safe_pattern!(
             "checkout-orphan",
-            r"git\s+(?:\S+\s+)*checkout\s+--orphan\s+"
+            r"git[^\S\n]+(?:[^\s;&|]+[^\S\n]+)*checkout\s+--orphan\s+"
         ),
         // restore --staged only affects index, not working tree
         safe_pattern!(
             "restore-staged-long",
-            r"git\s+(?:\S+\s+)*restore\s+--staged\s+(?!.*--worktree)(?!.*-W\b)"
+            r"git[^\S\n]+(?:[^\s;&|]+[^\S\n]+)*restore\s+--staged\s+(?!.*--worktree)(?!.*-W\b)"
         ),
         safe_pattern!(
             "restore-staged-short",
-            r"git\s+(?:\S+\s+)*restore\s+-S\s+(?!.*--worktree)(?!.*-W\b)"
+            r"git[^\S\n]+(?:[^\s;&|]+[^\S\n]+)*restore\s+-S\s+(?!.*--worktree)(?!.*-W\b)"
         ),
         // clean dry-run just previews, doesn't delete
         safe_pattern!(
             "clean-dry-run-short",
-            r"git\s+(?:\S+\s+)*clean\s+-[a-z]*n[a-z]*"
+            r"git[^\S\n]+(?:[^\s;&|]+[^\S\n]+)*clean\s+-[a-z]*n[a-z]*"
         ),
-        safe_pattern!("clean-dry-run-long", r"git\s+(?:\S+\s+)*clean\s+--dry-run"),
+        safe_pattern!(
+            "clean-dry-run-long",
+            r"git[^\S\n]+(?:[^\s;&|]+[^\S\n]+)*clean\s+--dry-run"
+        ),
     ]
 }
 

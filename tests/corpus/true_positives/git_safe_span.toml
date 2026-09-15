@@ -1,0 +1,37 @@
+# True positives: a safe git command after a separator must not exempt the
+# destructive git command in front of it (.agent-config-t17jx).
+#
+# The core.git safe patterns opened with `git\s+(?:\S+\s+)*`, whose leftmost
+# match started at the first `git` on the line and ran through the separator to
+# the safe subcommand. The span covered the destructive command, and the
+# start-inside-span rule (.agent-config-it2wk) exempted it.
+
+[[case]]
+description = "force push is not exempted by a later checkout -b"
+command = "git push --force origin main && git checkout -b feat"
+expected = "deny"
+rule_id = "core.git:push-force-long"
+
+[[case]]
+description = "force push is not exempted by a later checkout -b after a semicolon"
+command = "git push --force origin main ; git checkout -b feat"
+expected = "deny"
+rule_id = "core.git:push-force-long"
+
+[[case]]
+description = "force push is not exempted by a later checkout --orphan"
+command = "git push --force origin main || git checkout --orphan gh-pages"
+expected = "deny"
+rule_id = "core.git:push-force-long"
+
+[[case]]
+description = "force push is not exempted by a checkout -b on the next line"
+command = "git push --force origin main\ngit checkout -b feat"
+expected = "deny"
+rule_id = "core.git:push-force-long"
+
+[[case]]
+description = "reset --hard is not exempted by a later clean -n"
+command = "git reset --hard && git clean -n"
+expected = "deny"
+rule_id = "core.git:reset-hard"
