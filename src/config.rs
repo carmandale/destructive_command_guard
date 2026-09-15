@@ -2246,11 +2246,12 @@ pub struct CompiledBlockOverride {
 impl CompiledBlockOverride {
     /// Check if this override matches.
     ///
-    /// Returns the reason if blocked.
+    /// Returns the reason if blocked. A search the engine gave up on counts as
+    /// a match: unknown has to block (.agent-config-ryyfo).
     #[inline]
     #[must_use]
     pub fn matches(&self, command: &str) -> Option<&str> {
-        if self.regex.is_match(command) {
+        if self.regex.try_is_match(command).unwrap_or(true) {
             Some(&self.reason)
         } else {
             None
@@ -4790,6 +4791,38 @@ enabled = false
 
         assert_eq!(compiled.check_block("hello hello"), Some("duplicate word"));
         assert_eq!(compiled.check_block("hello world"), None);
+    }
+
+    /// A block override whose search gives up must block, and an allow override
+    /// whose search gives up must not allow.
+    ///
+    /// fancy_regex stops with `BacktrackLimitExceeded` instead of an answer once
+    /// a search passes a million backtracking steps; the crafted command reaches
+    /// that in one search. "No match" is the safe reading of that for an allow
+    /// rule and the unsafe one for a block rule, and both used to get it
+    /// (.agent-config-ryyfo).
+    #[test]
+    fn test_compiled_overrides_search_that_gives_up_blocks_and_does_not_allow() {
+        let pattern = r"deploy\s(?=(a|a)*\1--prod)";
+        let overrides = OverridesConfig {
+            allow: vec![AllowOverride::Simple(pattern.to_string())],
+            block: vec![BlockOverride {
+                pattern: pattern.to_string(),
+                reason: "prod deploy".to_string(),
+            }],
+            ..Default::default()
+        };
+        let compiled = overrides.compile();
+        assert!(compiled.invalid_patterns.is_empty());
+
+        let crafted = format!("deploy {}", "a".repeat(40));
+        assert_eq!(compiled.check_block(&crafted), Some("prod deploy"));
+        assert!(!compiled.check_allow(&crafted));
+
+        // Control: the same rules answer normally when the search finishes.
+        assert_eq!(compiled.check_block("deploy aa--prod"), Some("prod deploy"));
+        assert!(compiled.check_allow("deploy aa--prod"));
+        assert_eq!(compiled.check_block("deploy --staging"), None);
     }
 
     #[test]

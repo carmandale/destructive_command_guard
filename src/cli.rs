@@ -11825,7 +11825,17 @@ fn dev_debug(config: &Config, command: &str, all_packs: bool) {
 
             // Check destructive patterns
             for destructive in &pack.destructive_patterns {
-                let matched = destructive.regex.is_match(command);
+                // A search that gave up blocks in the hook, so it must not print
+                // as "no match" here (.agent-config-ryyfo).
+                let Ok(matched) = destructive.regex.try_is_match(command) else {
+                    println!(
+                        "    {} Destructive pattern '{}' -> {}",
+                        "✗".red(),
+                        destructive.name.unwrap_or("unnamed"),
+                        "SEARCH GAVE UP (blocks as a match)".red().bold()
+                    );
+                    continue;
+                };
                 if matched {
                     println!(
                         "    {} Destructive pattern '{}' -> {}",

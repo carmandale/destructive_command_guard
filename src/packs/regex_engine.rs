@@ -115,12 +115,31 @@ impl CompiledRegex {
 
     /// Check if the pattern matches the text.
     ///
-    /// For backtracking engine, returns `false` on regex execution errors.
+    /// A search the backtracking engine gives up on reads as `false`. That is
+    /// the safe reading only for a pattern that ALLOWS: it falls through to the
+    /// checks that block. A pattern that BLOCKS must use [`Self::try_is_match`]
+    /// and treat the error as a match (.agent-config-ryyfo).
     #[must_use]
     pub fn is_match(&self, text: &str) -> bool {
+        self.try_is_match(text).unwrap_or(false)
+    }
+
+    /// Check if the pattern matches the text, reporting a search the engine
+    /// could not finish instead of guessing.
+    ///
+    /// fancy_regex stops with an error, not an answer, when a search exhausts
+    /// its backtrack limit (a million steps) or its stack. A crafted command
+    /// reaches that in well under a second, so the error means "unknown", and
+    /// only the caller knows which way unknown has to fail.
+    ///
+    /// # Errors
+    /// Returns the engine's message when the backtracking search gave up.
+    pub fn try_is_match(&self, text: &str) -> Result<bool, String> {
         match self {
-            Self::Linear(re) => re.is_match(text),
-            Self::Backtracking(re) => re.is_match(text).unwrap_or(false),
+            Self::Linear(re) => Ok(re.is_match(text)),
+            Self::Backtracking(re) => re
+                .is_match(text)
+                .map_err(|e| format!("fancy_regex runtime error: {e}")),
         }
     }
 
@@ -150,8 +169,12 @@ impl CompiledRegex {
     /// match found is returned rather than `None`: this is a guard, and a
     /// too-strict answer costs a detour where a missed one costs the thing the
     /// guard exists to protect.
-    #[must_use]
-    pub fn find_command_word(&self, text: &str) -> Option<(usize, usize)> {
+    ///
+    /// # Errors
+    /// Returns the engine's message when a backtracking search gave up before
+    /// answering. Every caller matches a pattern that blocks, so every caller
+    /// treats that as a match, for the same reason as the restart bound above.
+    pub fn find_command_word(&self, text: &str) -> Result<Option<(usize, usize)>, String> {
         let mut at = 0usize;
         let mut last_rejected: Option<(usize, usize)> = None;
 
@@ -160,24 +183,25 @@ impl CompiledRegex {
                 Self::Linear(re) => re.find_at(text, at).map(|m| (m.start(), m.end())),
                 Self::Backtracking(re) => re
                     .find_from_pos(text, at)
-                    .ok()
-                    .flatten()
+                    .map_err(|e| format!("fancy_regex runtime error: {e}"))?
                     .map(|m| (m.start(), m.end())),
             };
 
-            let (start, end) = found?;
+            let Some((start, end)) = found else {
+                return Ok(None);
+            };
             if !crate::packs::match_starts_mid_word(text, start) {
-                return Some((start, end));
+                return Ok(Some((start, end)));
             }
 
             last_rejected = Some((start, end));
             at = next_char_boundary(text, start + 1);
             if at > text.len() {
-                return None;
+                return Ok(None);
             }
         }
 
-        last_rejected
+        Ok(last_rejected)
     }
 
     /// Get the pattern string.
@@ -355,11 +379,22 @@ impl LazyCompiledRegex {
     /// On first call, this compiles the regex. Subsequent calls reuse the
     /// compiled pattern.
     ///
-    /// Returns `false` on regex execution or compile errors.
+    /// Returns `false` on regex execution or compile errors, which is only the
+    /// safe reading for a pattern that allows; see [`CompiledRegex::is_match`].
     #[must_use]
     pub fn is_match(&self, haystack: &str) -> bool {
         self.get_compiled()
             .is_some_and(|compiled| compiled.is_match(haystack))
+    }
+
+    /// Same as [`CompiledRegex::try_is_match`]. A pattern that fails to compile
+    /// reads as no match, as it does everywhere in this type.
+    ///
+    /// # Errors
+    /// Returns the engine's message when the backtracking search gave up.
+    pub fn try_is_match(&self, haystack: &str) -> Result<bool, String> {
+        self.get_compiled()
+            .map_or(Ok(false), |compiled| compiled.try_is_match(haystack))
     }
 
     /// Find the span (start, end) of the first match.
@@ -379,11 +414,15 @@ impl LazyCompiledRegex {
     /// considered, so `my-git status && git reset --hard` still reports the real
     /// one — dropping the pattern at the first mid-word hit would be a bypass.
     ///
-    /// Returns `None` if no match qualifies, or on execution/compile error.
-    #[must_use]
-    pub fn find_command_word(&self, haystack: &str) -> Option<(usize, usize)> {
+    /// Returns `Ok(None)` if no match qualifies or the pattern failed to
+    /// compile.
+    ///
+    /// # Errors
+    /// Returns the engine's message when a backtracking search gave up; see
+    /// [`CompiledRegex::find_command_word`].
+    pub fn find_command_word(&self, haystack: &str) -> Result<Option<(usize, usize)>, String> {
         self.get_compiled()
-            .and_then(|compiled| compiled.find_command_word(haystack))
+            .map_or(Ok(None), |compiled| compiled.find_command_word(haystack))
     }
 
     /// Get the pattern string.
@@ -591,6 +630,33 @@ mod tests {
         // Reasonable size input - should complete quickly
         let cmd = format!("git push {} --force", "branch".repeat(100));
         assert!(re.is_match(&cmd));
+    }
+
+    /// A search fancy_regex gives up on is an error, not "no match".
+    ///
+    /// `(a|a)*\1` backtracks exponentially, so forty `a`s pass the engine's
+    /// million-step backtrack limit and the search stops without an answer.
+    /// `is_match` still reads that as false for the patterns that allow; the
+    /// error reaches the callers that block (.agent-config-ryyfo).
+    #[test]
+    fn test_search_that_gives_up_is_an_error_not_a_miss() {
+        let pattern = r"deploy\s(?=(a|a)*\1--prod)";
+        let re = CompiledRegex::new(pattern).unwrap();
+        let lazy = LazyCompiledRegex::new(pattern);
+        assert!(re.uses_backtracking());
+        let crafted = format!("deploy {}", "a".repeat(40));
+
+        assert!(re.find_command_word(&crafted).is_err());
+        assert!(re.try_is_match(&crafted).is_err());
+        assert!(!re.is_match(&crafted));
+        assert!(lazy.find_command_word(&crafted).is_err());
+        assert!(lazy.try_is_match(&crafted).is_err());
+
+        // Control: a search that finishes still answers both ways.
+        assert_eq!(re.find_command_word("deploy aa--prod"), Ok(Some((0, 7))));
+        assert_eq!(re.find_command_word("deploy --staging"), Ok(None));
+        assert_eq!(re.try_is_match("deploy aa--prod"), Ok(true));
+        assert_eq!(re.try_is_match("deploy --staging"), Ok(false));
     }
 
     #[test]

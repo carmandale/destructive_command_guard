@@ -528,11 +528,14 @@ impl Pack {
 
     /// Check if a command matches any destructive pattern.
     /// Returns the matched pattern's reason, name, severity, and explanation if found.
+    ///
+    /// A pattern whose search the engine gave up on counts as a match: unknown
+    /// has to block (.agent-config-ryyfo).
     #[must_use]
     pub fn matches_destructive(&self, cmd: &str) -> Option<DestructiveMatch> {
         self.destructive_patterns
             .iter()
-            .find(|p| p.regex.find_command_word(cmd).is_some())
+            .find(|p| p.regex.find_command_word(cmd) != Ok(None))
             .map(|p| DestructiveMatch {
                 reason: p.reason,
                 name: p.name,
@@ -2542,6 +2545,40 @@ mod tests {
             Some("core.git"),
             "core.git (tier 1) should be attributed over strict_git (tier 9)"
         );
+    }
+
+    /// A destructive pattern whose search the engine gives up on blocks.
+    ///
+    /// `Pack::check` and `PackRegistry::check_command` both decide through
+    /// `matches_destructive`, not through the evaluator's own loop, so that
+    /// route needs its own proof (.agent-config-ryyfo).
+    #[test]
+    fn pack_check_blocks_when_destructive_search_gives_up() {
+        let pack = Pack::new(
+            "custom.deploy".to_string(),
+            "Custom Deploy Rules",
+            "test pack",
+            &["deploy"],
+            vec![],
+            vec![DestructivePattern {
+                regex: LazyCompiledRegex::new(r"deploy\s(?=(a|a)*\1--prod)"),
+                reason: "prod deploy",
+                name: Some("prod-deploy"),
+                severity: Severity::Critical,
+                explanation: None,
+                suggestions: &[],
+            }],
+        );
+
+        let crafted = format!("deploy {}", "a".repeat(40));
+        assert_eq!(
+            pack.check(&crafted).and_then(|m| m.name),
+            Some("prod-deploy")
+        );
+
+        // Control: a search that finishes still answers both ways.
+        assert!(pack.check("deploy aa--prod").is_some());
+        assert!(pack.check("deploy --staging").is_none());
     }
 
     #[test]

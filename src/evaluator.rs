@@ -394,6 +394,45 @@ pub enum EvaluationDecision {
     Deny,
 }
 
+/// Reason given when a destructive pattern's regex search gave up instead of
+/// answering (fancy_regex's backtrack limit). The command is blocked, but
+/// nothing was shown to match, so the rule's own reason would mislead.
+const SEARCH_GAVE_UP_REASON: &str = "dcg could not finish checking this command against \
+     this rule: the regex search hit its backtrack limit, so the command is blocked \
+     rather than allowed. Splitting a long command or script into smaller ones usually \
+     lets the check finish.";
+
+/// Explanation paired with [`SEARCH_GAVE_UP_REASON`]. Without one the hook
+/// falls back to "Matched destructive pattern", which is the claim this denial
+/// must not make.
+const SEARCH_GAVE_UP_EXPLANATION: &str = "The regex search for this rule stopped at the \
+     engine's backtrack limit before it could answer, so no part of the command was shown \
+     to match it. Long scripts that repeat the same command many times are the usual cause.";
+
+/// The denial for a destructive pattern whose search gave up: its reason and
+/// explanation say so, and it carries none of the rule's suggestions, which
+/// are advice about a match nobody saw.
+fn denied_because_search_gave_up(
+    pack_id: &str,
+    pattern: &crate::packs::DestructivePattern,
+) -> EvaluationResult {
+    match pattern.name {
+        Some(pattern_name) => EvaluationResult::denied_by_pack_pattern(
+            pack_id,
+            pattern_name,
+            SEARCH_GAVE_UP_REASON,
+            Some(SEARCH_GAVE_UP_EXPLANATION),
+            pattern.severity,
+            &[],
+        ),
+        None => EvaluationResult::denied_by_pack(
+            pack_id,
+            SEARCH_GAVE_UP_REASON,
+            Some(SEARCH_GAVE_UP_EXPLANATION),
+        ),
+    }
+}
+
 /// Byte span of a match within the evaluated command string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MatchSpan {
@@ -1581,6 +1620,7 @@ fn evaluate_packs_with_allowlists(
     //
     // The rm_parse optimization for core.filesystem is handled inline.
     let mut first_allowlist_hit: Option<(PatternMatch, AllowlistLayer, String)> = None;
+    let mut gave_up: Option<(&str, &crate::packs::DestructivePattern)> = None;
 
     for &(pack_id, pack) in &candidate_packs {
         if deadline_exceeded(deadline) || remaining_below(deadline, &crate::perf::PATTERN_MATCH) {
@@ -1700,10 +1740,32 @@ fn evaluate_packs_with_allowlists(
             // All severity levels are now evaluated. The policy layer in main.rs
             // determines whether to deny, warn, or log based on severity and config.
 
-            let matched_span = pattern
-                .regex
-                .find_command_word(command_for_packs)
-                .map(|(start, end)| MatchSpan { start, end });
+            let matched_span = match pattern.regex.find_command_word(command_for_packs) {
+                Ok(found) => found.map(|(start, end)| MatchSpan { start, end }),
+                // The engine gave up before answering (fancy_regex's backtrack
+                // limit). For a pattern that blocks, unknown has to deny: read
+                // as "no match", a command crafted to exhaust the limit got
+                // through (.agent-config-ryyfo). The denial waits until every
+                // other pattern has run, so a real match elsewhere in the
+                // command is the rule that gets named. There is no match
+                // location, so no safe span can be shown to cover it.
+                Err(_) => {
+                    let allowlisted = pattern.name.is_some_and(|name| {
+                        allowlists
+                            .match_rule_at_path(pack_id, name, project_path)
+                            .is_some()
+                    });
+                    // Keep the first one that blocks: a warn-only rule that gave up
+                    // first must not decide for a blocking one that gave up later.
+                    let outranks = gave_up.is_none_or(|(_, held)| {
+                        pattern.severity.blocks_by_default() && !held.severity.blocks_by_default()
+                    });
+                    if !allowlisted && outranks {
+                        gave_up = Some((pack_id, pattern));
+                    }
+                    continue;
+                }
+            };
             let Some(span) = matched_span else {
                 continue;
             };
@@ -1720,6 +1782,15 @@ fn evaluate_packs_with_allowlists(
                 .any(|&(start, end)| span.start >= start && span.start < end)
             {
                 continue;
+            }
+
+            // A real match that would only warn or log must not stand in for a
+            // search that gave up on a rule that blocks: the hook would allow a
+            // command the unknown rule might have stopped (.agent-config-ryyfo).
+            if let Some((held_pack, held)) = gave_up {
+                if held.severity.blocks_by_default() && !pattern.severity.blocks_by_default() {
+                    return denied_because_search_gave_up(held_pack, held);
+                }
             }
 
             let reason = pattern.reason;
@@ -1791,6 +1862,12 @@ fn evaluate_packs_with_allowlists(
 
             return EvaluationResult::denied_by_pack(pack_id, reason, pattern.explanation);
         }
+    }
+
+    // A search gave up and no other pattern matched: still a denial, told
+    // as what it is rather than as the rule's finding (.agent-config-ryyfo).
+    if let Some((pack_id, pattern)) = gave_up {
+        return denied_because_search_gave_up(pack_id, pattern);
     }
 
     if let Some((matched, layer, reason)) = first_allowlist_hit {
@@ -1950,6 +2027,11 @@ where
                     mapped_span,
                 );
             }
+            return EvaluationResult::denied_by_legacy(pattern.reason());
+        }
+        // No span is not the same as no match: an implementor may not report
+        // spans, and a search that gave up has none (.agent-config-ryyfo).
+        if pattern.is_match(&normalized) {
             return EvaluationResult::denied_by_legacy(pattern.reason());
         }
     }
@@ -2488,7 +2570,8 @@ impl LegacySafePattern for crate::packs::SafePattern {
 
 impl LegacyDestructivePattern for crate::packs::DestructivePattern {
     fn is_match(&self, cmd: &str) -> bool {
-        self.regex.is_match(cmd)
+        // A search the engine gave up on counts as a match (.agent-config-ryyfo).
+        self.regex.try_is_match(cmd).unwrap_or(true)
     }
 
     fn find_span(&self, cmd: &str) -> Option<MatchSpan> {
@@ -2715,6 +2798,44 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    /// The legacy evaluator denies when a destructive pattern's search gives up.
+    ///
+    /// It decides with `find_span` first, which has no span to offer for a
+    /// search that gave up, so the proof has to go through the function itself
+    /// rather than the trait method (.agent-config-ryyfo).
+    #[test]
+    fn legacy_evaluation_denies_when_a_destructive_search_gives_up() {
+        let destructive = [crate::packs::DestructivePattern {
+            regex: crate::packs::regex_engine::LazyCompiledRegex::new(
+                r"deploy\s(?=(a|a)*\1--prod)",
+            ),
+            reason: "prod deploy",
+            name: Some("prod-deploy"),
+            severity: crate::packs::Severity::Critical,
+            explanation: None,
+            suggestions: &[],
+        }];
+        let safe: [crate::packs::SafePattern; 0] = [];
+        let evaluate = |command: &str| {
+            evaluate_command_with_legacy(
+                command,
+                &default_config(),
+                &["deploy"],
+                &default_compiled_overrides(),
+                &default_allowlists(),
+                &safe,
+                &destructive,
+            )
+        };
+
+        let crafted = format!("deploy {}", "a".repeat(40));
+        assert!(evaluate(&crafted).is_denied());
+
+        // Control: a search that finishes still answers both ways.
+        assert!(evaluate("deploy aa--prod").is_denied());
+        assert!(!evaluate("deploy --staging").is_denied());
+    }
 
     fn default_config() -> Config {
         Config::default()

@@ -3531,10 +3531,28 @@ mod custom_pack_loading_tests {
         pack_content: &str,
         command: &str,
     ) -> (spawn::Sandbox, std::process::Output) {
+        setup_custom_pack_env_with_allowlist(pack_content, None, command)
+    }
+
+    /// Same, with an optional project `.dcg/allowlist.toml`.
+    fn setup_custom_pack_env_with_allowlist(
+        pack_content: &str,
+        allowlist: Option<&str>,
+        command: &str,
+    ) -> (spawn::Sandbox, std::process::Output) {
         let (mut cmd, sandbox) = spawn::dcg();
 
         // Create .git dir to make it a valid project root
         std::fs::create_dir_all(sandbox.root().join(".git")).expect("failed to create .git dir");
+        if let Some(allowlist) = allowlist {
+            std::fs::create_dir_all(sandbox.root().join(".dcg"))
+                .expect("failed to create .dcg dir");
+            std::fs::write(
+                sandbox.root().join(".dcg").join("allowlist.toml"),
+                allowlist,
+            )
+            .expect("failed to write allowlist");
+        }
 
         let packs_dir = sandbox.dcg_config_dir().join("packs");
         std::fs::create_dir_all(&packs_dir).expect("failed to create packs dir");
@@ -3674,6 +3692,167 @@ safe_patterns:
             json["hookSpecificOutput"]["permissionDecision"], "allow",
             "safe pattern should allow staging deploy\nstdout:\n{stdout}"
         );
+    }
+
+    /// What a denial from a search that gave up says (.agent-config-ryyfo).
+    const GAVE_UP: &str = "could not finish checking this command";
+
+    /// `probe` (medium, warn-only) and `prod-deploy` (critical) both exhaust
+    /// fancy_regex's backtrack limit on `deploy ` + 40 `a`s, in that order;
+    /// `wipe` (critical) and `stage` (medium) are ordinary rules.
+    const GAVE_UP_PACK: &str = r#"
+schema_version: 1
+id: custom.deploy
+name: Custom Deploy Rules
+version: 1.0.0
+keywords:
+  - deploy
+destructive_patterns:
+  - name: probe
+    pattern: deploy\s(?=(a|a)*\1--probe)
+    severity: medium
+    description: Probing a deployment is worth a warning
+  - name: prod-deploy
+    pattern: deploy\s(?=(a|a)*\1--prod)
+    severity: critical
+    description: Direct production deployment blocked
+  - name: wipe
+    pattern: deploy\s+--wipe
+    severity: critical
+    description: Wiping a deployment is blocked
+  - name: stage
+    pattern: deploy\s+--stage
+    severity: medium
+    description: Stage deploys are worth a warning
+safe_patterns:
+  - name: dry-run
+    pattern: deploy\s+--dry-run
+    description: A dry run changes nothing
+"#;
+
+    /// A destructive pattern the engine cannot finish evaluating denies.
+    ///
+    /// fancy_regex stops with `BacktrackLimitExceeded` after a million
+    /// backtracking steps, and the crafted command reaches that in one search.
+    /// That error used to read as "no match", so a command built to exhaust the
+    /// limit walked past the pattern written to block it (.agent-config-ryyfo).
+    ///
+    /// The rule id is asserted, not only the decision: a slow search can also
+    /// run out the evaluation budget, and a denial from that path would satisfy
+    /// a decision-only check with the bug still in place. A denial from a search
+    /// that gave up must say so, and must not claim a match.
+    ///
+    /// The other commands pin what may and may not replace that denial. A safe
+    /// command in front may not: a search that gave up has no location, so no
+    /// safe span can exempt it. A real match on a rule that also blocks does:
+    /// `--wipe` is named, so nobody allow-onces it as a limit of the checker. A
+    /// real match that would only warn (`--stage`) may not, or the hook would
+    /// allow what the rule that gave up might have stopped. And the warn-only
+    /// `probe`, which gives up first, may not speak for `prod-deploy`.
+    #[test]
+    fn custom_pack_pattern_that_exhausts_backtracking_denies() {
+        let pack_content = GAVE_UP_PACK;
+
+        let crafted = format!("deploy {}", "a".repeat(40));
+        let behind_safe = format!("deploy --dry-run && {crafted}");
+        let before_real = format!("{crafted} && deploy --wipe");
+        let before_warn = format!("{crafted} && deploy --stage");
+        for (command, rule, reason) in [
+            // Control: the pack loads, and the rule denies what it matches,
+            // with its own reason.
+            (
+                "deploy aa--prod",
+                "custom.deploy:prod-deploy",
+                "Direct production deployment blocked",
+            ),
+            (crafted.as_str(), "custom.deploy:prod-deploy", GAVE_UP),
+            (behind_safe.as_str(), "custom.deploy:prod-deploy", GAVE_UP),
+            (
+                before_real.as_str(),
+                "custom.deploy:wipe",
+                "Wiping a deployment is blocked",
+            ),
+            (before_warn.as_str(), "custom.deploy:prod-deploy", GAVE_UP),
+        ] {
+            let (_temp, output) = setup_custom_pack_env(pack_content, command);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+                panic!("{command:?} should produce a hook decision ({e})\nstdout:\n{stdout}")
+            });
+
+            assert_eq!(
+                json["hookSpecificOutput"]["permissionDecision"], "deny",
+                "{command:?} should be denied\nstdout:\n{stdout}"
+            );
+            assert_eq!(
+                json["hookSpecificOutput"]["ruleId"], rule,
+                "{command:?} should be denied by {rule}\nstdout:\n{stdout}"
+            );
+            let given = json["hookSpecificOutput"]["permissionDecisionReason"]
+                .as_str()
+                .unwrap_or_default();
+            assert!(
+                given.contains(reason),
+                "{command:?} should be denied with {reason:?}\nstdout:\n{stdout}"
+            );
+            if reason == GAVE_UP {
+                assert!(
+                    !given.contains("Matched destructive pattern"),
+                    "{command:?} gave up, so it must not claim a match\nstdout:\n{stdout}"
+                );
+            }
+        }
+    }
+
+    /// A rule allowlisted for the project stays allowed when its search gives
+    /// up, as it would be for a match, and the pack's other rules still apply.
+    /// An allowlist entry for a DIFFERENT rule must not let a search that gave
+    /// up through (.agent-config-ryyfo).
+    #[test]
+    fn allowlisted_rule_whose_search_gives_up_stays_allowed() {
+        let both_that_give_up = r#"
+[[allow]]
+rule = "custom.deploy:probe"
+reason = "test fixture allowlist entry"
+
+[[allow]]
+rule = "custom.deploy:prod-deploy"
+reason = "test fixture allowlist entry"
+"#;
+        let only_wipe = r#"
+[[allow]]
+rule = "custom.deploy:wipe"
+reason = "test fixture allowlist entry"
+"#;
+        let crafted = format!("deploy {}", "a".repeat(40));
+
+        let (_temp, output) =
+            setup_custom_pack_env_with_allowlist(GAVE_UP_PACK, Some(both_that_give_up), &crafted);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.trim().is_empty() && !stderr.contains("WARNING"),
+            "the allowlisted rules should not block or warn on {crafted:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+
+        let with_wipe = format!("{crafted} && deploy --wipe");
+        for (allowlist, rule) in [
+            (both_that_give_up, "custom.deploy:wipe"),
+            (only_wipe, "custom.deploy:prod-deploy"),
+        ] {
+            let (_temp, output) =
+                setup_custom_pack_env_with_allowlist(GAVE_UP_PACK, Some(allowlist), &with_wipe);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+                panic!(
+                    "{with_wipe:?} should be denied ({e})\nallowlist:{allowlist}\nstdout:\n{stdout}"
+                )
+            });
+            assert_eq!(
+                json["hookSpecificOutput"]["ruleId"], rule,
+                "an allowlist covers the rules it names, not the pack\nallowlist:{allowlist}\nstdout:\n{stdout}"
+            );
+        }
     }
 }
 
