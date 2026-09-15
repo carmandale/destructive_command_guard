@@ -23,29 +23,44 @@ pub fn create_pack() -> Pack {
     }
 }
 
+// Every safe rule stays on one line (`[^\S\n]`, never `\s`, between words) and
+// ends at the end of the text, while the destructive rules below also end at
+// `;`, `&`, `|` and a newline. Keeping the safe side narrower costs a false deny
+// on `scp f host:/var/tmp/x ; echo ok` and its newline form. That was the sound
+// trade while an exempted first match ended the search for its rule, since a
+// safe span ending at `;` would have exempted the first scp in
+// `scp f host:/var/tmp/x ; scp g host:/var/lib/y` and never reached the second.
+// .agent-config-35ysf (93587bc) has since made the search resume past an exempt
+// match, so that reason no longer holds as stated; .agent-config-5udyd owns
+// re-measuring whether widening these is now safe.
+//
+// There is no help rule. It could only ever exempt a command that a destructive
+// rule had already matched — `scp --help` on its own matches none of them and
+// needs no exemption — so all it ever did was allow an scp to a system path that
+// carried a help flag: a usage error that copies nothing, or
+// `scp -i -h f host:/etc/x`, where `-h` is the argument to `-i` and the copy
+// really happens (.agent-config-i82og).
 fn create_safe_patterns() -> Vec<SafePattern> {
     vec![
-        // Version/help
-        safe_pattern!("scp-help", r"scp\b[^;&|\n]*\s--?h(elp)?\b"),
         // Downloading from remote (remote:path first, local second)
         safe_pattern!(
             "scp-download",
-            r"scp\b[^;&|\n]*\s(?:\S+@)?\S+:\S+\s+\.\S*\s*$"
+            r"scp\b[^;&|\n]*[^\S\n](?:\S+@)?\S+:\S+[^\S\n]+\.\S*\s*$"
         ),
         // Copy to home directory
         safe_pattern!(
             "scp-to-home",
-            r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?~/\S+\s*$"
+            r"scp\b[^;&|\n]*[^\S\n](?:(?:\S+@)?\S+:)?~/\S+\s*$"
         ),
         // Copy to /tmp
         safe_pattern!(
             "scp-to-tmp",
-            r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/tmp/\S*\s*$"
+            r"scp\b[^;&|\n]*[^\S\n](?:(?:\S+@)?\S+:)?/tmp/\S*\s*$"
         ),
         // Copy to /var/tmp (safe scratch space under /var)
         safe_pattern!(
             "scp-to-var-tmp",
-            r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/var/tmp(?:/\S*)?\s*$"
+            r"scp\b[^;&|\n]*[^\S\n](?:(?:\S+@)?\S+:)?/var/tmp(?:/\S*)?\s*$"
         ),
     ]
 }
@@ -55,7 +70,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // Recursive copy to root
         destructive_pattern!(
             "scp-recursive-root",
-            r"scp\b[^;&|\n]*\s-[A-Za-z0-9]*r[A-Za-z0-9]*\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/\s*(?:$|[;&|])",
+            r"scp\b[^;&|\n]*\s-[A-Za-z0-9]*r[A-Za-z0-9]*\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/\s*(?:$|[;&|\n])",
             "scp -r to root (/) is extremely dangerous.",
             Critical,
             "Recursive copy to the root filesystem can overwrite critical system files, \
@@ -69,7 +84,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // Copy to /etc
         destructive_pattern!(
             "scp-to-etc",
-            r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/etc(?:/\S*)?\s*(?:$|[;&|])",
+            r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/etc(?:/\S*)?\s*(?:$|[;&|\n])",
             "scp to /etc/ can overwrite system configuration.",
             High,
             "The /etc directory contains critical system configuration files including passwd, \
@@ -83,7 +98,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // Copy to /var
         destructive_pattern!(
             "scp-to-var",
-            r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/var(?:/\S*)?\s*(?:$|[;&|])",
+            r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/var(?:/\S*)?\s*(?:$|[;&|\n])",
             "scp to /var/ can overwrite system data.",
             High,
             "The /var directory contains variable data including logs, databases, mail spools, \
@@ -97,7 +112,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // Copy to /boot
         destructive_pattern!(
             "scp-to-boot",
-            r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/boot(?:/\S*)?\s*(?:$|[;&|])",
+            r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/boot(?:/\S*)?\s*(?:$|[;&|\n])",
             "scp to /boot/ can corrupt boot configuration.",
             Critical,
             "The /boot directory contains the kernel, initramfs, and bootloader configuration. \
@@ -111,7 +126,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // Copy to /usr
         destructive_pattern!(
             "scp-to-usr",
-            r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/usr(?:/\S*)?\s*(?:$|[;&|])",
+            r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/usr(?:/\S*)?\s*(?:$|[;&|\n])",
             "scp to /usr/ can overwrite system binaries.",
             High,
             "The /usr directory contains system binaries, libraries, and shared resources. \
@@ -124,7 +139,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // Copy to /bin or /sbin
         destructive_pattern!(
             "scp-to-bin",
-            r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/(?:bin|sbin)(?:/\S*)?\s*(?:$|[;&|])",
+            r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/(?:bin|sbin)(?:/\S*)?\s*(?:$|[;&|\n])",
             "scp to /bin/ or /sbin/ can overwrite system binaries.",
             Critical,
             "The /bin and /sbin directories contain essential system binaries required for \
@@ -138,7 +153,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // Copy to /lib
         destructive_pattern!(
             "scp-to-lib",
-            r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/lib(?:64)?(?:/\S*)?\s*(?:$|[;&|])",
+            r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/lib(?:64)?(?:/\S*)?\s*(?:$|[;&|\n])",
             "scp to /lib/ can overwrite system libraries.",
             Critical,
             "The /lib and /lib64 directories contain shared libraries required by system \
@@ -173,9 +188,10 @@ mod tests {
     #[test]
     fn allows_safe_commands() {
         let pack = create_pack();
-        // Help
-        assert_safe_pattern_matches(&pack, "scp --help");
-        assert_safe_pattern_matches(&pack, "scp -h");
+        // Help. No safe rule covers these and none is needed: no destructive
+        // rule matches a command with no destination path.
+        assert_allows(&pack, "scp --help");
+        assert_allows(&pack, "scp -h");
         // Download from remote
         assert_safe_pattern_matches(&pack, "scp user@host:file.txt .");
         assert_safe_pattern_matches(&pack, "scp -P 22 user@host:/path/file .");
