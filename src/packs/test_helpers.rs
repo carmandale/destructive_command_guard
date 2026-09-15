@@ -35,6 +35,10 @@ use std::time::{Duration, Instant};
 /// still catching catastrophic regex backtracking (which would be 10s+).
 pub const PATTERN_MATCH_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// How many times [`assert_matches_within_budget`] may measure before it fails.
+/// Only a run that is over budget every time costs more than one measurement.
+pub const BUDGET_ATTEMPTS: u32 = 3;
+
 /// Assert that a pack blocks a command with a reason containing the expected substring.
 ///
 /// # Panics
@@ -272,26 +276,45 @@ pub fn assert_no_match(pack: &Pack, command: &str) {
 /// so that lazy regex compilation doesn't affect the timing. The goal is
 /// to measure pattern matching performance, not compilation time.
 ///
+/// It reports the FASTEST of [`BUDGET_ATTEMPTS`] measurements rather than one
+/// sample. The budget is wall-clock, so on a loaded box a single sample measures
+/// the scheduler and not the regex engine: `test_performance_pathological_inputs`
+/// came back at 506.406ms against this 500ms budget during a deliberately loaded
+/// hunt (1 red in 200 runs, peak load average 336), with nothing wrong with the
+/// pattern (`.agent-config-dcg-load-sensitive-lib-red-qrmij`). Catastrophic
+/// backtracking is deterministic and blows every attempt, so taking the minimum
+/// keeps the guard while dropping the coin flip. A run already inside budget
+/// stops after the first attempt, so the common path still measures once.
+///
 /// # Panics
 ///
-/// Panics if pattern matching takes longer than `PATTERN_MATCH_TIMEOUT`.
+/// Panics if pattern matching takes longer than `PATTERN_MATCH_TIMEOUT` on every
+/// attempt.
 #[track_caller]
 pub fn assert_matches_within_budget(pack: &Pack, command: &str) {
     // Pre-warm: trigger lazy compilation of all patterns by running a check.
     // This ensures we measure actual matching time, not compilation time.
     let _ = pack.check("__warmup__");
 
-    let start = Instant::now();
-    let _ = pack.check(command);
-    let elapsed = start.elapsed();
+    let mut best = Duration::MAX;
+    for _ in 0..BUDGET_ATTEMPTS {
+        let start = Instant::now();
+        let _ = pack.check(command);
+        best = best.min(start.elapsed());
+        if best < PATTERN_MATCH_TIMEOUT {
+            break;
+        }
+    }
 
     assert!(
-        elapsed < PATTERN_MATCH_TIMEOUT,
-        "Pattern matching for command '{}' in pack '{}' took {:?}, exceeding budget of {:?}.\n\
+        best < PATTERN_MATCH_TIMEOUT,
+        "Pattern matching for command '{}' in pack '{}' took {:?} at its fastest of {} attempts, \
+         exceeding budget of {:?}.\n\
          This may indicate catastrophic regex backtracking.",
         command,
         pack.id,
-        elapsed,
+        best,
+        BUDGET_ATTEMPTS,
         PATTERN_MATCH_TIMEOUT
     );
 }
