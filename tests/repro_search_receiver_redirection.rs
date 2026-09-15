@@ -40,8 +40,9 @@ fn packs_would_see(command: &str) -> String {
 
 #[test]
 fn search_receiver_without_a_pattern_still_masks_its_heredoc_body() {
-    // All four search commands, no positional pattern. Each one is the bug.
-    for cmd in ["grep", "rg", "ag", "ack"] {
+    // The search commands still on the non-executing list, no positional
+    // pattern. Each one is the bug.
+    for cmd in ["grep", "rg", "ag"] {
         let full = format!("{cmd} <<'EOF'\n{HAZ}\nEOF");
         let seen = packs_would_see(&full);
         assert!(
@@ -53,6 +54,20 @@ fn search_receiver_without_a_pattern_still_masks_its_heredoc_body() {
             "{cmd} <<'EOF' lost the heredoc operator to pattern masking: {seen:?}"
         );
     }
+
+    // `ack` was the fourth. Pattern masking still treats it as a search command,
+    // so its operator must survive for the same reason. Its BODY is no longer
+    // masked: ack is Perl, was never measured, and left the non-executing list
+    // (.agent-config-1xm1n). A visible body is that contract, not this leak.
+    let seen = packs_would_see(&format!("ack <<'EOF'\n{HAZ}\nEOF"));
+    assert!(
+        seen.contains("<<"),
+        "ack <<'EOF' lost the heredoc operator to pattern masking: {seen:?}"
+    );
+    assert!(
+        seen.contains("rm -rf"),
+        "ack <<'EOF' masked its body, but ack left the list in 1xm1n: {seen:?}"
+    );
 }
 
 #[test]

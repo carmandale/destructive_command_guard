@@ -247,9 +247,12 @@ fn modern_data_sinks_are_data_sinks() {
     // The allowlist predates all of these. Denying them is a false positive of
     // exactly the class spec 333 exists to remove, and `rg` is the one AGENTS.md
     // mandates as the search tool.
-    for sink in [
-        "rg foo", "jq .", "pbcopy", "less", "bat", "yq .a", "tac", "strings",
-    ] {
+    //
+    // `yq .a` WAS here and is deliberately absent now: `yq --from-file=-` reads
+    // an expression from stdin and yq was never measured, so it left the list
+    // (.agent-config-1xm1n). Do not re-add it — the 1xm1n arm in src/heredoc.rs
+    // pins the other half and goes red if you do.
+    for sink in ["rg foo", "jq .", "pbcopy", "less", "bat", "tac", "strings"] {
         let cmd = format!("cat <<'EOF' | {sink}\n{TRIGGER}\nEOF");
         assert_body_masked(&cmd, "a known data sink under a newer name");
         assert_allowed(&cmd, "a known data sink under a newer name");
@@ -374,6 +377,11 @@ fn every_listed_receiver_masks_its_body_including_the_new_entries() {
     // `--compress-program` is the same shape but needs a temp-file spill, and
     // `cat <<EOF | sort` is common enough that removing it would cost real false
     // positives. That call is a judgement and is tracked at `.agent-config-slwtp`.
+    //
+    // `ack` and `yq` are absent too (.agent-config-1xm1n): `ack` is Perl and
+    // `yq --from-file=-` reads an expression from stdin, and neither was ever
+    // measured. Do not re-add them — the 1xm1n arm in src/heredoc.rs pins the
+    // other half and goes red if you do.
     for receiver in [
         "cat",
         "tee /tmp/j6ha9-notes.txt",
@@ -391,9 +399,7 @@ fn every_listed_receiver_masks_its_body_including_the_new_entries() {
         // added with the gate
         "rg",
         "ag",
-        "ack",
         "jq",
-        "yq",
         "less",
         "more",
         "bat",
