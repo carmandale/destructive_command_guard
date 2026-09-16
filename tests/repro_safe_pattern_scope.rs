@@ -158,6 +158,112 @@ fn a_safe_scp_span_does_not_reach_into_the_next_line() {
     }
 }
 
+/// `.agent-config-5udyd`. A safe scp that is not the last thing on the line.
+///
+/// The four safe rules ended at `$` while the seven destructive rules also ended
+/// at `;`, `&`, `|` and a newline, so a safe destination followed by anything at
+/// all got no safe span and the destructive rule underneath it denied the
+/// command. `scp f host:/var/tmp/x` allowed, `scp f host:/var/tmp/x ; echo ok`
+/// denied on `scp-to-var` — a fail-closed false deny, but a false deny.
+///
+/// The gap was deliberate while it stood. Under `.agent-config-it2wk` an
+/// exempted FIRST match ended the search for its rule, so a safe span reaching
+/// the `;` would have exempted the scp in front of it and never looked at the
+/// one after — the rows in the sibling test below. `.agent-config-35ysf`
+/// (93587bc) made the search resume past an exempt match, which is what makes
+/// widening these anchors safe, and that is why the two tests are a pair: this
+/// one alone would pass on a build that hides the second command.
+#[test]
+fn a_safe_scp_before_a_separator_is_not_a_false_deny() {
+    for cmd in [
+        // scp-to-var-tmp, the carve-out inside the destructive /var rule. Each
+        // separator the destructive anchor already names.
+        "scp f host:/var/tmp/x ; echo ok",
+        "scp f host:/var/tmp/x && echo ok",
+        "scp f host:/var/tmp/x | tee log",
+        "scp f host:/var/tmp/x\necho ok",
+        // The canonical staged deploy: two ordinary lines, measured DENIED on a
+        // build of 280445b by the cold reviewer on `.agent-config-i82og`. This
+        // is the shape that made the false deny worth paying to fix.
+        "scp payload.tar host:/var/tmp/payload.tar\nssh host 'tar xf /var/tmp/payload.tar'",
+        // The other three safe rules have the same anchor and the same gap.
+        // Only /var/tmp sits under a destructive rule today, so these three
+        // would pass on an unfixed build too; they are here so a later rule
+        // that does cover ~, /tmp or a download cannot reintroduce the gap
+        // unnoticed.
+        "scp f user@host:~/docs/ ; echo ok",
+        "scp f host:/tmp/x ; echo ok",
+        "scp host:/etc/hosts . ; echo ok",
+    ] {
+        assert!(
+            !is_denied(cmd),
+            "a safe scp before a separator is not destructive: {cmd:?}"
+        );
+    }
+}
+
+/// The other half of the pair, and the reason `.agent-config-5udyd` waited for
+/// `.agent-config-35ysf`.
+///
+/// A safe span now runs from the command word up to the separator, so it covers
+/// a destructive match that starts at that same command word — which is the
+/// whole point. What it must NOT do is end the search there: the scp after the
+/// separator is a different command and no safe rule speaks for it.
+///
+/// Measured as a mutant on i82og's tree, BEFORE 35ysf landed, with these four
+/// anchors widened exactly as they are now: rows 1 and 2 were ALLOWED. They are
+/// the pin that says the resume is load-bearing for this change.
+#[test]
+fn a_widened_safe_span_does_not_hide_a_later_destructive_scp() {
+    for cmd in [
+        "scp f host:/var/tmp/x ; scp g host:/var/lib/y",
+        "scp f host:/var/tmp/x\nscp g host:/var/lib/y",
+        "scp f host:/var/tmp/x && scp g host:/etc/y",
+        "scp f host:/tmp/x ; scp g host:/boot/y",
+        "scp f user@host:~/docs/ ; scp g host:/sbin/y",
+        "scp host:/etc/hosts . ; scp -r g host:/",
+        // Three commands, the destructive one last: the resume has to keep
+        // going past more than one exemption.
+        "scp f host:/var/tmp/x ; scp g host:/tmp/y ; scp h host:/lib64/z",
+    ] {
+        assert!(
+            is_denied(cmd),
+            "a safe scp in front must not exempt the destructive scp after it: {cmd:?}"
+        );
+    }
+}
+
+/// The widening stops at a separator, and a redirection is not one.
+///
+/// A safe span starts at the command word, so a span that ran to a redirection
+/// would exempt a destructive match starting at that same word — and the
+/// destructive rules' `[^;&|\n]*` crosses `>`, so that match reaches the
+/// redirection TARGET. `.agent-config-mjtuy` measured exactly this as its M3
+/// mutant: anchoring `scp-to-var-tmp` at `\s*(?:$|\d*[<>])` turned
+/// `scp f host:/var/tmp/x > /etc/passwd` from DENY into ALLOW.
+///
+/// So `.agent-config-5udyd` widened these four to the separator class only, and
+/// the redirected copy to `/var/tmp` stays the accepted false deny that
+/// `tests/repro_scp_destination_shapes.rs` pins. A separator cannot have that
+/// shape: `[^;&|\n]*` cannot cross one, so nothing past it is reachable from
+/// the exempted command's own match.
+#[test]
+fn the_widened_anchor_does_not_reach_a_redirection() {
+    for cmd in [
+        // The hole the widening must not open.
+        "scp f host:/var/tmp/x > /etc/passwd",
+        "scp f host:/tmp/x > /etc/passwd",
+        // A separator AFTER a redirection is still no help: the safe rule never
+        // reaches the separator, so this stays the accepted false deny.
+        "scp f host:/var/tmp/x 2>/dev/null ; echo ok",
+    ] {
+        assert!(
+            is_denied(cmd),
+            "a redirection is not a segment end for a safe rule: {cmd:?}"
+        );
+    }
+}
+
 /// The pack used to carry a `scp-help` safe rule whose span started at the
 /// command word, so a help flag anywhere on the line exempted the scp that
 /// matched a destructive rule — and the evaluator then skipped that rule before

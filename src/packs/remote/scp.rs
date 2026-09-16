@@ -24,15 +24,24 @@ pub fn create_pack() -> Pack {
 }
 
 // Every safe rule stays on one line (`[^\S\n]`, never `\s`, between words) and
-// ends at the end of the text, while the destructive rules below also end at
-// `;`, `&`, `|` and a newline. Keeping the safe side narrower costs a false deny
-// on `scp f host:/var/tmp/x ; echo ok` and its newline form. That was the sound
-// trade while an exempted first match ended the search for its rule, since a
-// safe span ending at `;` would have exempted the first scp in
-// `scp f host:/var/tmp/x ; scp g host:/var/lib/y` and never reached the second.
-// .agent-config-35ysf (93587bc) has since made the search resume past an exempt
-// match, so that reason no longer holds as stated; .agent-config-5udyd owns
-// re-measuring whether widening these is now safe.
+// ends where a command ends: end of text, `;`, `&`, `|` or a newline. The seven
+// destructive rules below use that same separator class and one thing more, a
+// redirection — the one deliberate asymmetry left, explained three paragraphs
+// down.
+//
+// The safe side used to stop at `$` alone, which cost a false deny on
+// `scp f host:/var/tmp/x ; echo ok`, on its newline form, and on the canonical
+// two-line staged deploy (`scp payload.tar host:/var/tmp/payload.tar` then
+// `ssh host 'tar xf /var/tmp/payload.tar'`). That was the sound trade only while
+// an exempted first match ended the search for its rule: a safe span reaching
+// the `;` would have exempted the first scp in
+// `scp f host:/var/tmp/x ; scp g host:/var/lib/y` and never looked at the
+// second. `.agent-config-35ysf` (93587bc) made the search resume past an exempt
+// match, so the span can now end at the separator without hiding anything — and
+// it cannot reach past one either, because `[^;&|\n]*` does not cross a
+// separator, so no destructive match starting at the exempted command word can
+// reach a path beyond it. Both halves are pinned in
+// tests/repro_safe_pattern_scope.rs (.agent-config-5udyd).
 //
 // A destructive rule's segment end also accepts a redirection (`>`, `2>`, `<`).
 // `move_redirections_to_segment_end` parks every redirection at the end of its
@@ -40,18 +49,22 @@ pub fn create_pack() -> Pack {
 // destination and the real end of the segment: the bare form denied while the
 // same command with `2>/dev/null` after it walked through all seven rules.
 //
-// The safe rules deliberately do NOT get the same widening. A safe span starts
-// at the command word, so a span running up to the operator would exempt a
-// destructive match that starts there too: `scp f host:/var/tmp/x > /etc/passwd`
-// denies today on `scp-to-etc` and must keep denying. (Mind the space. The glued
-// `>/etc/passwd` is allowed before and after this change, because the
-// destructive rule wants whitespace before the path and `>` supplies none. That
-// is a redirection-TARGET gap, not a destination one, and is out of scope here.)
+// The safe rules do NOT get that half of the widening, and this is the reason a
+// redirection is not simply folded into the class above. A safe span starts at
+// the command word, so a span running up to a redirection would exempt a
+// destructive match that starts there too — and unlike a separator, `[^;&|\n]*`
+// DOES cross `>`, so that match reaches the redirection target:
+// `scp f host:/var/tmp/x > /etc/passwd` must keep denying on `scp-to-etc`.
+// `.agent-config-mjtuy` measured it as its M3 mutant and watched that row turn
+// ALLOW. (Mind the space. The glued `>/etc/passwd` is allowed either way,
+// because the destructive rule wants whitespace before the path and `>` supplies
+// none. That is a redirection-TARGET gap, not a destination one, and is
+// `.agent-config-fhj4b`.)
 //
-// The price is a new false deny: a redirected copy to `/var/tmp`, whose safe
-// rule still ends at `$`, now reaches `scp-to-var`. That is the same class the
-// `;`-separated false deny above already accepts, and `.agent-config-5udyd` owns
-// re-measuring whether the safe anchors can widen.
+// So a redirected copy to a safe destination — `scp f host:/var/tmp/x 2>/dev/null`
+// — stays denied. That is the accepted cost, pinned with its reason in
+// tests/repro_scp_destination_shapes.rs; `.agent-config-5udyd` re-measured it and
+// left it standing rather than buy it with the `/etc/passwd` hole.
 //
 // The destination is quote-permeable (`["']*` on both sides of the directory
 // name) because the shell removes those quotes before the copy runs, while
@@ -73,22 +86,22 @@ fn create_safe_patterns() -> Vec<SafePattern> {
         // Downloading from remote (remote:path first, local second)
         safe_pattern!(
             "scp-download",
-            r"scp\b[^;&|\n]*[^\S\n](?:\S+@)?\S+:\S+[^\S\n]+\.\S*\s*$"
+            r"scp\b[^;&|\n]*[^\S\n](?:\S+@)?\S+:\S+[^\S\n]+\.\S*\s*(?:$|[;&|\n])"
         ),
         // Copy to home directory
         safe_pattern!(
             "scp-to-home",
-            r"scp\b[^;&|\n]*[^\S\n](?:(?:\S+@)?\S+:)?~/\S+\s*$"
+            r"scp\b[^;&|\n]*[^\S\n](?:(?:\S+@)?\S+:)?~/\S+\s*(?:$|[;&|\n])"
         ),
         // Copy to /tmp
         safe_pattern!(
             "scp-to-tmp",
-            r"scp\b[^;&|\n]*[^\S\n](?:(?:\S+@)?\S+:)?/tmp/\S*\s*$"
+            r"scp\b[^;&|\n]*[^\S\n](?:(?:\S+@)?\S+:)?/tmp/\S*\s*(?:$|[;&|\n])"
         ),
         // Copy to /var/tmp (safe scratch space under /var)
         safe_pattern!(
             "scp-to-var-tmp",
-            r"scp\b[^;&|\n]*[^\S\n](?:(?:\S+@)?\S+:)?/var/tmp(?:/\S*)?\s*$"
+            r"scp\b[^;&|\n]*[^\S\n](?:(?:\S+@)?\S+:)?/var/tmp(?:/\S*)?\s*(?:$|[;&|\n])"
         ),
     ]
 }

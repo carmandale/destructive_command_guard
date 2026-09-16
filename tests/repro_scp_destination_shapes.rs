@@ -220,10 +220,14 @@ fn a_redirection_into_a_system_path_still_denies_behind_a_safe_destination() {
 /// redirection, a redirected copy to `/var/tmp` reaches `scp-to-var` before the
 /// safe rule can cover it. Both rows were ALLOWED on 5aeb5359.
 ///
-/// This is the same class as the `;`-separated false deny that
-/// `.agent-config-i82og` already accepted, and `.agent-config-5udyd` owns
-/// re-measuring whether the safe anchors can widen. If 5udyd widens them, this
-/// test goes red, which is the intended way to notice.
+/// `.agent-config-5udyd` re-measured this and left it standing. It widened the
+/// four safe anchors to the separator class (`;`, `&`, `|`, a newline), which
+/// cleared the `;`-separated false deny `.agent-config-i82og` had accepted, but
+/// deliberately NOT to a redirection: a separator cannot be crossed by a
+/// destructive rule's `[^;&|\n]*` while `>` can, so a safe span reaching a
+/// redirection would exempt the match that reaches its target — the M3 mutant
+/// above. The two rows below are the price of keeping that shut, and they stay
+/// green through 5udyd rather than going red as this comment once predicted.
 #[test]
 fn a_redirected_copy_to_var_tmp_is_the_accepted_false_deny() {
     assert_denies_on("scp f host:/var/tmp/x 2>/dev/null", "scp-to-var");
