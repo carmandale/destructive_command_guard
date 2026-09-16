@@ -44,6 +44,31 @@ impl HookRunOutput {
     }
 }
 
+/// Write a hook payload to a spawned dcg's stdin, tolerating its early exit.
+///
+/// dcg is allowed to stop reading before the write finishes, and a test below
+/// depends on it doing exactly that: `read_hook_input` takes `max_bytes + 1`
+/// (`src/hook.rs`, 256 KiB by default), so an oversized payload is refused and
+/// the process exits with part of the payload still unwritten. Whether that
+/// remainder fits in the pipe buffer decides whether the write quietly lands
+/// in bytes nobody reads or hits a closed pipe, so `BrokenPipe` here is dcg
+/// behaving correctly, not a harness failure. Every other io error still
+/// fails loudly.
+///
+/// This weakens no assertion. Callers decide the verdict, and a run that
+/// produced no denial is caught by their own emptiness check rather than
+/// being hidden here. See `.agent-config-ep39o`.
+fn write_hook_input(child: &mut std::process::Child, input: &serde_json::Value) {
+    let stdin = child.stdin.as_mut().expect("failed to open stdin");
+    if let Err(err) = serde_json::to_writer(stdin, input) {
+        assert_eq!(
+            err.io_error_kind(),
+            Some(std::io::ErrorKind::BrokenPipe),
+            "failed to write hook input JSON: {err}"
+        );
+    }
+}
+
 /// Run dcg in hook mode (no CLI subcommand) and capture output.
 ///
 /// This runs with a cleared environment and a temp CWD to ensure tests don't
@@ -63,10 +88,7 @@ fn run_dcg_hook_with_env(command: &str, extra_env: &[(&str, &std::ffi::OsStr)]) 
 
     let mut child = cmd.spawn().expect("failed to spawn dcg hook mode");
 
-    {
-        let stdin = child.stdin.as_mut().expect("failed to open stdin");
-        serde_json::to_writer(stdin, &input).expect("failed to write hook input JSON");
-    }
+    write_hook_input(&mut child, &input);
 
     let output = child.wait_with_output().expect("failed to wait for dcg");
 
@@ -1625,10 +1647,7 @@ mod hook_mode_tests {
 
         let mut child = cmd.spawn().expect("failed to spawn dcg hook mode");
 
-        {
-            let stdin = child.stdin.as_mut().expect("failed to open stdin");
-            serde_json::to_writer(stdin, &input).expect("failed to write hook input JSON");
-        }
+        write_hook_input(&mut child, &input);
 
         let output = child.wait_with_output().expect("failed to wait for dcg");
 
@@ -3591,10 +3610,7 @@ custom_paths = ["{}"]
 
         let mut child = cmd.spawn().expect("failed to spawn dcg");
 
-        {
-            let stdin = child.stdin.as_mut().expect("failed to open stdin");
-            serde_json::to_writer(stdin, &input).expect("failed to write hook input JSON");
-        }
+        write_hook_input(&mut child, &input);
 
         let output = child.wait_with_output().expect("failed to wait for dcg");
 
@@ -4681,6 +4697,41 @@ mod fail_closed_tests {
         let command = format!("echo {}", "a".repeat(300 * 1024));
 
         let run = run_dcg_hook_with_env(&command, &[("DCG_CONFIG", config.as_os_str())]);
+        let stdout = run.stdout_str();
+        assert!(
+            !stdout.trim().is_empty(),
+            "oversized payload produced no output, which reads as ALLOW (stderr={})",
+            run.stderr_str()
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(stdout.trim()).expect("denial must be valid JSON");
+        assert_eq!(
+            json["hookSpecificOutput"]["permissionDecision"]
+                .as_str()
+                .unwrap_or_default(),
+            "deny"
+        );
+    }
+
+    /// The harness must survive dcg refusing to read the rest of the payload.
+    ///
+    /// `oversized_hook_payload_denies_instead_of_allowing` above sends ~300 KiB
+    /// against the 256 KiB `max_hook_input_bytes` default, which leaves a
+    /// remainder of roughly 44 KiB -- small enough to fit in a 65,536-byte pipe
+    /// buffer. So whether its write EPIPEs is a race, and it lost that race in
+    /// CI run 35056121117 while passing in the two runs before it.
+    ///
+    /// This sends a remainder far larger than any pipe buffer, so dcg's exit
+    /// always closes the pipe with bytes still unwritten and the EPIPE is
+    /// certain rather than hoped for. It pins the harness, not the verdict:
+    /// revert the `BrokenPipe` arm in `run_dcg_hook_with_env` and this fails
+    /// with `Broken pipe (os error 32)` every time.
+    #[test]
+    fn oversized_payload_write_survives_dcgs_early_exit() {
+        let command = format!("echo {}", "a".repeat(4 * 1024 * 1024));
+
+        let run = run_dcg_hook(&command);
+
         let stdout = run.stdout_str();
         assert!(
             !stdout.trim().is_empty(),
