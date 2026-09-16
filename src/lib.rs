@@ -133,7 +133,7 @@ pub use context::{
 pub use heredoc::{
     ExtractedContent, ExtractedShellCommand, ExtractionLimits, ExtractionResult, HeredocType,
     ScriptLanguage, TriggerResult, check_triggers, extract_content, extract_shell_commands,
-    matched_triggers,
+    matched_triggers, warm_extraction_patterns,
 };
 
 // Re-export AST matcher types

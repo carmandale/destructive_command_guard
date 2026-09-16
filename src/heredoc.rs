@@ -988,6 +988,37 @@ static INLINE_SCRIPT_DOUBLE_QUOTE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("inline script double-quote regex compiles")
 });
 
+/// Compile every extraction pattern, so no caller pays for it later.
+///
+/// All seven pattern statics are [`LazyLock`], so whichever command arrives
+/// first in a process compiles them. That compilation is one-time process
+/// startup, not work the command asked for — and [`extract_content`] used to
+/// run it *inside* its own time budget, charging the first command for it.
+/// Measured in a debug build, that made the first call 1679us against a 50ms
+/// budget while every later call took 2-4us: a 420x tax, paid once, by
+/// whoever was unlucky enough to go first.
+///
+/// That is why `.agent-config-uq1ui` reproduced only under nextest, which
+/// gives each test its own process so every test is "first", and never under
+/// `cargo test`, which shares one process across a binary's tests so only one
+/// pays. On a loaded CI runner the same 1679us became 278ms and the budget
+/// tripped. A timeout is fail-open (see the pipeline diagram at the top of
+/// this file), so in production that same first command would have had its
+/// heredoc silently left unread.
+///
+/// Callers who want the cost paid at a predictable moment can call this at
+/// startup. [`extract_content`] calls it before starting its clock, so the
+/// budget only ever measures work done for the command in hand.
+pub fn warm_extraction_patterns() {
+    LazyLock::force(&HEREDOC_TRIGGERS);
+    LazyLock::force(&HEREDOC_EXTRACTOR);
+    LazyLock::force(&HERESTRING_SINGLE_QUOTE);
+    LazyLock::force(&HERESTRING_DOUBLE_QUOTE);
+    LazyLock::force(&HERESTRING_UNQUOTED);
+    LazyLock::force(&INLINE_SCRIPT_SINGLE_QUOTE);
+    LazyLock::force(&INLINE_SCRIPT_DOUBLE_QUOTE);
+}
+
 // ============================================================================
 // Robustness: Binary Content Detection
 // ============================================================================
@@ -1096,6 +1127,12 @@ fn record_timeout_if_needed(
 #[must_use]
 #[instrument(skip(command, limits), fields(cmd_len = command.len(), timeout_ms = limits.timeout_ms))]
 pub fn extract_content(command: &str, limits: &ExtractionLimits) -> ExtractionResult {
+    // Pay one-time pattern compilation BEFORE the clock starts. It is process
+    // startup, not this command's work, and charging it here is what made the
+    // first call in a process 420x more expensive than the rest
+    // (`.agent-config-uq1ui`).
+    warm_extraction_patterns();
+
     let start_time = Instant::now();
     let timeout = Duration::from_millis(limits.timeout_ms);
     let mut skip_reasons: Vec<SkipReason> = Vec::new();
@@ -1123,10 +1160,12 @@ pub fn extract_content(command: &str, limits: &ExtractionLimits) -> ExtractionRe
 
     let mut extracted: Vec<ExtractedContent> = Vec::new();
 
-    // Enforce time budget (fail open) before doing any further work.
-    if record_timeout_if_needed(start_time, timeout, limits.timeout_ms, &mut skip_reasons) {
-        return ExtractionResult::Skipped(skip_reasons);
-    }
+    // No time-budget check here. Between `start_time` and this line the only
+    // work done is a length compare and `check_binary_content`, so a check
+    // here cannot be reporting that *this command* is expensive — it can only
+    // fire when the thread was descheduled, and a fail-open timeout turns that
+    // scheduler noise into an unread heredoc. The budget is checked below,
+    // after each stage that actually does extraction work.
 
     // Extract inline scripts (-c/-e flags)
     extract_inline_scripts(
@@ -3888,6 +3927,34 @@ mod tests {
 
     mod tier2_extraction {
         use super::*;
+
+        /// Control for `.agent-config-uq1ui`: hoisting pattern compilation out of
+        /// the timed region and dropping the pre-work deadline check must not
+        /// disable the deadline. An input that genuinely costs more than the
+        /// budget still has to trip it.
+        ///
+        /// 40k unterminated `<<~` operators measured 284_888us of real
+        /// extraction work against the default 50ms budget — a 5.7x margin, so
+        /// this asserts the guard fires, not that the machine is slow.
+        #[test]
+        fn deadline_still_trips_on_genuinely_expensive_input() {
+            let pathological = format!("{}\n", "cat <<~EOF ".repeat(40_000));
+
+            let result = extract_content(&pathological, &ExtractionLimits::default());
+
+            let reasons = match &result {
+                ExtractionResult::Skipped(r) => r.clone(),
+                ExtractionResult::Partial { skipped, .. } => skipped.clone(),
+                other => panic!("expected the budget to stop this input, got {other:?}"),
+            };
+            assert!(
+                reasons
+                    .iter()
+                    .any(|r| matches!(r, SkipReason::Timeout { .. })),
+                "extraction that costs ~285ms must still report a Timeout against a \
+                 50ms budget; the deadline was disabled, not just de-noised: {reasons:?}"
+            );
+        }
 
         #[test]
         fn extraction_limits_default() {
