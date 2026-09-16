@@ -296,3 +296,147 @@ fn every_command_a_safe_pattern_covers_stays_exempt() {
         assert!(!is_denied(cmd), "must stay allowed: {cmd}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// `.agent-config-q7zym` — the resume loop reads the clock.
+//
+// The loop those tests pin restarts a full command-word scan at every exempted
+// match, so a line with N exempted matches costs O(N x len) inside ONE pattern
+// iteration. Nothing in it read the deadline. Measured on the release binary at
+// 93587bc, core only: `git clean -n && ` x 4000 plus `git clean -fd` answered in
+// 2,816 ms against a built-in hook budget of 200 ms, while the same tokens with
+// the destructive command first answered in 152 ms — 18.5x, and 14x past the
+// budget before anything looked at the clock.
+//
+// The verdict was never the defect: `main.rs` turns a budget skip into a deny
+// (`.agent-config-9ky33`), so an overrun inside dcg is fail-closed. What is not
+// fail-closed is answering so late that the harness abandons the hook and runs
+// the command anyway. So the load-bearing pin here is the ANSWER TIME, not the
+// decision — a decision-only assertion passes on the broken code too, just 2.8
+// seconds later.
+// ---------------------------------------------------------------------------
+
+use std::time::{Duration, Instant};
+
+use destructive_command_guard::evaluate_command_with_deadline;
+use destructive_command_guard::perf::Deadline;
+
+/// `n` dry-run `git clean`s in front of a real one. Every dry run matches
+/// `core.git:clean-force`'s command word and is exempted by the safe pattern, so
+/// each one costs the loop another resume.
+fn safe_prefix_first(n: usize) -> String {
+    format!("{}git clean -fd", "git clean -n && ".repeat(n))
+}
+
+/// The same tokens, destructive command first. The first match is not exempt, so
+/// the loop breaks on its first pass: this is the cheap order, and the baseline
+/// the 18.5x above is measured against.
+fn destructive_first(n: usize) -> String {
+    format!("git clean -fd{}", " && git clean -n".repeat(n))
+}
+
+/// Evaluate with `core` (what `Config::default()` enables) under a real deadline.
+/// Returns `(denied, skipped_due_to_budget, elapsed)`.
+fn evaluate_core_with_deadline(command: &str, budget: Duration) -> (bool, bool, Duration) {
+    let config = Config::default();
+    let enabled: HashSet<String> = HashSet::from(["core".to_string()]);
+    let keywords = REGISTRY.collect_enabled_keywords(&enabled);
+    let overrides = config.overrides.compile();
+    let allowlists = LayeredAllowlist::default();
+    let deadline = Deadline::new(budget);
+
+    let started = Instant::now();
+    let result = evaluate_command_with_deadline(
+        command,
+        &config,
+        &keywords,
+        &overrides,
+        &allowlists,
+        Some(&deadline),
+    );
+    let elapsed = started.elapsed();
+    (result.is_denied(), result.skipped_due_to_budget, elapsed)
+}
+
+/// The control for the two pins below. Given a budget it cannot exhaust, a safe
+/// prefix in front of a real `git clean -fd` is still denied on its merits — so
+/// a green pin below is not green over a harness that never reaches the rule,
+/// and the deadline check did not turn the reverse order into an allow.
+#[test]
+fn a_long_safe_prefix_is_still_denied_when_the_budget_is_whole() {
+    let (denied, skipped, _) =
+        evaluate_core_with_deadline(&safe_prefix_first(64), Duration::from_secs(30));
+    assert!(
+        denied && !skipped,
+        "a safe prefix in front of `git clean -fd` must deny on its merits with a whole budget \
+         (denied={denied}, skipped_due_to_budget={skipped})"
+    );
+}
+
+/// THE PIN. A long safe prefix answers within a bounded multiple of the deadline
+/// it was given. Two separate mutants make it red, both measured here at the
+/// parameters below (N=48000, 300 ms deadline, same machine and build):
+///
+/// - delete the deadline check inside the resume loop    -> 77.93 s
+/// - pass `None` for the deadline at the pack call site,
+///   as `evaluate_at_path_impl` used to                  -> 80.81 s
+/// - both in place                                       ->  0.31 s
+///
+/// The parameters are not arbitrary, and a smaller case does NOT catch the
+/// first mutant. At a 50 ms deadline the budget is already spent by the time
+/// the loop reaches the pattern that is expensive to resume, so the per-pattern
+/// check at the top of `'patterns` answers first and the in-loop check never
+/// runs: N=12000/50 ms measures 54 ms with the in-loop check deleted, i.e.
+/// green over nothing. The deadline has to be large enough to REACH the
+/// expensive pattern before the pin can see whether anything stops it inside.
+///
+/// The bound is 10x the deadline rather than 2x because this runs in a test
+/// build on a machine with a dozen other agents compiling on it. The defect is
+/// quadratic in the number of exemptions and bounded by nothing, so a loose
+/// bound still catches it with 25x to spare.
+#[test]
+fn a_long_safe_prefix_answers_inside_a_bounded_multiple_of_the_deadline() {
+    let budget = Duration::from_millis(300);
+    let (_, _, slow) = evaluate_core_with_deadline(&safe_prefix_first(48000), budget);
+    let (_, _, fast) = evaluate_core_with_deadline(&destructive_first(48000), budget);
+    eprintln!("MEASURE safe_prefix_first={slow:?} destructive_first={fast:?}");
+
+    assert!(
+        slow < Duration::from_millis(3000),
+        "the resume loop ran past its {budget:?} deadline: safe-prefix-first took {slow:?}, \
+         the same tokens destructive-first took {fast:?}"
+    );
+}
+
+/// What it answers when it stops. The budget answer is `skipped_due_to_budget`,
+/// which `main.rs` renders as a deny — never a bare allow that a caller would
+/// read as "no rule matched".
+///
+/// This one passes on the broken code too (it gets there eventually), which is
+/// exactly why the test above asserts on time. It is here because a later
+/// "simplification" of the new check into a plain `break` WOULD flip this to a
+/// silent allow, and nothing else in the suite would notice.
+#[test]
+fn stopping_on_the_deadline_is_never_a_bare_allow() {
+    let (denied, skipped, _) =
+        evaluate_core_with_deadline(&safe_prefix_first(4000), Duration::from_millis(50));
+    assert!(
+        denied || skipped,
+        "giving up mid-search answered plain ALLOW: a command with a real `git clean -fd` in it \
+         was reported as matching nothing"
+    );
+}
+
+/// The cheap order stays cheap and stays denied. This is the baseline half of
+/// the 18.5x, and it fails if the new check ever fires on a line that was never
+/// expensive.
+#[test]
+fn the_same_tokens_with_the_destructive_command_first_deny_at_once() {
+    let (denied, skipped, elapsed) =
+        evaluate_core_with_deadline(&destructive_first(4000), Duration::from_millis(50));
+    assert!(
+        denied && !skipped,
+        "destructive-first must deny on its merits, not on the clock \
+         (denied={denied}, skipped_due_to_budget={skipped}, elapsed={elapsed:?})"
+    );
+}

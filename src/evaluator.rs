@@ -412,6 +412,24 @@ const SEARCH_GAVE_UP_EXPLANATION: &str = "The regex search for this rule stopped
 /// The denial for a destructive pattern whose search gave up: its reason and
 /// explanation say so, and it carries none of the rule's suggestions, which
 /// are advice about a match nobody saw.
+/// The answer when the clock runs out part-way through pack evaluation.
+///
+/// A blocking rule whose search already gave up is a rule this command was
+/// never proven safe against, and it names itself; `core.limits:evaluation-timeout`
+/// does not. Returning the bare budget answer here would discard it, which is
+/// the same fail-open shape `.agent-config-ryyfo` closed for the non-timeout
+/// path -- and it is reachable now that the deadline actually reaches this
+/// function (.agent-config-q7zym). The end of the pack loop resolves a pending
+/// `gave_up` the same way.
+fn budget_answer(
+    gave_up: Option<(&str, &crate::packs::DestructivePattern, bool)>,
+) -> EvaluationResult {
+    match gave_up {
+        Some((pack_id, pattern, _)) => denied_because_search_gave_up(pack_id, pattern),
+        None => EvaluationResult::allowed_due_to_budget(),
+    }
+}
+
 fn denied_because_search_gave_up(
     pack_id: &str,
     pattern: &crate::packs::DestructivePattern,
@@ -1593,7 +1611,22 @@ fn evaluate_at_path_impl(
         allowlists,
         keyword_index,
         policy,
-        None,
+        // The clock, not `None`. Every budget check inside pack evaluation --
+        // the per-pack one, the per-pattern one, and the resume loop's -- reads
+        // this argument, and this call site passed `None`, so on the path the
+        // hook actually takes all of them were dead code. Measured here: a line
+        // of 12,000 exempted `git clean -n` in front of a real `git clean -fd`
+        // took 10.18 s to answer against a 50 ms deadline, because nothing
+        // between this call and the end of the pack loop looked at a clock; with
+        // the clock passed it answers in 55 ms (.agent-config-q7zym). The stage
+        // checks around this call did see the overrun afterwards, which is why
+        // it denied rather than allowed -- but only after running 203x past the
+        // budget the hook promised its caller, which is long enough for the
+        // harness to abandon the hook and run the command unjudged.
+        //
+        // `evaluate_command_with_legacy` still passes `None` below: it has no
+        // deadline to pass, and its callers are not the hook.
+        deadline,
         project_path,
     );
     // A heredoc allowlist hit explains why an otherwise-clean command is allowed. It must
@@ -1730,7 +1763,7 @@ fn evaluate_packs_with_allowlists(
 
     for &(pack_id, pack) in &candidate_packs {
         if deadline_exceeded(deadline) || remaining_below(deadline, &crate::perf::PATTERN_MATCH) {
-            return EvaluationResult::allowed_due_to_budget();
+            return budget_answer(gave_up);
         }
 
         // Spans of this pack's safe patterns. Empty means "nothing safe here",
@@ -1855,7 +1888,7 @@ fn evaluate_packs_with_allowlists(
         'patterns: for pattern in &pack.destructive_patterns {
             if deadline_exceeded(deadline) || remaining_below(deadline, &crate::perf::PATTERN_MATCH)
             {
-                return EvaluationResult::allowed_due_to_budget();
+                return budget_answer(gave_up);
             }
 
             // All severity levels are evaluated. Whether a match denies, warns
@@ -1914,6 +1947,28 @@ fn evaluate_packs_with_allowlists(
                         // exempt by the same test. `safe_end > start >= from`, so
                         // every pass moves forward and `from` is never 0 again.
                         from = safe_end;
+                        // Every resume restarts a full command-word scan over
+                        // what is left of the line, so a line with N exempted
+                        // matches costs O(N x len) INSIDE this one pattern.
+                        // Nothing between the top of `'patterns` and the next
+                        // pattern reads the clock, so without this check a long
+                        // safe prefix runs arbitrarily far past the hook budget:
+                        // 2.43 s measured against a 50 ms deadline with the
+                        // clock reaching this function but this check deleted,
+                        // and 2,816 ms against the 200 ms built-in budget on the
+                        // release binary when the reviewer first found it, 18.5x
+                        // the same bytes in the other order (.agent-config-q7zym,
+                        // .agent-config-uyc9l cold review MAJOR 2). The deadline
+                        // is the hook's
+                        // whole answer time, and main.rs turns a budget skip
+                        // into a deny (.agent-config-9ky33), so stopping here is
+                        // fail-closed -- what is NOT fail-closed is blowing past
+                        // the timeout and letting the harness abandon the hook.
+                        if deadline_exceeded(deadline)
+                            || remaining_below(deadline, &crate::perf::PATTERN_MATCH)
+                        {
+                            return budget_answer(gave_up);
+                        }
                     }
                     Ok(None) => continue 'patterns,
                     // The engine gave up before answering (fancy_regex's backtrack
