@@ -9,8 +9,6 @@
 use crate::packs::{DestructivePattern, Pack, SafePattern};
 use crate::{destructive_pattern, safe_pattern};
 
-/// Create the Package Managers pack.
-#[must_use]
 /// Command words that let this pack be consulted at all.
 ///
 /// The registry's `PackEntry` points at this same const. They used to be two
@@ -27,6 +25,8 @@ pub const KEYWORDS: &[&str] = &[
     "poetry", "mvn", "mvnw", "gradle", "gradlew", "publish", "apt-get", "pip3",
 ];
 
+/// Create the Package Managers pack.
+#[must_use]
 pub fn create_pack() -> Pack {
     Pack {
         id: "package_managers".to_string(),

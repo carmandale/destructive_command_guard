@@ -171,8 +171,6 @@ const RESET_MASTER_SUGGESTIONS: &[PatternSuggestion] = &[
     ),
 ];
 
-/// Create the `MySQL`/`MariaDB` pack.
-#[must_use]
 /// Command words that let this pack be consulted at all.
 ///
 /// The registry's `PackEntry` points at this same const. They used to be two
@@ -198,6 +196,8 @@ pub const KEYWORDS: &[&str] = &[
     "truncate",
 ];
 
+/// Create the `MySQL`/`MariaDB` pack.
+#[must_use]
 pub fn create_pack() -> Pack {
     Pack {
         id: "database.mysql".to_string(),

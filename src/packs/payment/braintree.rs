@@ -10,8 +10,6 @@
 use crate::packs::{DestructivePattern, Pack, SafePattern};
 use crate::{destructive_pattern, safe_pattern};
 
-/// Create the `Braintree` pack.
-#[must_use]
 /// Command words that let this pack be consulted at all.
 ///
 /// The registry's `PackEntry` points at this same const. They used to be two
@@ -28,6 +26,8 @@ pub const KEYWORDS: &[&str] = &[
     "gateway.subscription.",
 ];
 
+/// Create the `Braintree` pack.
+#[must_use]
 pub fn create_pack() -> Pack {
     Pack {
         id: "payment.braintree".to_string(),

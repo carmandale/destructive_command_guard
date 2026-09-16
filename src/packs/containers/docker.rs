@@ -149,8 +149,6 @@ const STOP_ALL_SUGGESTIONS: &[PatternSuggestion] = &[
     ),
 ];
 
-/// Create the Docker pack.
-#[must_use]
 /// Command words that let this pack be consulted at all.
 ///
 /// The registry's `PackEntry` points at this same const. They used to be two
@@ -159,6 +157,8 @@ const STOP_ALL_SUGGESTIONS: &[PatternSuggestion] = &[
 /// (`.agent-config-x74pe`).
 pub const KEYWORDS: &[&str] = &["docker", "prune", "rmi", "volume"];
 
+/// Create the Docker pack.
+#[must_use]
 pub fn create_pack() -> Pack {
     Pack {
         id: "containers.docker".to_string(),

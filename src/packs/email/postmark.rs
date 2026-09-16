@@ -12,8 +12,6 @@
 use crate::destructive_pattern;
 use crate::packs::{DestructivePattern, Pack, SafePattern};
 
-/// Create the Postmark pack.
-#[must_use]
 /// Command words that let this pack be consulted at all.
 ///
 /// The registry's `PackEntry` points at this same const. They used to be two
@@ -22,6 +20,8 @@ use crate::packs::{DestructivePattern, Pack, SafePattern};
 /// (`.agent-config-x74pe`).
 pub const KEYWORDS: &[&str] = &["postmark", "api.postmarkapp.com"];
 
+/// Create the Postmark pack.
+#[must_use]
 pub fn create_pack() -> Pack {
     Pack {
         id: "email.postmark".to_string(),

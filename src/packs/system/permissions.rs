@@ -35,8 +35,6 @@ const CHOWN_RECURSIVE_SUGGESTIONS: &[PatternSuggestion] = &[
     ),
 ];
 
-/// Create the Permissions pack.
-#[must_use]
 /// Command words that let this pack be consulted at all.
 ///
 /// The registry's `PackEntry` points at this same const. They used to be two
@@ -45,6 +43,8 @@ const CHOWN_RECURSIVE_SUGGESTIONS: &[PatternSuggestion] = &[
 /// (`.agent-config-x74pe`).
 pub const KEYWORDS: &[&str] = &["chmod", "chown", "setfacl", "chgrp"];
 
+/// Create the Permissions pack.
+#[must_use]
 pub fn create_pack() -> Pack {
     Pack {
         id: "system.permissions".to_string(),

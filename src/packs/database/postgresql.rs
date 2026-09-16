@@ -123,8 +123,6 @@ const PG_DUMP_CLEAN_SUGGESTIONS: &[PatternSuggestion] = &[
     ),
 ];
 
-/// Create the `PostgreSQL` pack.
-#[must_use]
 /// Command words that let this pack be consulted at all.
 ///
 /// The registry's `PackEntry` points at this same const. They used to be two
@@ -151,6 +149,8 @@ pub const KEYWORDS: &[&str] = &[
     "truncate",
 ];
 
+/// Create the `PostgreSQL` pack.
+#[must_use]
 pub fn create_pack() -> Pack {
     Pack {
         id: "database.postgresql".to_string(),

@@ -479,8 +479,6 @@ fn path_is_root_home(path: &PathToken<'_>) -> bool {
     false
 }
 
-/// Create the core filesystem pack.
-#[must_use]
 /// Command words that let this pack be consulted at all.
 ///
 /// The registry's `PackEntry` points at this same const. They used to be two
@@ -489,6 +487,8 @@ fn path_is_root_home(path: &PathToken<'_>) -> bool {
 /// (`.agent-config-x74pe`).
 pub const KEYWORDS: &[&str] = &["rm", "/rm"];
 
+/// Create the core filesystem pack.
+#[must_use]
 pub fn create_pack() -> Pack {
     Pack {
         id: "core.filesystem".to_string(),

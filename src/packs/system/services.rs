@@ -8,8 +8,6 @@
 use crate::packs::{DestructivePattern, Pack, SafePattern};
 use crate::{destructive_pattern, safe_pattern};
 
-/// Create the Services pack.
-#[must_use]
 /// Command words that let this pack be consulted at all.
 ///
 /// The registry's `PackEntry` points at this same const. They used to be two
@@ -24,6 +22,8 @@ use crate::{destructive_pattern, safe_pattern};
 /// `.agent-config-w22qy` holds that, with the measurement.
 pub const KEYWORDS: &[&str] = &["systemctl", "service", "upstart"];
 
+/// Create the Services pack.
+#[must_use]
 pub fn create_pack() -> Pack {
     Pack {
         id: "system.services".to_string(),

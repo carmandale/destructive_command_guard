@@ -113,8 +113,6 @@ const DELETE_FROM_DIR_SUGGESTIONS: &[PatternSuggestion] = &[
     ),
 ];
 
-/// Create the kubectl pack.
-#[must_use]
 /// Command words that let this pack be consulted at all.
 ///
 /// The registry's `PackEntry` points at this same const. They used to be two
@@ -123,6 +121,8 @@ const DELETE_FROM_DIR_SUGGESTIONS: &[PatternSuggestion] = &[
 /// (`.agent-config-x74pe`).
 pub const KEYWORDS: &[&str] = &["kubectl", "delete", "drain", "cordon", "taint"];
 
+/// Create the kubectl pack.
+#[must_use]
 pub fn create_pack() -> Pack {
     Pack {
         id: "kubernetes.kubectl".to_string(),
