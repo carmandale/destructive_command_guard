@@ -1,0 +1,142 @@
+diff --git a/tests/corpus/edge_cases/heredoc_expansion_trade.toml b/tests/corpus/edge_cases/heredoc_expansion_trade.toml
+index bf796e8f..a30ab1b8 100644
+--- a/tests/corpus/edge_cases/heredoc_expansion_trade.toml
++++ b/tests/corpus/edge_cases/heredoc_expansion_trade.toml
+@@ -1,8 +1,8 @@
+ # Edge cases: the unquoted-delimiter trade, pinned rather than deleted
+ #
+-# Every row here is the exact twin of a row in
+-# tests/corpus/false_positives/heredoc_data.toml, differing only in that its
+-# delimiter is NOT quoted. Each is DENIED, and that is deliberate.
++# Every row here, except the receiver sections at the end, is the exact twin of
++# a row in tests/corpus/false_positives/heredoc_data.toml, differing only in that
++# its delimiter is NOT quoted. Each is DENIED, and that is deliberate.
+ #
+ # WHY. Spec 333 / .agent-config-u06z masks a heredoc body only when the
+ # delimiter is quoted. An unquoted delimiter is expanded by the outer shell
+@@ -76,3 +76,18 @@ expected = "deny"
+ description = "awk heredoc with an unquoted delimiter is denied for both reasons at once"
+ command = "awk '{print $1}' <<EOF\nrm -rf /home/user\nEOF"
+ expected = "deny"
++
++# ============================================================================
++# Not the delimiter either: sort is not a data sink at any quoting
++#
++# .agent-config-slwtp removed sort from NON_EXECUTING_HEREDOC_COMMANDS because
++# `sort --compress-program=PROG` pipes its spilled temp data to PROG's stdin,
++# and `-S` in the same argv sets the spill threshold. The stock BSD sort
++# accepts the flag and spawns it. This row sat in heredoc_data.toml as `allow`
++# until the removal turned it red; the verdict moved, not the command.
++# ============================================================================
++
++[[case]]
++description = "sort heredoc is not data even with a quoted delimiter — sort can pipe its stdin to a program"
++command = "sort <<'EOF'\nrm -rf /\ngit clean -fd\nEOF"
++expected = "deny"
+diff --git a/tests/corpus/false_positives/heredoc_data.toml b/tests/corpus/false_positives/heredoc_data.toml
+index 0a80376c..827bd935 100644
+--- a/tests/corpus/false_positives/heredoc_data.toml
++++ b/tests/corpus/false_positives/heredoc_data.toml
+@@ -82,6 +82,11 @@ expected = "allow"
+ 
+ # ============================================================================
+ # Various text utilities
++#
++# `sort` was here until .agent-config-slwtp removed it from
++# NON_EXECUTING_HEREDOC_COMMANDS: `sort --compress-program=PROG` pipes its
++# spilled temp data to PROG's stdin, and `-S` in the same argv sets the spill
++# threshold. Its row is in the edge-cases file beside awk's.
+ # ============================================================================
+ 
+ [[case]]
+@@ -89,11 +94,6 @@ description = "wc heredoc is DATA"
+ command = "wc -l <<'EOF'\nrm -rf /\ngit reset --hard\nEOF"
+ expected = "allow"
+ 
+-[[case]]
+-description = "sort heredoc is DATA"
+-command = "sort <<'EOF'\nrm -rf /\ngit clean -fd\nEOF"
+-expected = "allow"
+-
+ [[case]]
+ description = "head heredoc is DATA"
+ command = "head -5 <<'EOF'\nrm -rf /home/user\nEOF"
+diff --git a/tests/repro_heredoc_pipe_to_shell.rs b/tests/repro_heredoc_pipe_to_shell.rs
+index e033538c..4f348587 100644
+--- a/tests/repro_heredoc_pipe_to_shell.rs
++++ b/tests/repro_heredoc_pipe_to_shell.rs
+@@ -163,8 +163,9 @@ fn multi_stage_pipeline_of_data_sinks_is_still_data() {
+ #[test]
+ fn env_assignment_before_a_data_sink_is_still_data() {
+     // `NAME=value` is the one token bash allows before a stage's command word.
+-    let cmd = format!("cat <<'EOF' | LC_ALL=C sort\n{TRIGGER}\nEOF");
+-    assert_body_masked(&cmd, "the command word is sort, not LC_ALL=C");
++    // This stage was `sort` until `.agent-config-slwtp` took sort off the list.
++    let cmd = format!("cat <<'EOF' | LC_ALL=C tr a-z A-Z\n{TRIGGER}\nEOF");
++    assert_body_masked(&cmd, "the command word is tr, not LC_ALL=C");
+ }
+ 
+ #[test]
+@@ -373,10 +374,12 @@ fn every_listed_receiver_masks_its_body_including_the_new_entries() {
+     //
+     // `split` and `csplit` are absent for the same reason and left the same way
+     // (.agent-config-bvt4k): GNU `split --filter=CMD` pipes each output chunk to
+-    // CMD's STDIN, so the body is executed. `sort` is still here ON PURPOSE — its
+-    // `--compress-program` is the same shape but needs a temp-file spill, and
+-    // `cat <<EOF | sort` is common enough that removing it would cost real false
+-    // positives. That call is a judgement and is tracked at `.agent-config-slwtp`.
++    // CMD's STDIN, so the body is executed. `sort` followed (.agent-config-slwtp):
++    // it was kept on a judgement that its `--compress-program` needed a GNU build
++    // and a spill no heredoc reaches, and both halves measured false — the stock
++    // BSD sort spawns the program, and `-S` in the same argv sets the spill
++    // threshold.
++    // The slwtp arm in src/heredoc.rs pins the other half.
+     //
+     // `ack` and `yq` are absent too (.agent-config-1xm1n): `ack` is Perl and
+     // `yq --from-file=-` reads an expression from stdin, and neither was ever
+@@ -389,7 +392,6 @@ fn every_listed_receiver_masks_its_body_including_the_new_entries() {
+         "egrep",
+         "fgrep",
+         "sed",
+-        "sort",
+         "wc",
+         "base64",
+         "gzip",
+@@ -484,10 +486,13 @@ fn split_filter_executes_its_stdin_so_its_body_is_never_data_bvt4k() {
+         assert_denied(&cmd, "split --filter executes what it reads from stdin");
+     }
+ 
+-    // `sort` is the control: still a member on purpose (`.agent-config-slwtp`),
+-    // so this row goes red if someone removes it without revisiting that call.
+-    let ctrl = format!("cat <<'EOF' | sort\n{TRIGGER}\nEOF");
+-    assert_body_masked(&ctrl, "sort is still a data sink");
++    // Control — the instrument can still mask, so a green above is not
++    // green-over-nothing. This was `sort`, chosen so that removing it without
++    // revisiting `.agent-config-slwtp` would say so; slwtp removed it and it did.
++    // `tr` replaces it, as in the bvt4k arm in src/heredoc.rs: a pure transform with no
++    // program to hand its stdin to.
++    let ctrl = format!("cat <<'EOF' | tr a-z A-Z\n{TRIGGER}\nEOF");
++    assert_body_masked(&ctrl, "tr is still a data sink");
+ }
+ 
+ #[test]
+diff --git a/tests/repro_search_receiver_redirection.rs b/tests/repro_search_receiver_redirection.rs
+index c2f1bea3..910a5fe7 100644
+--- a/tests/repro_search_receiver_redirection.rs
++++ b/tests/repro_search_receiver_redirection.rs
+@@ -124,11 +124,13 @@ fn a_search_receiver_piped_to_an_interpreter_is_still_denied_material() {
+ fn non_search_receivers_were_never_affected_and_still_are_not() {
+     // The rows that were already correct. They are here so a regression in the
+     // shared heredoc masker shows up in this file too, rather than only in a
+-    // suite nobody runs alongside it.
++    // suite nobody runs alongside it. `sort` was a row until .agent-config-slwtp
++    // took it off the non-executing list, so its body now reaches the packs by
++    // design; `tr` holds its place.
+     for cmd in [
+         "cat",
+         "head",
+-        "sort",
++        "tr a-z A-Z",
+         "tee /tmp/y5eor-pin.md",
+         "jq .",
+         "sed -n p",

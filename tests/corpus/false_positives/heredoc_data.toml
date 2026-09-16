@@ -82,16 +82,16 @@ expected = "allow"
 
 # ============================================================================
 # Various text utilities
+#
+# `sort` was here until .agent-config-slwtp removed it from
+# NON_EXECUTING_HEREDOC_COMMANDS: `sort --compress-program=PROG` pipes its
+# spilled temp data to PROG's stdin, and `-S` in the same argv sets the spill
+# threshold. Its row is in the edge-cases file beside awk's.
 # ============================================================================
 
 [[case]]
 description = "wc heredoc is DATA"
 command = "wc -l <<'EOF'\nrm -rf /\ngit reset --hard\nEOF"
-expected = "allow"
-
-[[case]]
-description = "sort heredoc is DATA"
-command = "sort <<'EOF'\nrm -rf /\ngit clean -fd\nEOF"
 expected = "allow"
 
 [[case]]

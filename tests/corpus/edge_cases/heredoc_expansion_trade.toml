@@ -1,8 +1,8 @@
 # Edge cases: the unquoted-delimiter trade, pinned rather than deleted
 #
-# Every row here is the exact twin of a row in
-# tests/corpus/false_positives/heredoc_data.toml, differing only in that its
-# delimiter is NOT quoted. Each is DENIED, and that is deliberate.
+# Every row here, except the receiver sections at the end, is the exact twin of
+# a row in tests/corpus/false_positives/heredoc_data.toml, differing only in that
+# its delimiter is NOT quoted. Each is DENIED, and that is deliberate.
 #
 # WHY. Spec 333 / .agent-config-u06z masks a heredoc body only when the
 # delimiter is quoted. An unquoted delimiter is expanded by the outer shell
@@ -75,4 +75,19 @@ expected = "deny"
 [[case]]
 description = "awk heredoc with an unquoted delimiter is denied for both reasons at once"
 command = "awk '{print $1}' <<EOF\nrm -rf /home/user\nEOF"
+expected = "deny"
+
+# ============================================================================
+# Not the delimiter either: sort is not a data sink at any quoting
+#
+# .agent-config-slwtp removed sort from NON_EXECUTING_HEREDOC_COMMANDS because
+# `sort --compress-program=PROG` pipes its spilled temp data to PROG's stdin,
+# and `-S` in the same argv sets the spill threshold. The stock BSD sort
+# accepts the flag and spawns it. This row sat in heredoc_data.toml as `allow`
+# until the removal turned it red; the verdict moved, not the command.
+# ============================================================================
+
+[[case]]
+description = "sort heredoc is not data even with a quoted delimiter — sort can pipe its stdin to a program"
+command = "sort <<'EOF'\nrm -rf /\ngit clean -fd\nEOF"
 expected = "deny"

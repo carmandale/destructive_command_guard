@@ -163,8 +163,9 @@ fn multi_stage_pipeline_of_data_sinks_is_still_data() {
 #[test]
 fn env_assignment_before_a_data_sink_is_still_data() {
     // `NAME=value` is the one token bash allows before a stage's command word.
-    let cmd = format!("cat <<'EOF' | LC_ALL=C sort\n{TRIGGER}\nEOF");
-    assert_body_masked(&cmd, "the command word is sort, not LC_ALL=C");
+    // This stage was `sort` until `.agent-config-slwtp` took sort off the list.
+    let cmd = format!("cat <<'EOF' | LC_ALL=C tr a-z A-Z\n{TRIGGER}\nEOF");
+    assert_body_masked(&cmd, "the command word is tr, not LC_ALL=C");
 }
 
 #[test]
@@ -373,10 +374,12 @@ fn every_listed_receiver_masks_its_body_including_the_new_entries() {
     //
     // `split` and `csplit` are absent for the same reason and left the same way
     // (.agent-config-bvt4k): GNU `split --filter=CMD` pipes each output chunk to
-    // CMD's STDIN, so the body is executed. `sort` is still here ON PURPOSE — its
-    // `--compress-program` is the same shape but needs a temp-file spill, and
-    // `cat <<EOF | sort` is common enough that removing it would cost real false
-    // positives. That call is a judgement and is tracked at `.agent-config-slwtp`.
+    // CMD's STDIN, so the body is executed. `sort` followed (.agent-config-slwtp):
+    // it was kept on a judgement that its `--compress-program` needed a GNU build
+    // and a spill no heredoc reaches, and both halves measured false — the stock
+    // BSD sort spawns the program, and `-S` in the same argv sets the spill
+    // threshold.
+    // The slwtp arm in src/heredoc.rs pins the other half.
     //
     // `ack` and `yq` are absent too (.agent-config-1xm1n): `ack` is Perl and
     // `yq --from-file=-` reads an expression from stdin, and neither was ever
@@ -389,7 +392,6 @@ fn every_listed_receiver_masks_its_body_including_the_new_entries() {
         "egrep",
         "fgrep",
         "sed",
-        "sort",
         "wc",
         "base64",
         "gzip",
@@ -484,10 +486,13 @@ fn split_filter_executes_its_stdin_so_its_body_is_never_data_bvt4k() {
         assert_denied(&cmd, "split --filter executes what it reads from stdin");
     }
 
-    // `sort` is the control: still a member on purpose (`.agent-config-slwtp`),
-    // so this row goes red if someone removes it without revisiting that call.
-    let ctrl = format!("cat <<'EOF' | sort\n{TRIGGER}\nEOF");
-    assert_body_masked(&ctrl, "sort is still a data sink");
+    // Control — the instrument can still mask, so a green above is not
+    // green-over-nothing. This was `sort`, chosen so that removing it without
+    // revisiting `.agent-config-slwtp` would say so; slwtp removed it and it did.
+    // `tr` replaces it, as in the bvt4k arm in src/heredoc.rs: a pure transform with no
+    // program to hand its stdin to.
+    let ctrl = format!("cat <<'EOF' | tr a-z A-Z\n{TRIGGER}\nEOF");
+    assert_body_masked(&ctrl, "tr is still a data sink");
 }
 
 #[test]

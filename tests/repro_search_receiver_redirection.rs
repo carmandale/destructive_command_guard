@@ -124,11 +124,13 @@ fn a_search_receiver_piped_to_an_interpreter_is_still_denied_material() {
 fn non_search_receivers_were_never_affected_and_still_are_not() {
     // The rows that were already correct. They are here so a regression in the
     // shared heredoc masker shows up in this file too, rather than only in a
-    // suite nobody runs alongside it.
+    // suite nobody runs alongside it. `sort` was a row until .agent-config-slwtp
+    // took it off the non-executing list, so its body now reaches the packs by
+    // design; `tr` holds its place.
     for cmd in [
         "cat",
         "head",
-        "sort",
+        "tr a-z A-Z",
         "tee /tmp/y5eor-pin.md",
         "jq .",
         "sed -n p",
