@@ -38,9 +38,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-check-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-cargo-check-
 
       - name: Check formatting
         run: cargo fmt -- --check
@@ -121,15 +121,44 @@ jobs:
           path: ubs-output.log
           retention-days: 7
 
-      - name: Check compilation
-        run: cargo check --all-targets
+      # Two steps used to sit here and both are gone on purpose; see
+      # .agent-config-dcg-ci-runner-out-of-disk-3in9f.
+      #
+      # `cargo check --all-targets` ran after `cargo clippy --all-targets`
+      # above. Clippy already runs that check pass, and clippy-driver
+      # fingerprints differently, so the second pass rebuilt the whole
+      # metadata tree for no coverage this job did not already have.
+      #
+      # `cargo build --release` built a binary nothing in this job reads.
+      # Every Rust test spawns through `tests/common/spawn.rs`, which
+      # resolves `CARGO_BIN_EXE_dcg` -- the debug binary nextest builds --
+      # and `tests/spawn_isolation.rs` enforces that no other spelling
+      # exists. The `target/release/dcg` consumers are the shell scripts
+      # under `tests/e2e/` and `tests/scripts/`, which run in the `e2e`
+      # job, and that job builds its own release binary.
+      #
+      # Carrying a debug tree and a release tree in one job is what ran the
+      # hosted runner out of disk: runs 35044298390 and 35047392666 both
+      # ended in `No space left on device` during `Run tests`, so the test
+      # signal never completed. This job also shared the bare
+      # `Linux-cargo-` cache key with `e2e`, so it restored e2e's release
+      # tree even when it built none; the key above now follows the
+      # per-job convention every other job in this file already uses.
 
-      - name: Build release binary for tests
-        run: cargo build --release
+      - name: Disk before tests
+        run: |
+          df -h /
+          du -sh target || true
 
       - name: Run tests (with JUnit XML report)
         run: |
           cargo nextest run --profile ci --no-fail-fast
+
+      - name: Disk after tests
+        if: always()
+        run: |
+          df -h /
+          du -sh target || true
 
       - name: Generate test summary
         if: always()
