@@ -818,14 +818,49 @@ fn stopping_on_the_deadline_is_never_a_bare_allow() {
 /// The cheap order stays cheap and stays denied. This is the baseline half of
 /// the 18.5x, and it fails if the new check ever fires on a line that was never
 /// expensive.
+///
+/// The budget is SCALED off a measurement taken in the same run, not a bare
+/// constant. It used to be a flat 50 ms, which is a claim about how much CPU
+/// the test got rather than a claim about the code: alone this evaluation takes
+/// ~10 ms, but under nextest's full 3201-test parallel load a CI runner charged
+/// it 56.7 ms and then 49.5 ms on the retry, and both tries reported
+/// `skipped_due_to_budget` for doing exactly the same O(n) work. That red
+/// blocked `check`, which is `needs:` for every other job, so six jobs reported
+/// nothing because of a 7 ms timing margin
+/// (`.agent-config-dcg-safe-pattern-scope-deadline-uxgoa`).
+///
+/// Scaling keeps the mutant this pin exists to catch. What it catches is a
+/// deadline check that fires on a line that never exhausted its budget, and
+/// such a check is red at ANY multiple — including one derived from the
+/// machine's own demonstrated cost. What it stops catching is a slow runner,
+/// which was never the defect. The sibling pin
+/// `a_long_safe_prefix_answers_inside_a_bounded_multiple_of_the_deadline` still
+/// owns the opposite mutant (a check that never fires), and owns it the same
+/// way: a loose multiple, for the same reason.
 #[test]
 fn the_same_tokens_with_the_destructive_command_first_deny_at_once() {
-    let (denied, skipped, elapsed) =
-        evaluate_core_with_deadline(&destructive_first(4000), Duration::from_millis(50));
+    let command = destructive_first(4000);
+
+    // What this machine actually charges for the cheap order, measured against a
+    // budget it cannot exhaust. This is also the control: if the cheap order
+    // does not deny here, the pin below is not measuring what it claims.
+    let (denied, skipped, cost) = evaluate_core_with_deadline(&command, Duration::from_secs(30));
+    assert!(
+        denied && !skipped,
+        "destructive-first must deny on its merits with a whole budget \
+         (denied={denied}, skipped_due_to_budget={skipped}, elapsed={cost:?})"
+    );
+
+    // THE PIN. 20x the cost just demonstrated, floored so that a sub-millisecond
+    // measurement cannot scale down into a budget nothing could meet.
+    let budget = (cost * 20).max(Duration::from_millis(50));
+    let (denied, skipped, elapsed) = evaluate_core_with_deadline(&command, budget);
+    eprintln!("MEASURE destructive_first cost={cost:?} budget={budget:?} elapsed={elapsed:?}");
     assert!(
         denied && !skipped,
         "destructive-first must deny on its merits, not on the clock \
-         (denied={denied}, skipped_due_to_budget={skipped}, elapsed={elapsed:?})"
+         (denied={denied}, skipped_due_to_budget={skipped}, elapsed={elapsed:?}, \
+          budget={budget:?} scaled from a measured {cost:?})"
     );
 }
 
