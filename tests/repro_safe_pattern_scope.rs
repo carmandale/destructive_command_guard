@@ -284,6 +284,288 @@ fn searching_on_never_allows_a_line_the_first_match_denied() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// A safe pattern written with a bare `.*` reaches across separators, so its span
+// used to end AFTER the destructive command that followed it, and the search
+// resumed past that command without judging it (.agent-config-qte7t). Spans are
+// now clamped to the command they start in, so the width of the regex no longer
+// decides how far the exemption reaches.
+//
+// These packs are not in `Config::default()`, so a corpus case would be green
+// over nothing — the enabled set has to be passed explicitly, and the first
+// assertion in each block is the control that it was.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_wide_safe_pattern_does_not_exempt_the_command_in_front_of_it() {
+    // Collected, not asserted in the loop: an assert here stops at the first
+    // case, so one regression hid how many of the thirteen narrowed rules and
+    // the per-command haystack were actually pinned.
+    let mut unreached = Vec::new();
+    let mut allowed = Vec::new();
+    for (packs, destructive, bypass) in [
+        (
+            ["core", "containers"],
+            "docker system prune -af",
+            "docker ps && docker system prune -af && docker build . --dry-run",
+        ),
+        (
+            ["core", "containers"],
+            "docker rm -f c1",
+            "docker ps && docker rm -f c1 && docker build . --dry-run",
+        ),
+        (
+            ["core", "kubernetes"],
+            "kubectl delete namespace prod",
+            "kubectl get pods && kubectl delete namespace prod && kubectl apply -f x.yaml --dry-run=client",
+        ),
+        (
+            ["core", "kubernetes"],
+            "helm uninstall prod-release",
+            "helm list && helm uninstall prod-release && helm upgrade x y --dry-run",
+        ),
+        // The same bug spelled as a negative lookahead: `(?!.*--dry-run)` asked
+        // whether the flag appears ANYWHERE later on the line, so a dry run in a
+        // later command cancelled the denial and there was no match to exempt.
+        (
+            ["core", "kubernetes"],
+            "kubectl delete deployment api",
+            "kubectl get pods && kubectl delete deployment api && kubectl apply -f x.yaml --dry-run",
+        ),
+        (
+            ["core", "package_managers"],
+            "npm publish",
+            "npm ci && npm publish && npm publish --dry-run",
+        ),
+        (
+            ["core", "package_managers"],
+            "cargo publish",
+            "cargo build && cargo publish && cargo publish --dry-run",
+        ),
+        // The destructive command FIRST. Clamping a span's end does not reach
+        // this: the safe match still begins on the destructive command's own
+        // command word, so the exemption fires exactly as before. Only matching
+        // the safe pattern against one command at a time closes it. Every case
+        // above puts a harmless command first, which is the shape that hid this.
+        (
+            ["core", "containers"],
+            "docker system prune -af",
+            "docker system prune -af && docker build . --dry-run",
+        ),
+        (
+            ["core", "containers"],
+            "docker system prune -af",
+            "docker system prune -af ; docker build . --dry-run",
+        ),
+        (
+            ["core", "containers"],
+            "docker system prune -af",
+            "docker system prune -af | docker build . --dry-run",
+        ),
+        (
+            ["core", "containers"],
+            "docker rm -f c1",
+            "docker rm -f c1 && docker build . --dry-run",
+        ),
+        (
+            ["core", "package_managers"],
+            "npm publish",
+            "npm publish && npm publish --dry-run",
+        ),
+        (
+            ["core", "package_managers"],
+            "cargo publish",
+            "cargo publish && cargo publish --dry-run",
+        ),
+        (
+            ["core", "kubernetes"],
+            "helm uninstall prod-release",
+            "helm uninstall prod-release && helm upgrade x y --dry-run",
+        ),
+        (
+            ["core", "kubernetes"],
+            "kubectl delete namespace prod",
+            "kubectl delete namespace prod && kubectl apply -f x.yaml --dry-run=client",
+        ),
+        // A safe pattern that matches the LINE and no single command speaks for
+        // neither. Reading empty spans as "the RegexSet and the patterns
+        // disagree" skipped the whole pack, which is the same bypass with the
+        // dry run detached from any command. (`echo` is not the probe to use
+        // here: that line denies either way, so it proves nothing about this.)
+        (
+            ["core", "containers"],
+            "docker system prune -af",
+            "docker system prune -af && cat --dry-run",
+        ),
+        (
+            ["core", "containers"],
+            "docker system prune -af",
+            "docker system prune -af | tee --dry-run",
+        ),
+        // A safe pattern whose meaning depends on text OUTSIDE its command must
+        // keep the whole line as its haystack. `kustomize\s+build(?!\s*\|)` says
+        // "a kustomize build that is NOT piped anywhere"; shown one command it
+        // cannot see the pipe, matches the left half of the pipeline the
+        // Critical rule blocks, and exempts it. "Preview with kubectl diff, then
+        // delete" is the idiom that rule exists for.
+        (
+            ["core", "kubernetes"],
+            "kustomize build | kubectl delete -f -",
+            "kustomize build | kubectl diff -f - && kustomize build | kubectl delete -f -",
+        ),
+        (
+            ["core", "kubernetes"],
+            "kustomize build | kubectl delete -f -",
+            "kustomize build | kubectl diff -f - ; kustomize build | kubectl delete -f -",
+        ),
+        (
+            ["core", "kubernetes"],
+            "kustomize build | kubectl delete -f -",
+            "kustomize build | kubectl apply --dry-run=client -f - && kustomize build | kubectl delete -f -",
+        ),
+    ] {
+        // Control: the pack is reached and the command is destructive on its own.
+        // Without this, a bypass that stops being evaluated reads as fixed.
+        if !is_denied_with(&packs, destructive) {
+            unreached.push(format!(
+                "{packs:?} does not reach its rule for {destructive:?}"
+            ));
+            continue;
+        }
+        if !is_denied_with(&packs, bypass) {
+            allowed.push(format!("{bypass:?} (control {destructive:?} denies)"));
+        }
+    }
+    assert!(
+        unreached.is_empty(),
+        "controls failed, so the negative results below mean nothing: {unreached:#?}"
+    );
+    assert!(
+        allowed.is_empty(),
+        "a dry run elsewhere on the line exempted the destructive command: {allowed:#?}"
+    );
+}
+
+/// An anchored safe pattern is about its own command, and a leading newline is
+/// not a way to turn its pack off.
+///
+/// `^\s*SELECT` read against the whole line means "the LINE starts with SELECT",
+/// so the SELECT spoke for the `DROP TABLE` after it. And when a span was merely
+/// clamped, a line whose first byte is a separator produced a zero-width span,
+/// which the evaluator read as a RegexSet disagreement and used to skip
+/// `database.*` wholesale (.agent-config-qte7t).
+#[test]
+fn a_select_does_not_speak_for_the_statement_after_it() {
+    let packs = ["core", "database"];
+    // Control: the destructive rule is reachable in this harness at all.
+    assert!(
+        is_denied_with(&packs, "DROP TABLE users"),
+        "control failed — the database pack is not reaching drop-table"
+    );
+    for cmd in [
+        "SELECT 1; DROP TABLE users",
+        "\nSELECT 1; DROP TABLE users",
+        "\n\nSELECT 1; DROP TABLE users",
+        " \nSELECT 1; DROP TABLE users",
+        "\tSELECT 1; DROP TABLE users",
+        "\nSELECT 1; DELETE FROM users",
+        "\nSELECT 1; TRUNCATE TABLE users",
+        "\nSHOW TABLES; DROP TABLE users",
+        "\nEXPLAIN SELECT 1; DROP TABLE users",
+    ] {
+        assert!(
+            is_denied_with(&packs, cmd),
+            "a leading read-only statement must not exempt the one after it: {cmd:?}"
+        );
+    }
+}
+
+#[test]
+fn a_wide_safe_pattern_still_exempts_its_own_command() {
+    // Control: these packs deny something, so an "allowed" below is a verdict
+    // and not a pack that was never reached.
+    for (packs, destructive) in [
+        (["core", "containers"], "docker system prune -af"),
+        (["core", "kubernetes"], "kubectl delete namespace prod"),
+        (["core", "package_managers"], "npm publish"),
+    ] {
+        assert!(
+            is_denied_with(&packs, destructive),
+            "control failed — {packs:?} is not reaching its rule for: {destructive}"
+        );
+    }
+
+    for (packs, cmd) in [
+        (["core", "containers"], "docker build . --dry-run"),
+        (
+            ["core", "containers"],
+            "docker ps && docker build . --dry-run",
+        ),
+        (
+            ["core", "containers"],
+            // The clamp reads the tokenizer, which is quote-aware: the `&&`
+            // inside the quoted argument ends no command, so the span still
+            // reaches its own `--dry-run`.
+            "docker build . -t \"a && b\" --dry-run",
+        ),
+        (
+            ["core", "kubernetes"],
+            "kubectl apply -f x.yaml --dry-run=client",
+        ),
+        (["core", "kubernetes"], "helm upgrade x y --dry-run"),
+        // The narrowed lookaheads must still exempt their OWN command's flag,
+        // which is the whole point of the flag.
+        (
+            ["core", "kubernetes"],
+            "helm uninstall prod-release --dry-run",
+        ),
+        (
+            ["core", "kubernetes"],
+            "kubectl delete deployment api --dry-run=client",
+        ),
+        (["core", "package_managers"], "npm publish --dry-run"),
+        (["core", "package_managers"], "cargo publish --dry-run"),
+        (
+            ["core", "package_managers"],
+            "npm ci && npm publish --dry-run",
+        ),
+        // The narrowed lookaheads use a plain `[^;&|\n]*`, which is not
+        // quote-aware, so a quoted `|` truncates a rule's view of its own
+        // command and the publish matches. yarn, pnpm and poetry had no dry-run
+        // safe pattern to catch that; now they do.
+        (
+            ["core", "package_managers"],
+            "yarn publish --tag \"a|b\" --dry-run",
+        ),
+        (
+            ["core", "package_managers"],
+            "pnpm publish --tag \"a|b\" --dry-run",
+        ),
+        // A `|` inside `$( … )` used to end the command twice over: it truncated
+        // the narrowed lookahead's view AND split the safe pattern's haystack,
+        // so the dry run could not exempt the publish it belongs to. `$( … )` is
+        // an argument, not a command boundary.
+        (
+            ["core", "package_managers"],
+            "npm publish $(cat args | head -1) --dry-run",
+        ),
+        (
+            ["core", "package_managers"],
+            "cargo publish --manifest-path $(ls */Cargo.toml | head -1) --dry-run",
+        ),
+        (
+            ["core", "kubernetes"],
+            "helm uninstall prod --namespace $(kubectl get ns -o name | head -1) --dry-run",
+        ),
+        (
+            ["core", "kubernetes"],
+            "kubectl delete deployment $(kubectl get deploy -o name | head -1) --dry-run=client",
+        ),
+    ] {
+        assert!(!is_denied_with(&packs, cmd), "must stay allowed: {cmd}");
+    }
+}
+
 #[test]
 fn every_command_a_safe_pattern_covers_stays_exempt() {
     for cmd in [

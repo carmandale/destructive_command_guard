@@ -1839,11 +1839,20 @@ fn evaluate_packs_with_allowlists(
             // harmless `rsync --dry-run` after `&&` used to whitelist the real
             // `rsync --delete` in front of it (.agent-config-it2wk).
             safe_spans = pack.safe_spans(command_for_packs);
-            if safe_spans.is_empty() {
+            if safe_spans.is_empty() && !pack.any_safe_pattern_matches_line(command_for_packs) {
                 // The RegexSet fast path said a safe pattern matched but no
                 // individual pattern yielded a span. Keep the old wholesale
                 // skip rather than turning an unexplained disagreement into a
                 // denial.
+                //
+                // Empty spans alone are no longer that disagreement. Safe
+                // patterns are matched one command at a time, so empty also
+                // means "a safe pattern matched only by reading across two
+                // commands, and speaks for neither" — a real answer, and the
+                // pack still has to run. Skipping the pack there turned it off
+                // wholesale: `docker system prune -af && cat --dry-run` matches
+                // `docker\s+.*--dry-run` as a line and no command
+                // (`.agent-config-qte7t`).
                 continue;
             }
         }

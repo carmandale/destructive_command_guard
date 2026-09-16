@@ -519,12 +519,40 @@ impl Pack {
     /// pattern alone: two safe patterns can cover two different commands in one
     /// line, and dropping either would deny a command the pack considers safe.
     /// A pattern's later matches are [`Self::every_safe_span`].
+    ///
+    /// Each pattern is matched against one command at a time, never the whole
+    /// line; see [`command_segments`].
     #[must_use]
     pub fn safe_spans(&self, cmd: &str) -> Vec<(usize, usize)> {
+        let segments = command_segments(cmd);
         self.safe_patterns
             .iter()
-            .filter_map(|p| p.regex.find(cmd))
+            .filter_map(|p| {
+                if needs_whole_line(p.regex.as_str()) {
+                    return p
+                        .regex
+                        .find(cmd)
+                        .and_then(|span| clamp_to_command(span, &segments));
+                }
+                segments.iter().find_map(|&(from, to)| {
+                    let segment = cmd.get(from..to)?;
+                    p.regex.find(segment).map(|(s, e)| (s + from, e + from))
+                })
+            })
             .collect()
+    }
+
+    /// True when a safe pattern matches the line read as one string.
+    ///
+    /// The question [`Self::safe_spans`] deliberately stopped answering, kept for
+    /// one caller: the evaluator has to tell "no command here is safe" from "the
+    /// `RegexSet` and the individual patterns disagree", and only the second is a
+    /// reason to skip a pack wholesale. A safe pattern that matches only by
+    /// reading across two commands answers the first — it speaks for neither of
+    /// them (`.agent-config-qte7t`).
+    #[must_use]
+    pub fn any_safe_pattern_matches_line(&self, cmd: &str) -> bool {
+        self.safe_patterns.iter().any(|p| p.regex.is_match(cmd))
     }
 
     /// Spans of every match of every safe pattern, where [`Self::safe_spans`]
@@ -533,12 +561,35 @@ impl Pack {
     /// For judging the rest of a line after a safe match has exempted a
     /// destructive one: the evaluator searches on from there, and the second of
     /// two dry runs needs its own span (`.agent-config-35ysf`).
+    ///
+    /// Per command, like [`Self::safe_spans`].
     #[must_use]
     pub fn every_safe_span(&self, cmd: &str) -> Vec<(usize, usize)> {
-        self.safe_patterns
-            .iter()
-            .flat_map(|p| p.regex.find_all(cmd))
-            .collect()
+        let segments = command_segments(cmd);
+        let mut spans = Vec::new();
+        for p in &self.safe_patterns {
+            if needs_whole_line(p.regex.as_str()) {
+                spans.extend(
+                    p.regex
+                        .find_all(cmd)
+                        .into_iter()
+                        .filter_map(|span| clamp_to_command(span, &segments)),
+                );
+                continue;
+            }
+            for &(from, to) in &segments {
+                let Some(segment) = cmd.get(from..to) else {
+                    continue;
+                };
+                spans.extend(
+                    p.regex
+                        .find_all(segment)
+                        .into_iter()
+                        .map(|(s, e)| (s + from, e + from)),
+                );
+            }
+        }
+        spans
     }
 
     /// Check if a command matches any destructive pattern.
@@ -1922,6 +1973,152 @@ fn followed_by_word_byte(hay: &[u8], idx: usize) -> bool {
         return false;
     };
     is_word_byte(next) || (next == b'-' && hay.get(idx + 1).is_some_and(|b| is_word_byte(*b)))
+}
+
+/// The byte range of each command on the line.
+///
+/// A safe pattern speaks for the command it matched, never for its neighbours,
+/// so the haystack it is matched against is one command — not the line
+/// (`.agent-config-qte7t`). Clamping the resulting SPAN is not enough: it bounds
+/// where an exemption ends without changing where the match starts, so with the
+/// destructive command first, `docker system prune -af && docker build .
+/// --dry-run` still had a safe match beginning on `docker system prune`'s own
+/// command word, and the exemption fired exactly as before.
+///
+/// Many shipped safe patterns are written with a bare `.*` — `docker\s+.*--dry-run`,
+/// `kubectl`/`helm`/`npm`/`cargo` the same way, `az\s+.*--what-if`,
+/// `ansible(?:-playbook)?\s+.*--check`, every `curl\s+.*-X\s+GET.*` in the
+/// monitoring/payment/dns families, ~30 in all — and `.*` crosses `&&`, `;` and
+/// `|`. Per-command matching fixes every pack at once and leaves those patterns
+/// alone: the guarantee belongs to the haystack, not to hand-written regexes and
+/// the next one somebody adds.
+///
+/// Only patterns that are self-contained are matched this way; see
+/// [`needs_whole_line`].
+///
+/// Commands come from [`crate::normalize::tokenize_for_normalization`], the same
+/// tokenizer `core.filesystem` walks to judge every `rm` segment on a line
+/// (`.agent-config-6nnw8`). It is quote-aware, so the `&&` inside
+/// `docker build . -t "a && b" --dry-run` ends nothing.
+///
+/// A command substitution does NOT end a command: `$( … )` is an argument of the
+/// command that embeds it. Splitting there cut `npm publish $(cat args | head -1)
+/// --dry-run` in half, and the dry run — the flag the rule's own message tells
+/// you to use — could no longer exempt the publish. A bare `(` still ends one:
+/// it opens a subshell, whose contents are commands of their own, and treating
+/// `(docker system prune -af && docker build . --dry-run)` as a single command
+/// would hand back the bypass in brackets.
+fn command_segments(cmd: &str) -> SmallVec<[(usize, usize); 8]> {
+    // Cheap reject: with no separator byte there is exactly one command, and the
+    // tokenizer never runs.
+    if !cmd
+        .bytes()
+        .any(|b| matches!(b, b';' | b'&' | b'|' | b'\n' | b'(' | b')'))
+    {
+        return SmallVec::from_elem((0, cmd.len()), 1);
+    }
+
+    let bytes = cmd.as_bytes();
+    let mut segments: SmallVec<[(usize, usize); 8]> = SmallVec::new();
+    let mut start = 0usize;
+    let mut substitution_depth = 0usize;
+    for token in crate::normalize::tokenize_for_normalization(cmd)
+        .iter()
+        .filter(|t| t.kind == crate::normalize::NormalizeTokenKind::Separator)
+    {
+        match bytes.get(token.byte_range.start) {
+            Some(b'(') => {
+                let opens_substitution =
+                    token.byte_range.start > 0 && bytes[token.byte_range.start - 1] == b'$';
+                if opens_substitution || substitution_depth > 0 {
+                    substitution_depth += 1;
+                    continue;
+                }
+            }
+            Some(b')') if substitution_depth > 0 => {
+                substitution_depth -= 1;
+                continue;
+            }
+            _ if substitution_depth > 0 => continue,
+            _ => {}
+        }
+        if token.byte_range.start > start {
+            segments.push((start, token.byte_range.start));
+        }
+        start = token.byte_range.end;
+    }
+    if start < cmd.len() {
+        segments.push((start, cmd.len()));
+    }
+    segments
+}
+
+/// True when a safe pattern's meaning depends on text outside the command it
+/// matches, so shrinking its haystack would change the question it asks.
+///
+/// Feeding one command at a time to a pattern that looks around is not a
+/// narrowing but a WIDENING, and it cost a Critical rule:
+/// `kustomize\s+build(?!\s*\|)` exists to say "a `kustomize build` that is not
+/// piped anywhere". Shown only its own command it can no longer see the pipe, so
+/// it matched the left half of the exact pipeline
+/// `kustomize build | kubectl delete -f -` is written to block, and exempted it
+/// (`.agent-config-qte7t`, cold review 2). The same holds for `^` and `$`: the
+/// scp rules deliberately anchor safe patterns to the end of the TEXT while the
+/// destructive ones end at a separator (`src/packs/remote/scp.rs`, with
+/// `.agent-config-5udyd` holding the question of whether to change that) — which
+/// is not this bead's call to make silently.
+///
+/// These patterns keep the whole line as their haystack, exactly as before, and
+/// only the resulting span is cut to the command it starts in. That is enough
+/// for them, because they are short: they match a command word and its flags,
+/// not a `.*` run to a flag three commands away.
+fn needs_whole_line(pattern: &str) -> bool {
+    let bytes = pattern.as_bytes();
+    let mut i = 0;
+    let mut in_class = false;
+    while i < bytes.len() {
+        match bytes[i] {
+            // An escape covers the next byte: `\^`, `\$`, `\[` are literals.
+            b'\\' => {
+                i += 2;
+                continue;
+            }
+            b'[' if !in_class => in_class = true,
+            b']' if in_class => in_class = false,
+            // `[^…]` is a negated class, not an anchor, which is why the class
+            // state is tracked at all.
+            b'^' | b'$' if !in_class => return true,
+            // `(?=`, `(?!`, `(?<=`, `(?<!` look around. `(?:` and `(?i)` do not.
+            b'(' if !in_class
+                && bytes.get(i + 1) == Some(&b'?')
+                && matches!(bytes.get(i + 2), Some(b'=' | b'!' | b'<')) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Cut a span to the command it starts in.
+///
+/// For the [`needs_whole_line`] patterns: they still read the line, but what
+/// they exempt is one command. A span cut to nothing is dropped — it exempts
+/// nothing either way — and an empty result no longer means "skip this pack",
+/// which is what `Pack::any_safe_pattern_matches_line` is for.
+fn clamp_to_command(span: (usize, usize), segments: &[(usize, usize)]) -> Option<(usize, usize)> {
+    let (start, end) = span;
+    // The first command that has not already ended at `start`: the one this span
+    // begins in, or — when the span begins on a separator, as `^\s*SELECT` does
+    // on a line whose first byte is a newline — the one it runs into.
+    let segment_end = segments
+        .iter()
+        .find(|&&(_, to)| to > start)
+        .map_or(end, |&(_, to)| to);
+    let end = end.min(segment_end);
+    (end > start).then_some((start, end))
 }
 
 /// True when a match begins inside a longer word.

@@ -140,7 +140,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // fdisk (partition editing)
         destructive_pattern!(
             "fdisk-edit",
-            r"fdisk\s+/dev/(?!.*-l)",
+            r"fdisk\s+/dev/(?![^;&|\n]*-l)",
             "fdisk can modify partition tables and cause data loss."
         ),
         // parted (except print)
