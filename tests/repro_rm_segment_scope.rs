@@ -56,6 +56,7 @@ fn is_denied(command: &str) -> bool {
         &overrides,
         &allowlists,
         &heredoc,
+        config.policy(),
     )
     .is_denied()
 }

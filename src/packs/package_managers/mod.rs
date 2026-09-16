@@ -57,6 +57,14 @@ fn create_safe_patterns() -> Vec<SafePattern> {
         // dry-run flags
         safe_pattern!("npm-dry-run", r"npm\s+.*--dry-run"),
         safe_pattern!("cargo-dry-run", r"cargo\s+.*--dry-run"),
+        // yarn, pnpm and poetry publish the same way and had no dry-run safe
+        // pattern, so their narrowed lookahead had nothing to fall back on when
+        // a quoted `|` or `&` truncated its view of its own command:
+        // `yarn publish --tag "a|b" --dry-run` was denied (.agent-config-qte7t).
+        // Safe to add now that a safe pattern is matched against one command and
+        // cannot reach past it.
+        safe_pattern!("yarn-dry-run", r"yarn\s+.*--dry-run"),
+        safe_pattern!("pnpm-dry-run", r"pnpm\s+.*--dry-run"),
     ]
 }
 
@@ -65,17 +73,17 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // npm/yarn/pnpm publish
         destructive_pattern!(
             "npm-publish",
-            r"npm\s+publish\b(?!.*--dry-run)",
+            r"npm\s+publish\b(?![^;&|\n]*--dry-run)",
             "npm publish releases a package publicly. Use --dry-run first."
         ),
         destructive_pattern!(
             "yarn-publish",
-            r"yarn\s+publish\b(?!.*--dry-run)",
+            r"yarn\s+publish\b(?![^;&|\n]*--dry-run)",
             "yarn publish releases a package publicly. Verify package.json first."
         ),
         destructive_pattern!(
             "pnpm-publish",
-            r"pnpm\s+publish\b(?!.*--dry-run)",
+            r"pnpm\s+publish\b(?![^;&|\n]*--dry-run)",
             "pnpm publish releases a package publicly."
         ),
         // npm unpublish
@@ -117,7 +125,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // cargo publish
         destructive_pattern!(
             "cargo-publish",
-            r"cargo\s+publish\b(?!.*--dry-run)",
+            r"cargo\s+publish\b(?![^;&|\n]*--dry-run)",
             "cargo publish releases a crate to crates.io. Use --dry-run first."
         ),
         // cargo yank
@@ -141,7 +149,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // poetry publish/remove
         destructive_pattern!(
             "poetry-publish",
-            r"poetry\s+publish\b(?!.*--dry-run)",
+            r"poetry\s+publish\b(?![^;&|\n]*--dry-run)",
             "poetry publish releases a package. Use --dry-run first."
         ),
         destructive_pattern!(

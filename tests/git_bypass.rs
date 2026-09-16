@@ -102,3 +102,103 @@ fn safe_git_commands_are_still_allowed_on_their_own() {
     }
     assert!(denied.is_empty(), "safe git commands denied: {denied:#?}");
 }
+
+/// The rule the hook denied with, or `None` when it allowed (printed nothing).
+fn denied_rule(command: &str) -> Option<String> {
+    let output = run_hook(command);
+    if output.trim().is_empty() {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_str(&output)
+        .unwrap_or_else(|e| panic!("hook output is not JSON ({e}): {output}"));
+    let hook = &json["hookSpecificOutput"];
+    assert_eq!(
+        hook["permissionDecision"], "deny",
+        "for {command}: {output}"
+    );
+    Some(
+        hook["ruleId"]
+            .as_str()
+            .unwrap_or_else(|| panic!("deny without a ruleId for {command}: {output}"))
+            .to_string(),
+    )
+}
+
+/// The allow direction for the reverse order: a safe git command in front of
+/// another safe one (.agent-config-uyc9l). These are false-positive controls,
+/// not pins on the search-past-an-exemption path -- they pass on both sides of
+/// 35ysf's fix, which is the point. `denied_rule` is the oracle here rather
+/// than a `contains("deny")` substring, so an `ask` verdict or a rule id with
+/// "deny" in its text cannot read as either answer.
+#[test]
+fn a_safe_git_command_in_front_of_another_safe_one_is_allowed() {
+    let mut denied = Vec::new();
+    for cmd in [
+        "git checkout -b feat && git status",
+        "git restore --staged a.txt && git restore --staged b.txt",
+        "git clean -n\ngit checkout -b feat",
+    ] {
+        if let Some(rule) = denied_rule(cmd) {
+            denied.push(format!("{cmd:?} -> {rule}"));
+        }
+    }
+    assert!(denied.is_empty(), "safe lines denied: {denied:#?}");
+}
+
+/// The reverse order: a safe git command FIRST must not exempt a destructive
+/// git command after it (.agent-config-uyc9l).
+///
+/// These same commands are also in `tests/corpus/true_positives/git_safe_span.toml`
+/// on purpose, and neither copy is redundant: this one runs the real hook
+/// binary end to end, while the corpus runs the evaluator and is additionally
+/// consumed by the isomorphism and keyword-index tests.
+///
+/// A safe span exempts a destructive match that STARTS inside it. The core.git
+/// destructive patterns open with a skipper that crosses `&&` (qv9dy keeps it:
+/// bounding it opened bypasses), so the leftmost destructive match started at
+/// the first `git` on the line, inside the safe `git checkout -b feat` span,
+/// although the command it matched came after it. Narrowing the safe side
+/// (t17jx) cannot reach this: that span is already one command.
+#[test]
+fn safe_git_command_first_does_not_exempt_a_destructive_one_after_it() {
+    let mut wrong = Vec::new();
+    for (cmd, rule) in [
+        (
+            "git checkout -b feat && git push --force origin main",
+            "core.git:push-force-long",
+        ),
+        (
+            "git checkout -b feat ; git reset --hard",
+            "core.git:reset-hard",
+        ),
+        ("git clean -n && git clean -fd", "core.git:clean-force"),
+        // Agents emit multi-line Bash, so the newline separator carries the
+        // same weight as `&&` here as it does on t17jx's side of the corpus.
+        (
+            "git checkout -b feat\ngit push --force origin main",
+            "core.git:push-force-long",
+        ),
+        (
+            "git restore --staged a.txt && git restore b.txt",
+            "core.git:restore-worktree",
+        ),
+        // .agent-config-qv9dy's review spellings, behind a safe command.
+        (
+            "git checkout -b feat && git -C \"$(cd a && pwd)\" push --force",
+            "core.git:push-force-long",
+        ),
+        (
+            "git checkout -b feat && git -c a.b=x\\;y checkout HEAD -- f",
+            "core.git:checkout-ref-discard",
+        ),
+    ] {
+        let got = denied_rule(cmd);
+        if got.as_deref() != Some(rule) {
+            wrong.push(format!("{cmd:?}: want {rule}, got {got:?}"));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "a safe git command in front exempted a destructive one: {wrong:#?}"
+    );
+}
