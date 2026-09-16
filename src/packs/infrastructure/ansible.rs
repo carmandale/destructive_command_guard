@@ -96,7 +96,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // ansible-playbook targeting all hosts without limit
         destructive_pattern!(
             "playbook-all-hosts",
-            r"ansible-playbook\s+(?!.*(?:--check|--limit|--diff)).*-i\s+\S+\s+\S+\.ya?ml",
+            r"ansible-playbook\s+(?![^;&|\n]*(?:--check|--limit|--diff)).*-i\s+\S+\s+\S+\.ya?ml",
             "ansible-playbook without --check or --limit may affect all hosts. Use --check first.",
             High,
             "Running ansible-playbook without --check or --limit applies changes to all hosts in \

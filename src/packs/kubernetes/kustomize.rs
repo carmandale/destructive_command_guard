@@ -82,7 +82,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // kubectl delete -k (kustomize flag)
         destructive_pattern!(
             "kubectl-delete-k",
-            r"kubectl\s+delete\s+-k\b(?!.*--dry-run)",
+            r"kubectl\s+delete\s+-k\b(?![^;&|\n]*--dry-run)",
             "kubectl delete -k removes all resources defined in the kustomization. Use --dry-run first.",
             Critical,
             "kubectl delete -k removes all resources defined in a kustomization directory. \
