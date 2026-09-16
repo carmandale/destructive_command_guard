@@ -189,6 +189,21 @@ Cleared 2026-09-07 under `.agent-config-9brj5`: `ci.yml`, `bench.yml` and
 `cli-version-audit.yml` were `disabled_fork`; all ten workflows are now `active`
 and a push to `main` produced this repo's first `event: push` run.
 
+**A fmt red costs you every other CI signal.** `ci.yml`'s `check` job runs
+`cargo fmt -- --check` **first**, so when it fails the job stops there: clippy and
+the whole test step are skipped, and the run reports one red gate while the others
+never ran at all. Measured 2026-09-16 under `.agent-config-w2stx`: the last eight
+pushes to `main` all failed at `Check formatting` with clippy and tests showing as
+skipped — the third instance of the same two files (`.agent-config-pcqod`,
+`.agent-config-moubj` closed it twice before).
+
+So `cargo fmt --check` is not a tidiness step; it is what keeps the rest of CI
+readable. Run it before you push, and read the run afterwards — `main` is **not**
+branch-protected (`gh api repos/carmandale/destructive_command_guard/branches/main/protection`
+returns 404), so a push lands whatever CI says. Beware the reverse trap: bare
+`cargo fmt` reformats files your change does not own, which quietly folds someone
+else's red into your commit. Format your own files, or `git checkout --` the rest.
+
 ---
 
 ## Testing
