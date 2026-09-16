@@ -1206,7 +1206,6 @@ dependencies = [
  "ratatui",
  "rayon",
  "regex",
- "regex-automata",
  "rich_rust",
  "rust-mcp-sdk",
  "self_update",
