@@ -154,6 +154,23 @@ impl CompiledRegex {
         }
     }
 
+    /// Every non-overlapping match in the text, in order.
+    ///
+    /// A backtracking search that gives up ends the list, keeping the matches
+    /// found before it. Like [`Self::is_match`], that is the safe reading only
+    /// for a pattern that ALLOWS: fewer spans exempt less.
+    #[must_use]
+    pub fn find_all(&self, text: &str) -> Vec<(usize, usize)> {
+        match self {
+            Self::Linear(re) => re.find_iter(text).map(|m| (m.start(), m.end())).collect(),
+            Self::Backtracking(re) => re
+                .find_iter(text)
+                .map_while(Result::ok)
+                .map(|m| (m.start(), m.end()))
+                .collect(),
+        }
+    }
+
     /// Find the first match that begins at a command-word boundary.
     ///
     /// Restarts the search one character past a rejected start rather than past
@@ -175,7 +192,23 @@ impl CompiledRegex {
     /// answering. Every caller matches a pattern that blocks, so every caller
     /// treats that as a match, for the same reason as the restart bound above.
     pub fn find_command_word(&self, text: &str) -> Result<Option<(usize, usize)>, String> {
-        let mut at = 0usize;
+        self.find_command_word_from(text, 0)
+    }
+
+    /// [`Self::find_command_word`], for a match that starts at or after `from`.
+    ///
+    /// For searching on past a match the caller has already dealt with, such as
+    /// one a safe pattern exempts (.agent-config-35ysf). `from` must be a char
+    /// boundary; a match end always is.
+    ///
+    /// # Errors
+    /// Same as [`Self::find_command_word`].
+    pub fn find_command_word_from(
+        &self,
+        text: &str,
+        from: usize,
+    ) -> Result<Option<(usize, usize)>, String> {
+        let mut at = from;
         let mut last_rejected: Option<(usize, usize)> = None;
 
         for _ in 0..MAX_BOUNDARY_RESTARTS {
@@ -406,6 +439,14 @@ impl LazyCompiledRegex {
             .and_then(|compiled| compiled.find(haystack))
     }
 
+    /// Every non-overlapping match; see [`CompiledRegex::find_all`]. Empty if
+    /// the pattern failed to compile.
+    #[must_use]
+    pub fn find_all(&self, haystack: &str) -> Vec<(usize, usize)> {
+        self.get_compiled()
+            .map_or_else(Vec::new, |compiled| compiled.find_all(haystack))
+    }
+
     /// Find the first match that begins at a command-word boundary.
     ///
     /// Same as [`Self::find`], except that a match starting partway through a
@@ -421,8 +462,22 @@ impl LazyCompiledRegex {
     /// Returns the engine's message when a backtracking search gave up; see
     /// [`CompiledRegex::find_command_word`].
     pub fn find_command_word(&self, haystack: &str) -> Result<Option<(usize, usize)>, String> {
-        self.get_compiled()
-            .map_or(Ok(None), |compiled| compiled.find_command_word(haystack))
+        self.find_command_word_from(haystack, 0)
+    }
+
+    /// [`Self::find_command_word`], for a match that starts at or after `from`;
+    /// see [`CompiledRegex::find_command_word_from`].
+    ///
+    /// # Errors
+    /// Same as [`Self::find_command_word`].
+    pub fn find_command_word_from(
+        &self,
+        haystack: &str,
+        from: usize,
+    ) -> Result<Option<(usize, usize)>, String> {
+        self.get_compiled().map_or(Ok(None), |compiled| {
+            compiled.find_command_word_from(haystack, from)
+        })
     }
 
     /// Get the pattern string.

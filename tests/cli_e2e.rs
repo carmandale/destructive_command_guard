@@ -2003,6 +2003,116 @@ block = [
         // preventing normalization stripping, and classify the argument as InlineCode.
         assert_hook_denies(cmd);
     }
+
+    /// A match a safe pattern exempts does not end the search for that rule.
+    ///
+    /// The first `rsync` is a dry run, so its `--delete` is exempt. The rule used
+    /// to stop at that first match and `continue`, so the second `rsync`, which
+    /// really deletes, was never looked at and the line was ALLOWED
+    /// (.agent-config-35ysf). `remote` is enabled because the live guard runs it;
+    /// the default test packs would allow this line without evaluating rsync.
+    ///
+    /// The rule id is asserted, not only the decision: `rsync-del-short` cannot
+    /// match `--delete`, so only `rsync-delete` finding the second command proves
+    /// the search went on.
+    ///
+    /// The next two lines were DENIED before searching on existed, and must stay
+    /// denied by the same rule. In each, searching on gives a warn-only rule
+    /// (`core.git:branch-force-delete`, `remote.ssh:ssh-keygen-remove-host`) a
+    /// match the old rule never reached. The hook decides deny or warn from the
+    /// rule the evaluator returns, so a match found past an exemption is held
+    /// until the rules the first search reached have run; returned at once, it
+    /// turned each line into a warning and hid the blocking rule after it. The
+    /// last line is the same shape under a policy that warns on a High rule.
+    #[test]
+    fn hook_mode_safe_exemption_does_not_hide_a_later_destructive_command() {
+        let packs = std::ffi::OsStr::new("core,remote");
+        // The live config sets `core.git:clean-force`, a High rule, to warn. A
+        // match on it found past an exemption blocks by severity but only warns
+        // by policy, so returned at once it hid the rsync after it.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let policy = temp.path().join("dcg-config.toml");
+        std::fs::write(
+            &policy,
+            "[policy.rules]\n\"core.git:clean-force\" = \"warn\"\n",
+        )
+        .expect("write policy config");
+        let default_env = [("DCG_PACKS", packs)];
+        let policy_env = [("DCG_PACKS", packs), ("DCG_CONFIG", policy.as_os_str())];
+
+        // Control: the policy is in force, so clean-force alone only warns.
+        let run = run_dcg_hook_with_env("git clean -fd", &policy_env);
+        assert!(
+            run.output.status.success() && run.stdout_str().trim().is_empty(),
+            "the warn policy for clean-force did not load\nstdout:\n{}\nstderr:\n{}",
+            run.stdout_str(),
+            run.stderr_str()
+        );
+
+        for (command, rule, env) in [
+            (
+                "rsync --dry-run --delete a b && rsync -a --delete /src/ /dst/",
+                "remote.rsync:rsync-delete",
+                &default_env[..],
+            ),
+            // Across packs: core.git runs before remote.
+            (
+                "git checkout -b feat && git branch -D old && rsync -a --delete /src/ /dst/",
+                "remote.rsync:rsync-delete",
+                &default_env[..],
+            ),
+            // The bead's line behind a warn-only command: the warn match the
+            // first search holds must not outrank the blocking rsync found past
+            // the exemption.
+            (
+                "git branch -D old && rsync --dry-run --delete a b && rsync -a --delete /src/ /dst/",
+                "remote.rsync:rsync-delete",
+                &default_env[..],
+            ),
+            // Within one pack: the warn-only rule comes first in remote.ssh.
+            (
+                "ssh-keygen -l -f known ; ssh-keygen -R host ; ssh host sudo rm -r /data",
+                "remote.ssh:ssh-remote-sudo-rm",
+                &default_env[..],
+            ),
+            (
+                "git checkout -b feat && git clean -fd && rsync -a --delete /src/ /dst/",
+                "remote.rsync:rsync-delete",
+                &policy_env[..],
+            ),
+        ] {
+            let run = run_dcg_hook_with_env(command, env);
+            let stdout = run.stdout_str();
+            let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+                panic!(
+                    "{command:?} should produce a hook decision ({e})\nstdout:\n{stdout}\nstderr:\n{}",
+                    run.stderr_str()
+                )
+            });
+            assert_eq!(
+                json["hookSpecificOutput"]["permissionDecision"], "deny",
+                "{command:?} should be denied\nstdout:\n{stdout}"
+            );
+            assert_eq!(
+                json["hookSpecificOutput"]["ruleId"], rule,
+                "{command:?} should be denied by {rule}\nstdout:\n{stdout}"
+            );
+        }
+
+        // The other direction: searching on must still exempt every command a
+        // safe pattern covers, not only the first one.
+        let run = run_dcg_hook_with_env(
+            "rsync --dry-run --delete a b && rsync --dry-run --delete c d",
+            &[("DCG_PACKS", packs)],
+        );
+        assert!(
+            run.output.status.success() && run.stdout_str().trim().is_empty(),
+            "two dry runs must stay allowed (exit {:?})\nstdout:\n{}\nstderr:\n{}",
+            run.output.status.code(),
+            run.stdout_str(),
+            run.stderr_str()
+        );
+    }
 }
 
 // ============================================================================
@@ -3802,6 +3912,67 @@ safe_patterns:
                 );
             }
         }
+    }
+
+    /// A search that gives up after a safe pattern exempted an earlier match of
+    /// the same rule still denies.
+    ///
+    /// The first `deploy aa--prod` is a dry run and exempt, so the rule searches
+    /// on (.agent-config-35ysf) and the crafted command after it exhausts the
+    /// backtrack limit. That error has to be held like any other search that
+    /// gave up (.agent-config-ryyfo), not dropped because it came after an
+    /// exemption.
+    #[test]
+    fn search_that_gives_up_after_an_exemption_denies() {
+        let pack_content = r#"
+schema_version: 1
+id: custom.deploy
+name: Custom Deploy Rules
+version: 1.0.0
+keywords:
+  - deploy
+destructive_patterns:
+  - name: prod-deploy
+    pattern: deploy\s(?=(a|a)*\1--prod)
+    severity: critical
+    description: Direct production deployment blocked
+safe_patterns:
+  - name: dry-run
+    pattern: deploy\s+aa--prod\s+--dry-run
+    description: A dry run changes nothing
+"#;
+
+        // Control: the exemption applies, so the gave-up case below is reached
+        // only by searching on past it.
+        let exempt = "deploy aa--prod --dry-run";
+        let (_temp, output) = setup_custom_pack_env(pack_content, exempt);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.trim().is_empty(),
+            "{exempt:?} should be allowed\nstdout:\n{stdout}"
+        );
+
+        let command = format!("{exempt} && deploy {}", "a".repeat(40));
+        let (_temp, output) = setup_custom_pack_env(pack_content, &command);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+            panic!("{command:?} should produce a hook decision ({e})\nstdout:\n{stdout}")
+        });
+        assert_eq!(
+            json["hookSpecificOutput"]["permissionDecision"], "deny",
+            "{command:?} should be denied\nstdout:\n{stdout}"
+        );
+        assert_eq!(
+            json["hookSpecificOutput"]["ruleId"], "custom.deploy:prod-deploy",
+            "{command:?} should be denied by prod-deploy\nstdout:\n{stdout}"
+        );
+        let given = json["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            given.contains(GAVE_UP),
+            "{command:?} should be denied as a search that gave up\nstdout:\n{stdout}"
+        );
     }
 
     /// A rule allowlisted for the project stays allowed when its search gives

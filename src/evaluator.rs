@@ -433,6 +433,21 @@ fn denied_because_search_gave_up(
     }
 }
 
+/// Keep the first held denial whose rule blocks: one that would only warn must
+/// not decide for one that blocks and was found later.
+fn hold_first_blocking(
+    slot: &mut Option<(EvaluationResult, crate::packs::Severity)>,
+    decision: EvaluationResult,
+    severity: crate::packs::Severity,
+) {
+    if slot
+        .as_ref()
+        .is_none_or(|(_, held)| severity.blocks_by_default() && !held.blocks_by_default())
+    {
+        *slot = Some((decision, severity));
+    }
+}
+
 /// Byte span of a match within the evaluated command string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MatchSpan {
@@ -1655,6 +1670,14 @@ fn evaluate_packs_with_allowlists(
     // (.agent-config-3ktl8). Scanning continues so a rule that blocks can still
     // be found; this is returned only when none was.
     let mut pending_non_blocking: Option<EvaluationResult> = None;
+    // A match found by searching on past a safe exemption (.agent-config-35ysf),
+    // with its rule's severity. The search that reached it never used to run, so
+    // it waits until every rule the first search reached has had its say:
+    // returned at once, a rule found this way that the policy only warns on
+    // (live config: `core.git:clean-force`, High) pre-empted the rule after it
+    // that blocks, and `git checkout -b f && git clean -fd && rsync -a --delete
+    // /s/ /d/` warned where it used to be denied.
+    let mut found_past_exemption: Option<(EvaluationResult, crate::packs::Severity)> = None;
 
     for &(pack_id, pack) in &candidate_packs {
         if deadline_exceeded(deadline) || remaining_below(deadline, &crate::perf::PATTERN_MATCH) {
@@ -1765,7 +1788,11 @@ fn evaluate_packs_with_allowlists(
             }
         }
 
-        for pattern in &pack.destructive_patterns {
+        // Every match of every safe pattern, built only once a rule has searched
+        // on past an exemption.
+        let mut every_safe_span: Option<Vec<(usize, usize)>> = None;
+
+        'patterns: for pattern in &pack.destructive_patterns {
             if deadline_exceeded(deadline) || remaining_below(deadline, &crate::perf::PATTERN_MATCH)
             {
                 return EvaluationResult::allowed_due_to_budget();
@@ -1774,54 +1801,90 @@ fn evaluate_packs_with_allowlists(
             // All severity levels are now evaluated. The policy layer in main.rs
             // determines whether to deny, warn, or log based on severity and config.
 
-            let matched_span = match pattern.regex.find_command_word(command_for_packs) {
-                Ok(found) => found.map(|(start, end)| MatchSpan { start, end }),
-                // The engine gave up before answering (fancy_regex's backtrack
-                // limit). For a pattern that blocks, unknown has to deny: read
-                // as "no match", a command crafted to exhaust the limit got
-                // through (.agent-config-ryyfo). The denial waits until every
-                // other pattern has run, so a real match elsewhere in the
-                // command is the rule that gets named. There is no match
-                // location, so no safe span can be shown to cover it.
-                Err(_) => {
-                    let allowlisted = pattern.name.is_some_and(|name| {
-                        allowlists
-                            .match_rule_at_path(pack_id, name, project_path)
-                            .is_some()
-                    });
-                    // Keep the first one that blocks: a warn-only rule that gave up
-                    // first must not decide for a blocking one that gave up later.
-                    let outranks = gave_up.is_none_or(|(_, held)| {
-                        pattern.severity.blocks_by_default() && !held.severity.blocks_by_default()
-                    });
-                    if !allowlisted && outranks {
-                        gave_up = Some((pack_id, pattern));
+            // An exempted match does not end the search for this rule. Stopping
+            // there let `rsync --dry-run --delete a b && rsync -a --delete /s/ /d/`
+            // through: the dry run's match was exempt, and the real delete after
+            // it was never looked at (.agent-config-35ysf).
+            let mut from = 0;
+            let (span, past_exemption) = loop {
+                match pattern
+                    .regex
+                    .find_command_word_from(command_for_packs, from)
+                {
+                    Ok(Some((start, end))) => {
+                        // Until a match has been exempted, the spans are each safe
+                        // pattern's first match, exactly as before searching on
+                        // existed, so no rule loses a match it used to report. Only
+                        // the rest of a line past an exemption, which used to go
+                        // unread, is judged against every safe match: the second of
+                        // two dry runs needs a span of its own. Every span from the
+                        // start would let a wide safe pattern's later match
+                        // (`docker\s+(?:inspect|logs)\s+.*\btraefik\b` reaching past
+                        // `; docker kill traefik`) exempt a command the first match
+                        // left denied. A match found past an exemption is held until
+                        // the first search is done (`found_past_exemption`), so it
+                        // cannot pre-empt a rule after it.
+                        let spans = if from == 0 {
+                            safe_spans.as_slice()
+                        } else {
+                            every_safe_span
+                                .get_or_insert_with(|| pack.every_safe_span(command_for_packs))
+                                .as_slice()
+                        };
+                        // A safe pattern covers this match only if the match
+                        // STARTS inside it. Containment of the whole span is too
+                        // strict: in `rsync --dry-run -a --delete src dst` the safe
+                        // match ends at `--dry-run` while the destructive one runs
+                        // on to `--delete`, and that command is genuinely safe. The
+                        // start is the command word, so this asks "is the command
+                        // this safe pattern matched the same command that is about
+                        // to be blocked".
+                        let Some(&(_, safe_end)) = spans.iter().find(|&&(safe_start, safe_end)| {
+                            start >= safe_start && start < safe_end
+                        }) else {
+                            break (MatchSpan { start, end }, from > 0);
+                        };
+                        // Resume where the safe span ends, not where the destructive
+                        // match ends: a destructive regex that runs across `&&`
+                        // (core.git's `git\s+(?:\S+\s+)*`) ends past the real
+                        // command after it. Any match starting inside the span is
+                        // exempt by the same test. `safe_end > start >= from`, so
+                        // every pass moves forward and `from` is never 0 again.
+                        from = safe_end;
                     }
-                    continue;
+                    Ok(None) => continue 'patterns,
+                    // The engine gave up before answering (fancy_regex's backtrack
+                    // limit). For a pattern that blocks, unknown has to deny: read
+                    // as "no match", a command crafted to exhaust the limit got
+                    // through (.agent-config-ryyfo). The denial waits until every
+                    // other pattern has run, so a real match elsewhere in the
+                    // command is the rule that gets named. There is no match
+                    // location, so no safe span can be shown to cover it.
+                    Err(_) => {
+                        let allowlisted = pattern.name.is_some_and(|name| {
+                            allowlists
+                                .match_rule_at_path(pack_id, name, project_path)
+                                .is_some()
+                        });
+                        // Keep the first one that blocks: a warn-only rule that gave up
+                        // first must not decide for a blocking one that gave up later.
+                        let outranks = gave_up.is_none_or(|(_, held)| {
+                            pattern.severity.blocks_by_default()
+                                && !held.severity.blocks_by_default()
+                        });
+                        if !allowlisted && outranks {
+                            gave_up = Some((pack_id, pattern));
+                        }
+                        continue 'patterns;
+                    }
                 }
             };
-            let Some(span) = matched_span else {
-                continue;
-            };
-
-            // A safe pattern covers this match only if the match STARTS inside
-            // it. Containment of the whole span is too strict: in
-            // `rsync --dry-run -a --delete src dst` the safe match ends at
-            // `--dry-run` while the destructive one runs on to `--delete`, and
-            // that command is genuinely safe. The start is the command word, so
-            // this asks "is the command this safe pattern matched the same
-            // command that is about to be blocked".
-            if safe_spans
-                .iter()
-                .any(|&(start, end)| span.start >= start && span.start < end)
-            {
-                continue;
-            }
 
             // A real match that would only warn or log must not stand in for a
             // search that gave up on a rule that blocks: the hook would allow a
             // command the unknown rule might have stopped (.agent-config-ryyfo).
-            if let Some((held_pack, held)) = gave_up {
+            // A match found past an exemption decides nothing here; it is held.
+            if let Some((held_pack, held)) = gave_up.filter(|_| !past_exemption) {
                 if held.severity.blocks_by_default() && !pattern.severity.blocks_by_default() {
                     return denied_because_search_gave_up(held_pack, held);
                 }
@@ -1883,6 +1946,11 @@ fn evaluate_packs_with_allowlists(
                     )
                 };
 
+                if past_exemption {
+                    hold_first_blocking(&mut found_past_exemption, decision, pattern.severity);
+                    continue;
+                }
+
                 if pattern.severity.blocks_by_default() {
                     return decision;
                 }
@@ -1895,17 +1963,37 @@ fn evaluate_packs_with_allowlists(
                 continue;
             }
 
-            if let Some(mapped_span) = mapped_span {
-                return EvaluationResult::denied_by_pack_with_span(
+            let decision = if let Some(mapped_span) = mapped_span {
+                EvaluationResult::denied_by_pack_with_span(
                     pack_id,
                     reason,
                     pattern.explanation,
                     original_command,
                     mapped_span,
-                );
+                )
+            } else {
+                EvaluationResult::denied_by_pack(pack_id, reason, pattern.explanation)
+            };
+
+            if past_exemption {
+                hold_first_blocking(&mut found_past_exemption, decision, pattern.severity);
+                continue;
             }
 
-            return EvaluationResult::denied_by_pack(pack_id, reason, pattern.explanation);
+            return decision;
+        }
+    }
+
+    // A match found past an exemption outranks what the first search held only
+    // when its rule blocks and theirs does not; otherwise the first search's
+    // answer stands, as it did before searching on existed.
+    if found_past_exemption
+        .as_ref()
+        .is_some_and(|(_, severity)| severity.blocks_by_default())
+        && gave_up.is_none_or(|(_, pattern)| !pattern.severity.blocks_by_default())
+    {
+        if let Some((decision, _)) = found_past_exemption {
+            return decision;
         }
     }
 
@@ -1917,6 +2005,11 @@ fn evaluate_packs_with_allowlists(
 
     // Nothing blocked, so the warn/log match held above is the answer after all.
     if let Some(decision) = pending_non_blocking {
+        return decision;
+    }
+
+    // Only a warn/log match past an exemption was found.
+    if let Some((decision, _)) = found_past_exemption {
         return decision;
     }
 
