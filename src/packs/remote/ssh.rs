@@ -49,7 +49,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // Matches: ssh host 'rm -rf ...', ssh user@host "git reset --hard", etc.
         destructive_pattern!(
             "ssh-remote-rm-rf",
-            r#"ssh\s+(?:\S+\s+)*(?:-[A-Za-z]+\s+)*\S+[@:]?\S*\s+['"]?.*\brm\s+-[a-zA-Z]*r[a-zA-Z]*f"#,
+            r#"ssh\s+(?:'[^']*'|"[^"]*"|[^;&|\n'"])*(?:[^\S\n]\$?['"][^'"]*)?\brm\s+-[a-zA-Z]*r[a-zA-Z]*f"#,
             "SSH remote execution contains destructive rm -rf command.",
             Critical,
             "Executing rm -rf on a remote system via SSH can cause irreversible data loss. \
@@ -62,7 +62,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
         destructive_pattern!(
             "ssh-remote-git-reset-hard",
-            r#"ssh\s+(?:\S+\s+)*(?:-[A-Za-z]+\s+)*\S+[@:]?\S*\s+['"]?.*\bgit\s+reset\s+--hard\b"#,
+            r#"ssh\s+(?:'[^']*'|"[^"]*"|[^;&|\n'"])*(?:[^\S\n]\$?['"][^'"]*)?\bgit\s+reset\s+--hard\b"#,
             "SSH remote execution contains destructive git reset --hard command.",
             High,
             "Running git reset --hard on a remote server discards all uncommitted changes. \
@@ -75,7 +75,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
         destructive_pattern!(
             "ssh-remote-git-clean",
-            r#"ssh\s+(?:\S+\s+)*(?:-[A-Za-z]+\s+)*\S+[@:]?\S*\s+['"]?.*\bgit\s+clean\s+-[a-zA-Z]*f"#,
+            r#"ssh\s+(?:'[^']*'|"[^"]*"|[^;&|\n'"])*(?:[^\S\n]\$?['"][^'"]*)?\bgit\s+clean\s+-[a-zA-Z]*f"#,
             "SSH remote execution contains destructive git clean -f command.",
             High,
             "Running git clean -f on a remote server permanently removes untracked files. \
@@ -89,7 +89,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // Known hosts removal
         destructive_pattern!(
             "ssh-keygen-remove-host",
-            r"ssh-keygen\s+(?:\S+\s+)*-R\b",
+            r"ssh-keygen[^\S\n]+(?:[^\s;&|]+[^\S\n]+)*-R\b",
             "ssh-keygen -R removes entries from known_hosts file.",
             Medium,
             "Removing entries from known_hosts weakens protection against man-in-the-middle \
@@ -116,7 +116,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // Remote sudo operations (high risk)
         destructive_pattern!(
             "ssh-remote-sudo-rm",
-            r#"ssh\s+(?:\S+\s+)*\S+[@:]?\S*\s+['"]?.*\bsudo\s+rm\b"#,
+            r#"ssh\s+(?:'[^']*'|"[^"]*"|[^;&|\n'"])*(?:[^\S\n]\$?['"][^'"]*)?\bsudo\s+rm\b"#,
             "SSH remote execution with sudo rm is high-risk.",
             Critical,
             "Executing sudo rm on a remote system bypasses normal permission restrictions \
@@ -248,5 +248,176 @@ mod tests {
             "ssh root@host 'sudo rm /etc/passwd'",
             "ssh-remote-sudo-rm",
         );
+    }
+
+    /// `.agent-config-1k7w1`. One row per remote-execution rule: the rule name,
+    /// a command it must still deny, and the bare verb that must NOT be read as
+    /// remote once a command separator sits in front of it.
+    ///
+    /// The table is the coupling. The narrowed gap is spelled out in four
+    /// separate literals, because `destructive_pattern!` takes a `literal` and
+    /// will not accept `concat!`, and `every_remote_execution_rule_has_a_row`
+    /// reds when a new rule arrives without one.
+    const REMOTE_EXECUTION_RULES: &[(&str, &str, &str)] = &[
+        (
+            "ssh-remote-rm-rf",
+            "ssh host rm -rf /tmp/x",
+            "rm -rf /tmp/x",
+        ),
+        (
+            "ssh-remote-git-reset-hard",
+            "ssh host 'git reset --hard'",
+            "git reset --hard",
+        ),
+        (
+            "ssh-remote-git-clean",
+            "ssh host 'git clean -fd'",
+            "git clean -fd",
+        ),
+        (
+            "ssh-remote-sudo-rm",
+            "ssh host 'sudo rm /etc/x'",
+            "sudo rm /etc/x",
+        ),
+    ];
+
+    #[test]
+    fn every_remote_execution_rule_has_a_row() {
+        let pack = create_pack();
+        let remote_rules: Vec<&str> = pack
+            .destructive_patterns
+            .iter()
+            .filter_map(|p| p.name)
+            .filter(|name| name.starts_with("ssh-remote-"))
+            .collect();
+        assert!(
+            !remote_rules.is_empty(),
+            "no remote-execution rules found, so this coverage check proves nothing"
+        );
+        for name in remote_rules {
+            assert!(
+                REMOTE_EXECUTION_RULES
+                    .iter()
+                    .any(|(rule, _, _)| *rule == name),
+                "remote-execution rule '{name}' has no row in REMOTE_EXECUTION_RULES, \
+                 so nothing proves its gap cannot cross a command separator"
+            );
+        }
+    }
+
+    /// The defect. The gap between `ssh` and the destructive verb used to be
+    /// `(?:\S+\s+)*(?:-[A-Za-z]+\s+)*\S+[@:]?\S*\s+['"]?.*`, and every piece of
+    /// that crosses `;`, `&&`, `||`, `|` and a newline, so a LOCAL command after
+    /// an ssh command read as a remote one.
+    ///
+    /// These call `matches_destructive`, never `check`. `check` consults the
+    /// safe patterns first, so a command carrying `ssh-keygen -lf` comes back
+    /// allowed on the strength of `ssh-keygen-fingerprint` while the destructive
+    /// rule still matches underneath it — green over nothing.
+    #[test]
+    fn a_local_verb_after_a_separator_is_not_a_remote_one() {
+        let pack = create_pack();
+        for (rule, _, local_verb) in REMOTE_EXECUTION_RULES {
+            for sep in ["&&", "||", ";", "|", "\n"] {
+                let command = format!("ssh host uptime {sep} {local_verb}");
+                assert!(
+                    pack.matches_destructive(&command).is_none(),
+                    "rule {rule} reached across {sep:?} to a local command: \
+                     {command:?} matched {:?}",
+                    pack.matches_destructive(&command).and_then(|m| m.name),
+                );
+            }
+        }
+    }
+
+    /// The other direction: narrowing the gap must not let a genuinely remote
+    /// destructive command through.
+    #[test]
+    fn a_remote_destructive_command_still_denies() {
+        let pack = create_pack();
+        for (rule, remote_command, _) in REMOTE_EXECUTION_RULES {
+            assert_eq!(
+                pack.matches_destructive(remote_command)
+                    .and_then(|m| m.name),
+                Some(*rule),
+                "{remote_command:?} must still match {rule}"
+            );
+        }
+    }
+
+    /// The quoting edges the narrowing could plausibly have broken, both ways.
+    #[test]
+    fn the_quoting_edges_of_the_narrowed_gap() {
+        let pack = create_pack();
+
+        // Must still DENY: the remote command is inside the quotes, separators
+        // and all, and a quoted option before the host must not break the reach.
+        for (command, expected) in [
+            ("ssh host \"cd /srv && rm -rf build\"", "ssh-remote-rm-rf"),
+            ("ssh host \"cd /srv\nrm -rf build\"", "ssh-remote-rm-rf"),
+            (
+                "ssh -o \"StrictHostKeyChecking=no\" host rm -rf /srv",
+                "ssh-remote-rm-rf",
+            ),
+            ("ssh host $'rm -rf /srv'", "ssh-remote-rm-rf"),
+            (
+                "ssh -i key.pem user@host 'rm -rf /var/log'",
+                "ssh-remote-rm-rf",
+            ),
+            ("cat script.sh | ssh host rm -rf /data", "ssh-remote-rm-rf"),
+        ] {
+            assert_eq!(
+                pack.matches_destructive(command).and_then(|m| m.name),
+                Some(expected),
+                "{command:?} must still match {expected}"
+            );
+        }
+
+        // Must ALLOW: a CLOSED quote belongs to the ssh command, and what follows
+        // the separator after it does not. An apostrophe in prose must not open a
+        // quote that swallows the separator.
+        for command in [
+            "ssh host \"uptime\" && rm -rf /tmp/scratch",
+            "ssh host 'uptime' ; rm -rf /tmp/scratch",
+            "ssh host uptime # don't && rm -rf /tmp/scratch",
+            // The command this bead was measured on. This session's own probe
+            // was blocked by the live guard for exactly this reason.
+            "ssh host uptime && ssh-keygen -lf known || rm -rf /var/tmp/stuff",
+        ] {
+            assert!(
+                pack.matches_destructive(command).is_none(),
+                "{command:?} matched {:?}, but its destructive verb is local",
+                pack.matches_destructive(command).and_then(|m| m.name),
+            );
+        }
+    }
+
+    /// `ssh-keygen -R` carried the same token walk: `(?:\S+\s+)*` let `-R` be
+    /// claimed from a different command. `-R` is destructive wherever it really
+    /// belongs to ssh-keygen, so the probe hands it to another command.
+    #[test]
+    fn ssh_keygen_does_not_claim_a_neighbours_flag() {
+        let pack = create_pack();
+        for command in [
+            "ssh-keygen -lf known_hosts && ssh-keyscan -R example.com",
+            "ssh-keygen -lf known_hosts; grep -R pattern .",
+            "ssh-keygen -lf known_hosts\ngrep -R pattern .",
+        ] {
+            assert!(
+                pack.matches_destructive(command).is_none(),
+                "{command:?} matched {:?}, but that -R belongs to the second command",
+                pack.matches_destructive(command).and_then(|m| m.name),
+            );
+        }
+        for command in [
+            "ssh-keygen -R hostname",
+            "ssh-keygen -f ~/.ssh/known_hosts -R 192.168.1.1",
+        ] {
+            assert_eq!(
+                pack.matches_destructive(command).and_then(|m| m.name),
+                Some("ssh-keygen-remove-host"),
+                "{command:?} must still match ssh-keygen-remove-host"
+            );
+        }
     }
 }
