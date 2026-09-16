@@ -438,7 +438,7 @@ When a command is blocked, dcg outputs JSON to stdout:
   "hookSpecificOutput": {
     "hookEventName": "PreToolUse",
     "permissionDecision": "deny",
-    "permissionDecisionReason": "BLOCKED by dcg\n\nTip: dcg explain \"git reset --hard HEAD~5\"\n\nReason: git reset --hard destroys uncommitted changes\n\nExplanation: Rewrites history and discards uncommitted changes.\n\nRule: core.git:reset-hard\n\nCommand: git reset --hard HEAD~5\n\nIf this is a false positive: dcg allow-once a1b2c3\n\nIf this operation is truly needed, ask the user for explicit permission and have them run the command manually.",
+    "permissionDecisionReason": "BLOCKED by dcg\n\nTip: dcg explain \"git reset --hard HEAD~5\"\n\nReason: git reset --hard destroys uncommitted changes\n\nExplanation: Rewrites history and discards uncommitted changes.\n\nRule: core.git:reset-hard\n\nIf this is a false positive: dcg allow-once a1b2c3\n\nIf this operation is truly needed, ask the user for explicit permission and have them run the command manually.",
     "ruleId": "core.git:reset-hard",
     "packId": "core.git",
     "severity": "critical",
@@ -453,6 +453,13 @@ When a command is blocked, dcg outputs JSON to stdout:
   }
 }
 ```
+
+> **The blocked command appears exactly once**, in the runnable `Tip:` line.
+> `permissionDecisionReason` is replayed into the transcript on every later turn
+> of that session, so a second echo is paid per turn forever. A bare `Command:`
+> line used to sit below `Rule:`; it is gone, and
+> `denial_message_echoes_command_once` in `src/hook.rs` fails the build if it
+> returns. Do not add it back to this sample.
 
 **Key fields for agent parsing:**
 | Field | Type | Description |
