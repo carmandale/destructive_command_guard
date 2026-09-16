@@ -715,3 +715,296 @@ fn test_pack_rule_inside_a_shell_wrapper_is_still_downgraded_by_the_policy() {
          evaluated at all\ncommand: {command}\nstderr: {stderr}"
     );
 }
+
+/// Run the hook under a policy that sets a heredoc / inline-script rule to
+/// warn. `heredoc.python.shutil_rmtree` splits into pack `heredoc.python` and
+/// pattern `shutil_rmtree` (`split_ast_rule_id`), which is the key the hook
+/// resolves the mode from.
+fn run_hook_mode_with_warned_heredoc_rule(command: &str) -> (String, String, i32) {
+    run_hook_mode_with_heredoc_policy("\"heredoc.python:shutil_rmtree\" = \"warn\"\n", command)
+}
+
+/// Run the hook with `rules` as the whole `[policy.rules]` table.
+fn run_hook_mode_with_heredoc_policy(rules: &str, command: &str) -> (String, String, i32) {
+    let sandbox = spawn::sandbox();
+    let config_path = sandbox.root().join("heredoc-policy.toml");
+    std::fs::write(&config_path, format!("[policy.rules]\n{rules}")).expect("write policy config");
+    let mut cmd = spawn::dcg_in(&sandbox);
+    cmd.env("DCG_CONFIG", &config_path)
+        .env("DCG_PACKS", "core.git,core.filesystem");
+    run_hook(cmd, &sandbox, command)
+}
+
+/// `evaluate_heredoc` kept a match only when its SEVERITY blocked and returned
+/// the first one it kept, before the outer command's pack scan ever ran. The
+/// hook then resolved that rule's mode from `[policy.rules]`, so a
+/// policy-warned heredoc rule warned and the outer command -- a real
+/// `git stash clear` -- was never evaluated
+/// (.agent-config-dcg-heredoc-policy-warn-hides-outer-fxck7).
+#[test]
+fn test_policy_warned_heredoc_rule_does_not_hide_the_outer_command() {
+    let command =
+        "python3 -c \"import shutil; shutil.rmtree('/Users/someone/proj')\" && git stash clear";
+    assert_denied_by(
+        command,
+        run_hook_mode_with_warned_heredoc_rule(command),
+        "core.git:stash-clear",
+    );
+}
+
+/// Controls for the test above. The warned heredoc rule on its own still only
+/// warns AND names itself on stderr, which proves the policy key resolved --
+/// a wrong key would deny here instead. The blocking rule on its own is still
+/// denied, so the denial above is not a rule that merely started matching.
+#[test]
+fn test_warned_heredoc_rule_alone_warns_and_the_blocking_rule_alone_denies() {
+    let warned = "python3 -c \"import shutil; shutil.rmtree('/Users/someone/proj')\"";
+    let (stdout, stderr, exit_code) = run_hook_mode_with_warned_heredoc_rule(warned);
+    assert_eq!(
+        exit_code, 0,
+        "a warned rule exits 0\ncommand: {warned}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "a heredoc rule the policy warns on must not produce a hook denial\n\
+         command: {warned}\nstdout: {stdout}"
+    );
+    assert!(
+        stderr.contains("shutil_rmtree"),
+        "the warning names the warned heredoc rule, which proves the policy \
+         key resolved\ncommand: {warned}\nstderr: {stderr}"
+    );
+
+    let blocking = "git stash clear";
+    assert_denied_by(
+        blocking,
+        run_hook_mode_with_warned_heredoc_rule(blocking),
+        "core.git:stash-clear",
+    );
+}
+
+/// The reverse hole on the same line of `evaluate_heredoc`: a match whose
+/// SEVERITY does not block was dropped before its mode was resolved, so a
+/// `[policy.rules]` deny on a Medium heredoc rule never blocked anything.
+/// `os.system` is Medium on purpose, and the control shows it passing without
+/// the override, so the denial can only come from the policy
+/// (.agent-config-dcg-heredoc-policy-warn-hides-outer-fxck7).
+#[test]
+fn test_policy_denied_medium_heredoc_rule_blocks() {
+    let command = "python3 -c \"import os; os.system('ls')\"";
+    assert_denied_by(
+        command,
+        run_hook_mode_with_heredoc_policy("\"heredoc.python:os_system\" = \"deny\"\n", command),
+        "heredoc.python:os_system",
+    );
+
+    let (stdout, stderr, exit_code) = run_hook_mode_with_heredoc_policy("", command);
+    assert_eq!(
+        exit_code, 0,
+        "an allowed command exits 0\ncommand: {command}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "os.system is Medium and is not denied without the override\n\
+         command: {command}\nstdout: {stdout}"
+    );
+}
+
+/// The same early return one tier up: `evaluate_heredoc` feeds each command of
+/// a Bash heredoc or `bash -c` back through the evaluator (Tier 2.5) and
+/// returned the first denial it got, whether or not the POLICY denies it. So a
+/// warned rule wrapped in `bash -c` warned and the command after it ran, though
+/// the same line unwrapped is denied
+/// (.agent-config-dcg-heredoc-policy-warn-hides-outer-fxck7).
+#[test]
+fn test_policy_warned_rule_inside_bash_does_not_hide_the_next_command() {
+    let command = "bash -c 'git reset --hard && git stash clear'";
+    assert_denied_by(
+        command,
+        run_hook_mode_with_warned_rules(command),
+        "core.git:stash-clear",
+    );
+
+    let command = "bash <<'EOF'\n\
+                   python3 -c \"import shutil; shutil.rmtree('/Users/someone/proj')\"\n\
+                   git stash clear\n\
+                   EOF";
+    assert_denied_by(
+        command,
+        run_hook_mode_with_warned_heredoc_rule(command),
+        "core.git:stash-clear",
+    );
+
+    // No policy at all: stash-drop is Medium, so it warns by default, and it
+    // used to hide the Critical stash-clear after it -- inside the script, and
+    // outside it, where only the outer command's own scan can decide.
+    for command in [
+        "bash -c 'git stash drop; git stash clear'",
+        "bash -c 'git stash drop' && git stash clear",
+    ] {
+        assert_denied_by(command, run_hook_mode(command), "core.git:stash-clear");
+    }
+
+    // A bash AST rule with no pack twin still decides behind a warned inner
+    // command, beside it or nested in it: core.filesystem wants -r AND -f,
+    // `heredoc.bash.rm_r` does not.
+    for command in [
+        "bash -c 'git stash drop; rm -r /srv/data'",
+        "bash -c 'git stash drop $(rm -r /srv/data)'",
+        "bash -c 'rm -r /srv/data $(git stash drop)'",
+    ] {
+        assert_denied_by(command, run_hook_mode(command), "heredoc.bash:rm_r");
+    }
+
+    // The bash AST twin of every other warned rule stays quiet too, however
+    // the pack's match lines up with the command: clean-force matches `git
+    // clean -f` inside `git clean -fd`, and core.filesystem reports its match
+    // at the `-rf` flag, not the command's head.
+    for (command, rule) in [
+        ("bash -c 'git clean -fd'", "core.git:clean-force"),
+        ("bash -c 'rm -rf ./build'", "core.filesystem:rm-rf-general"),
+    ] {
+        assert_warned_by(command, run_hook_mode_with_warned_rules(command), rule);
+    }
+    // And the `rm_r` arm: core.filesystem names `rm -r -f` rm-r-f-separate,
+    // which `heredoc.bash.rm_r` restates on the same command.
+    let command = "bash -c 'rm -r -f ./build'";
+    assert_warned_by(
+        command,
+        run_hook_mode_with_heredoc_policy(
+            "\"core.filesystem:rm-r-f-separate\" = \"warn\"\n",
+            command,
+        ),
+        "core.filesystem:rm-r-f-separate",
+    );
+
+    // A warned twin quiets only its own command: the `rm -r` after the warned
+    // `rm -rf` is a different command, and its bash rule still decides.
+    let command = "bash -c 'rm -rf ./build; rm -r /srv/data'";
+    assert_denied_by(
+        command,
+        run_hook_mode_with_warned_rules(command),
+        "heredoc.bash:rm_r",
+    );
+
+    // Control: the warned rule wrapped on its own still only warns, and names
+    // itself, so the denials above are not the wrapper denying everything --
+    // nor the bash AST rules, which restate `git reset --hard` under a rule
+    // the policy does not name.
+    let command = "bash -c 'git reset --hard'";
+    let (stdout, stderr, exit_code) = run_hook_mode_with_warned_rules(command);
+    assert_eq!(
+        exit_code, 0,
+        "a warned rule exits 0\ncommand: {command}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "a warned rule inside bash -c must not produce a hook denial\n\
+         command: {command}\nstdout: {stdout}"
+    );
+    assert!(
+        stderr.contains("core.git:reset-hard"),
+        "the warning names the warned rule\ncommand: {command}\nstderr: {stderr}"
+    );
+}
+
+/// Assert the hook let `command` run with a warning that names `rule`.
+fn assert_warned_by(command: &str, (stdout, stderr, exit_code): (String, String, i32), rule: &str) {
+    assert_eq!(
+        exit_code, 0,
+        "a warned rule exits 0\ncommand: {command}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "a rule the policy warns on must not produce a hook denial\n\
+         command: {command}\nstdout: {stdout}"
+    );
+    assert!(
+        stderr.contains(rule),
+        "the warning names the warned rule\ncommand: {command}\nstderr: {stderr}"
+    );
+}
+
+/// Holding a warned match lets the evaluation reach the raw-command fallback,
+/// which the old early return always skipped. The fallback runs when some
+/// content could not be extracted -- here a Python `1 << 20` or a bash
+/// `$((1 << 4))`, which the extractor reads as an unterminated heredoc -- and
+/// it must not hard-deny, as "unjudged", the very text the policy warned on:
+/// the content holding the warned match was judged, so it is masked from the
+/// fallback like any other judged content
+/// (.agent-config-dcg-fallback-scans-judged-content-zc6tb). Content that truly
+/// went unjudged is still read, and what sits beside the warned match is still
+/// judged by the outer pack scan
+/// (.agent-config-dcg-heredoc-policy-warn-hides-outer-fxck7).
+#[test]
+fn test_fallback_spares_the_warned_match_and_still_reads_unjudged_content() {
+    let command = "python3 <<'PY'\n\
+                   import shutil\n\
+                   shutil.rmtree('/Users/someone/proj/build')\n\
+                   print(1 << 20)\n\
+                   PY";
+    assert_warned_by(
+        command,
+        run_hook_mode_with_warned_heredoc_rule(command),
+        "shutil_rmtree",
+    );
+    let command = "python3 <<'PY'\r\nimport shutil\r\nshutil.rmtree('/Users/someone/proj/build')\r\nprint(1 << 20)\r\nPY";
+    assert_warned_by(
+        command,
+        run_hook_mode_with_warned_heredoc_rule(command),
+        "shutil_rmtree",
+    );
+
+    // The same body plain, tab-stripped by `<<-`, and with CRLF line ends. The
+    // last two extract to text that differs from the raw bytes; the body's raw
+    // range is masked all the same. The fallback's own `git reset --hard`
+    // pattern would otherwise deny what the policy warned on.
+    for command in [
+        "bash <<'EOF'\ngit reset --hard origin/main\necho $((1 << 4))\nEOF",
+        "bash <<-'EOF'\n\tgit reset --hard origin/main\n\techo $((1 << 4))\n\tEOF",
+        "bash <<'EOF'\r\ngit reset --hard origin/main\r\necho $((1 << 4))\r\nEOF",
+    ] {
+        assert_warned_by(
+            command,
+            run_hook_mode_with_warned_rules(command),
+            "core.git:reset-hard",
+        );
+    }
+
+    // A real `rm -rf` handed to os.system -- Medium, so no AST rule stops
+    // it -- is still denied behind the warned rmtree. The judged body is
+    // masked from the fallback, so the outer pack scan is what reads it; the
+    // old early return ended at the rmtree and warned.
+    let command = "python3 <<'PY'\n\
+                   import os, shutil\n\
+                   shutil.rmtree('/Users/someone/proj/build')\n\
+                   os.system('rm -rf /srv/data')\n\
+                   print(1 << 20)\n\
+                   PY";
+    assert_denied_by(
+        command,
+        run_hook_mode_with_warned_heredoc_rule(command),
+        "core.filesystem:rm-rf-root-home",
+    );
+
+    // Control: an 11th inline script is past max_heredocs (10) and never
+    // judged, so the fallback still reads it -- behind the held warn, where
+    // the early return never looked. No pack reads Python, so only the
+    // fallback can deny it.
+    let mut command =
+        String::from("python3 -c \"import shutil; shutil.rmtree('/Users/someone/proj')\"");
+    for _ in 0..9 {
+        command.push_str("; python3 -c \"print(1)\"");
+    }
+    command.push_str("; python3 -c \"import os; os.remove('/etc/hosts')\"");
+    let (stdout, stderr, exit_code) = run_hook_mode_with_warned_heredoc_rule(&command);
+    assert_eq!(
+        exit_code, 0,
+        "hook mode exits 0 even on deny\ncommand: {command}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("\"permissionDecision\":\"deny\"") && stdout.contains("fallback check"),
+        "the unjudged os.remove must be denied by the fallback\n\
+         command: {command}\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
