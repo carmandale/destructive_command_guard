@@ -34,6 +34,34 @@ pub fn create_pack() -> Pack {
 // match, so that reason no longer holds as stated; .agent-config-5udyd owns
 // re-measuring whether widening these is now safe.
 //
+// A destructive rule's segment end also accepts a redirection (`>`, `2>`, `<`).
+// `move_redirections_to_segment_end` parks every redirection at the end of its
+// own simple command, so a redirection is exactly what stands between the
+// destination and the real end of the segment: the bare form denied while the
+// same command with `2>/dev/null` after it walked through all seven rules.
+//
+// The safe rules deliberately do NOT get the same widening. A safe span starts
+// at the command word, so a span running up to the operator would exempt a
+// destructive match that starts there too: `scp f host:/var/tmp/x > /etc/passwd`
+// denies today on `scp-to-etc` and must keep denying. (Mind the space. The glued
+// `>/etc/passwd` is allowed before and after this change, because the
+// destructive rule wants whitespace before the path and `>` supplies none. That
+// is a redirection-TARGET gap, not a destination one, and is out of scope here.)
+//
+// The price is a new false deny: a redirected copy to `/var/tmp`, whose safe
+// rule still ends at `$`, now reaches `scp-to-var`. That is the same class the
+// `;`-separated false deny above already accepts, and `.agent-config-5udyd` owns
+// re-measuring whether the safe anchors can widen.
+//
+// The destination is quote-permeable (`["']*` on both sides of the directory
+// name) because the shell removes those quotes before the copy runs, while
+// `dequote_segment_command_words` only dequotes command WORDS, not arguments.
+// A quote straight after `host:` therefore defeated every rule, and that is the
+// shape an operator reaches for when the local side needed quoting for a space.
+// Dequoting every argument in the normalizer instead would be wrong here: rules
+// elsewhere match ON a quote (ansible's `-e` payload rule is one), so removing
+// quotes repo-wide would delete those rules. (.agent-config-mjtuy)
+//
 // There is no help rule. It could only ever exempt a command that a destructive
 // rule had already matched — `scp --help` on its own matches none of them and
 // needs no exemption — so all it ever did was allow an scp to a system path that
@@ -70,7 +98,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // Recursive copy to root
         destructive_pattern!(
             "scp-recursive-root",
-            r"scp\b[^;&|\n]*\s-[A-Za-z0-9]*r[A-Za-z0-9]*\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/\s*(?:$|[;&|\n])",
+            r#"scp\b[^;&|\n]*\s-[A-Za-z0-9]*r[A-Za-z0-9]*\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?["']*/["']*\s*(?:$|[;&|\n]|\d*[<>])"#,
             "scp -r to root (/) is extremely dangerous.",
             Critical,
             "Recursive copy to the root filesystem can overwrite critical system files, \
@@ -84,7 +112,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // Copy to /etc
         destructive_pattern!(
             "scp-to-etc",
-            r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/etc(?:/\S*)?\s*(?:$|[;&|\n])",
+            r#"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?["']*/etc["']*(?:/\S*)?\s*(?:$|[;&|\n]|\d*[<>])"#,
             "scp to /etc/ can overwrite system configuration.",
             High,
             "The /etc directory contains critical system configuration files including passwd, \
@@ -98,7 +126,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // Copy to /var
         destructive_pattern!(
             "scp-to-var",
-            r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/var(?:/\S*)?\s*(?:$|[;&|\n])",
+            r#"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?["']*/var["']*(?:/\S*)?\s*(?:$|[;&|\n]|\d*[<>])"#,
             "scp to /var/ can overwrite system data.",
             High,
             "The /var directory contains variable data including logs, databases, mail spools, \
@@ -112,7 +140,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // Copy to /boot
         destructive_pattern!(
             "scp-to-boot",
-            r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/boot(?:/\S*)?\s*(?:$|[;&|\n])",
+            r#"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?["']*/boot["']*(?:/\S*)?\s*(?:$|[;&|\n]|\d*[<>])"#,
             "scp to /boot/ can corrupt boot configuration.",
             Critical,
             "The /boot directory contains the kernel, initramfs, and bootloader configuration. \
@@ -126,7 +154,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // Copy to /usr
         destructive_pattern!(
             "scp-to-usr",
-            r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/usr(?:/\S*)?\s*(?:$|[;&|\n])",
+            r#"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?["']*/usr["']*(?:/\S*)?\s*(?:$|[;&|\n]|\d*[<>])"#,
             "scp to /usr/ can overwrite system binaries.",
             High,
             "The /usr directory contains system binaries, libraries, and shared resources. \
@@ -139,7 +167,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // Copy to /bin or /sbin
         destructive_pattern!(
             "scp-to-bin",
-            r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/(?:bin|sbin)(?:/\S*)?\s*(?:$|[;&|\n])",
+            r#"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?["']*/(?:bin|sbin)["']*(?:/\S*)?\s*(?:$|[;&|\n]|\d*[<>])"#,
             "scp to /bin/ or /sbin/ can overwrite system binaries.",
             Critical,
             "The /bin and /sbin directories contain essential system binaries required for \
@@ -153,7 +181,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // Copy to /lib
         destructive_pattern!(
             "scp-to-lib",
-            r"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?/lib(?:64)?(?:/\S*)?\s*(?:$|[;&|\n])",
+            r#"scp\b[^;&|\n]*\s(?:(?:\S+@)?\S+:)?["']*/lib(?:64)?["']*(?:/\S*)?\s*(?:$|[;&|\n]|\d*[<>])"#,
             "scp to /lib/ can overwrite system libraries.",
             Critical,
             "The /lib and /lib64 directories contain shared libraries required by system \
