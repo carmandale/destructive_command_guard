@@ -48,6 +48,9 @@ fn test_audit_backtracking_requirements() {
             "core.git",
             HashSet::from(["restore-staged-long", "restore-staged-short"]),
         ),
+        // Both gh packs: only their SAFE patterns keep the subcommand lookahead. The
+        // destructive ones left this set when it was dropped (.agent-config-kf3dq), because a run
+        // of dash tokens after `gh` ran them out of backtracks. Same for platform.github below.
         (
             "cicd.github_actions",
             HashSet::from([
@@ -58,12 +61,6 @@ fn test_audit_backtracking_requirements() {
                 "gh-actions-run-list",
                 "gh-actions-run-view",
                 "gh-actions-api-explicit-get",
-                "gh-actions-secret-remove",
-                "gh-actions-variable-remove",
-                "gh-actions-workflow-disable",
-                "gh-actions-run-cancel",
-                "gh-actions-api-delete-secrets",
-                "gh-actions-api-delete-variables",
             ]),
         ),
         (
@@ -120,7 +117,7 @@ fn test_audit_backtracking_requirements() {
         (
             "platform.github",
             HashSet::from([
-                // Safe patterns
+                // Safe patterns (the destructive ones: see the note above cicd.github_actions)
                 "gh-repo-list-view",
                 "gh-gist-list-view",
                 "gh-release-list-view",
@@ -131,23 +128,6 @@ fn test_audit_backtracking_requirements() {
                 "gh-auth-status",
                 "gh-status",
                 "gh-api-explicit-get",
-                // Destructive patterns
-                "gh-repo-delete",
-                "gh-repo-archive",
-                "gh-gist-delete",
-                "gh-release-delete",
-                "gh-issue-delete",
-                "gh-ssh-key-delete",
-                "gh-secret-delete",
-                "gh-variable-delete",
-                "gh-repo-deploy-key-delete",
-                "gh-run-cancel",
-                "gh-api-delete-repo",
-                "gh-api-delete-actions-secret",
-                "gh-api-delete-actions-variable",
-                "gh-api-delete-hook",
-                "gh-api-delete-deploy-key",
-                "gh-api-delete-release",
             ]),
         ),
         (

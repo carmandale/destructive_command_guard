@@ -515,14 +515,29 @@ impl Pack {
     /// (`.agent-config-it2wk`). Callers use these spans to exempt only the
     /// command the safe pattern actually covers.
     ///
-    /// Returns every match rather than the first: two safe patterns can cover
-    /// two different commands in one line, and dropping either would deny a
-    /// command the pack considers safe.
+    /// Returns the first match of every safe pattern rather than of the first
+    /// pattern alone: two safe patterns can cover two different commands in one
+    /// line, and dropping either would deny a command the pack considers safe.
+    /// A pattern's later matches are [`Self::every_safe_span`].
     #[must_use]
     pub fn safe_spans(&self, cmd: &str) -> Vec<(usize, usize)> {
         self.safe_patterns
             .iter()
             .filter_map(|p| p.regex.find(cmd))
+            .collect()
+    }
+
+    /// Spans of every match of every safe pattern, where [`Self::safe_spans`]
+    /// keeps only each pattern's first.
+    ///
+    /// For judging the rest of a line after a safe match has exempted a
+    /// destructive one: the evaluator searches on from there, and the second of
+    /// two dry runs needs its own span (`.agent-config-35ysf`).
+    #[must_use]
+    pub fn every_safe_span(&self, cmd: &str) -> Vec<(usize, usize)> {
+        self.safe_patterns
+            .iter()
+            .flat_map(|p| p.regex.find_all(cmd))
             .collect()
     }
 

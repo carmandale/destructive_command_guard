@@ -173,7 +173,10 @@ fn filling_the_cap_does_not_buy_a_free_destructive_heredoc() {
 fn overflowing_the_cap_does_not_buy_one_either() {
     // k=11. One past the cap behaves like ten, so the fix is not an off-by-one.
     let cmd = command_with_prefix_count(max_heredocs() + 1, DESTRUCTIVE_HEREDOC);
-    assert_denied(&cmd, "past the cap is the same unread content as at the cap");
+    assert_denied(
+        &cmd,
+        "past the cap is the same unread content as at the cap",
+    );
 }
 
 #[test]
@@ -211,7 +214,10 @@ fn a_size_limit_still_denies() {
 #[test]
 fn filling_the_cap_harmlessly_is_still_allowed() {
     let cmd = command_with_prefix_count(max_heredocs(), HARMLESS_HEREDOC);
-    assert_allowed(&cmd, "nothing here is destructive; the cap alone is not a verdict");
+    assert_allowed(
+        &cmd,
+        "nothing here is destructive; the cap alone is not a verdict",
+    );
 }
 
 #[test]
