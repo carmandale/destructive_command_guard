@@ -1556,12 +1556,26 @@ fn apply_path_normalizers(base: &str) -> Option<String> {
 /// already implies lets every existing pattern see the command word it was
 /// written for, instead of teaching each pattern about redirections.
 ///
+/// The break goes on BOTH sides of the operator, because the word it ends is
+/// the one before it AND the one after: `>/etc/passwd` is two tokens, `>` and
+/// `/etc/passwd`. Only the leading break was restored until
+/// `.agent-config-fhj4b`, so a pattern that reaches its path through `\s`
+/// -- every destructive rule in `remote.scp` does -- saw `>` where the shell
+/// saw whitespace, and `scp f host:/tmp/x >/etc/passwd` was allowed while the
+/// spaced `> /etc/passwd` denied. The two run identically.
+///
 /// Left exactly as written:
 /// - quoted and backslash-escaped `>`/`<`, which are data, not operators;
 /// - heredoc and here-string operators (`<<`, `<<<`), whose tokenization the
 ///   heredoc masker owns — re-spacing them would change which delimiter it reads;
 /// - a file-descriptor prefix that is already its own word (`cmd 2>&1`), where
-///   the word ended before the digits and no break is missing.
+///   the word ended before the digits and no break is missing;
+/// - the byte after the operator when it is not the start of a plain word: `&`
+///   is file-descriptor duplication (`2>&1`, `>&2`, `1>&2`), `(` opens a process
+///   substitution (`tee >(bash)`), and `;`, `|`, `&`, newline, `)` and a
+///   backtick end the simple command. Spacing those apart would change what the
+///   text means instead of revealing what it already means -- `>|out` would read
+///   as a pipe, and `>(bash)` as a redirection into a subshell.
 #[must_use]
 pub fn split_glued_redirections(command: &str) -> Cow<'_, str> {
     let bytes = command.as_bytes();
@@ -1642,6 +1656,19 @@ pub fn split_glued_redirections(command: &str) -> Cow<'_, str> {
                 // Consume the whole operator so `>>` is not re-examined.
                 while i < len && matches!(bytes[i], b'>' | b'<') {
                     i += 1;
+                }
+
+                // The operator ends a word on BOTH sides, so restore the break
+                // after it too: `>/etc/passwd` is `>` then `/etc/passwd`.
+                // Skipped when the next byte does not start a plain word --
+                // `&` is fd duplication (`2>&1`, `>&2`), and the rest open a
+                // process substitution or end the simple command, where a space
+                // would change what the text means rather than reveal it.
+                if i < len && !bytes[i].is_ascii_whitespace() && !ends_simple_command(bytes[i]) {
+                    let buf = out.get_or_insert_with(|| String::with_capacity(len + 4));
+                    buf.push_str(&command[copied..i]);
+                    buf.push(' ');
+                    copied = i;
                 }
             }
             _ => i += 1,
@@ -2415,6 +2442,114 @@ fn test_mixed_quoting_normalization() {
 }
 
 #[cfg(test)]
+mod glued_redirection_tests {
+    use super::{normalize_command, split_glued_redirections};
+    use std::borrow::Cow;
+
+    /// The operator ends a word on both sides, so both breaks get restored.
+    ///
+    /// The leading break is `.agent-config-6yt2i`; the trailing one is
+    /// `.agent-config-fhj4b`, where a glued target meant no pattern reaching a
+    /// path through `\s` could see it.
+    #[test]
+    fn a_redirection_operator_is_spaced_on_both_sides() {
+        for (input, expected) in [
+            // Trailing break only (the operator already had space in front).
+            (
+                "scp f host:/tmp/x >/etc/passwd",
+                "scp f host:/tmp/x > /etc/passwd",
+            ),
+            ("cat x >out.txt", "cat x > out.txt"),
+            ("cat x >>out.txt", "cat x >> out.txt"),
+            ("sqlite3 mydb.db <dump.sql", "sqlite3 mydb.db < dump.sql"),
+            ("cmd 2>/dev/null", "cmd 2> /dev/null"),
+            ("cmd 10>>log", "cmd 10>> log"),
+            ("cmd &>/dev/null", "cmd &> /dev/null"),
+            // Leading break only -- the target is already its own word.
+            ("git>/dev/null reset", "git > /dev/null reset"),
+            // Both breaks at once.
+            ("git>out.txt reset", "git > out.txt reset"),
+            ("cat x>y", "cat x > y"),
+        ] {
+            assert_eq!(
+                split_glued_redirections(input).as_ref(),
+                expected,
+                "{input}"
+            );
+        }
+    }
+
+    /// The bytes after the operator that must NOT be spaced apart, because a
+    /// space there changes what the text means instead of revealing it.
+    ///
+    /// Each row comes back borrowed and byte-identical: that is the strong form,
+    /// and it fails if the function rewrites the string at all.
+    #[test]
+    fn a_non_word_byte_after_the_operator_is_left_alone() {
+        for input in [
+            // File-descriptor duplication: the target is a descriptor, not a file.
+            "cmd 2>&1",
+            "cmd >&2",
+            "cmd 1>&2 2>&1",
+            // Process substitution: `>(` is one token to the shell.
+            "tee >(bash)",
+            "diff <(sort a) <(sort b)",
+            // Operators that end the simple command. `>|` is the noclobber
+            // override; spaced apart it would read as a pipe.
+            "echo hi >|out",
+            "echo hi > out",
+            // Nothing follows the operator at all.
+            "echo hi >",
+        ] {
+            let split = split_glued_redirections(input);
+            assert!(
+                matches!(split, Cow::Borrowed(_)),
+                "{input} should not be rewritten"
+            );
+            assert_eq!(split.as_ref(), input, "{input}");
+        }
+    }
+
+    /// Quoted and escaped operators are data, and heredocs belong to the masker.
+    /// Unchanged by fhj4b, asserted here because the trailing break is a second
+    /// chance to get them wrong.
+    #[test]
+    fn quoted_escaped_and_heredoc_operators_are_still_left_alone() {
+        for input in [
+            "echo '>/etc/passwd'",
+            "echo \">/etc/passwd\"",
+            "echo \\>/etc/passwd",
+            "cat <<EOF",
+            "cat <<<word",
+        ] {
+            let split = split_glued_redirections(input);
+            assert!(
+                matches!(split, Cow::Borrowed(_)),
+                "{input} should not be rewritten"
+            );
+            assert_eq!(split.as_ref(), input, "{input}");
+        }
+    }
+
+    /// End to end through `normalize_command`, which runs the split and then
+    /// parks the redirection at the segment end. This is the text every pack
+    /// pattern is matched against.
+    #[test]
+    fn the_normalized_command_shows_the_redirection_target_as_its_own_word() {
+        for (input, expected) in [
+            (
+                "scp f host:/tmp/x >/etc/passwd",
+                "scp f host:/tmp/x > /etc/passwd",
+            ),
+            // 6yt2i's case, now spaced on both sides.
+            ("git>/dev/null reset --hard", "git reset --hard > /dev/null"),
+        ] {
+            assert_eq!(normalize_command(input).as_ref(), expected, "{input}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod redirection_position_tests {
     use super::{move_redirections_to_segment_end, normalize_command};
     use std::borrow::Cow;
@@ -2531,20 +2666,25 @@ mod redirection_position_tests {
 
     /// The whole point: after normalization the pack patterns see a command
     /// word sitting next to the arguments they spell.
+    ///
+    /// The target is its own word too, since `.agent-config-fhj4b` -- the
+    /// operator ends a word on both sides, and a rule that reaches a path
+    /// through `\s` could not see a glued target. The property this test is
+    /// named for is unchanged: `rm` still sits next to `-rf /`.
     #[test]
     fn normalize_command_parks_the_redirection_at_the_end() {
         assert_eq!(
             normalize_command("rm >/dev/null -rf /").as_ref(),
-            "rm -rf / >/dev/null"
+            "rm -rf / > /dev/null"
         );
         // Glued spelling first (.agent-config-6yt2i), then the move.
         assert_eq!(
             normalize_command("rm>/dev/null -rf /").as_ref(),
-            "rm -rf / >/dev/null"
+            "rm -rf / > /dev/null"
         );
         assert_eq!(
             normalize_command("git>/dev/null reset --hard").as_ref(),
-            "git reset --hard >/dev/null"
+            "git reset --hard > /dev/null"
         );
     }
 }

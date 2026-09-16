@@ -203,10 +203,14 @@ fn the_fix_does_not_widen_what_counts_as_a_destination() {
 /// starts there too. These rows deny today (measured on a release build of
 /// 5aeb5359) and must keep denying, which is what makes the widening unsafe.
 ///
-/// Note the space: `> /etc/passwd` denies because the destructive rule needs
-/// whitespace before the path, while the glued `>/etc/passwd` supplies none and
-/// is allowed both before and after this fix. That glued gap is a redirection-
-/// TARGET question, not a destination question, and is not this bead's.
+/// The space used to matter here: the destructive rule reaches its path through
+/// `\s`, so `> /etc/passwd` denied while the glued `>/etc/passwd` did not.
+/// `.agent-config-fhj4b` closed that in `split_glued_redirections`, which now
+/// restores the word break on BOTH sides of the operator, so the two spellings
+/// normalize to the same text and deny alike. Both forms are pinned in
+/// tests/repro_glued_redirection_target.rs; the rows below stay spaced because
+/// the property THIS test exists for is the safe-span one, and the spaced form
+/// is what it was measured on.
 #[test]
 fn a_redirection_into_a_system_path_still_denies_behind_a_safe_destination() {
     assert_denies_on("scp f host:/var/tmp/x > /etc/passwd", "scp-to-etc");
