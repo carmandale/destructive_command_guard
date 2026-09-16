@@ -772,14 +772,22 @@ mod tests {
             {
                 failures.push(format!("core.git:{name} is on the backtracking engine"));
             }
+            // try_is_match, not is_match: is_match reports a search that gave up as `false`,
+            // which is the very answer these shapes used to produce.
             for (label, text) in &harmless {
-                if pattern.regex.is_match(text) {
-                    failures.push(format!("core.git:{name} matches {label}"));
+                let alone = pattern.regex.try_is_match(text);
+                if alone != Ok(false) {
+                    failures.push(format!(
+                        "core.git:{name} on {label}: {alone:?}, want Ok(false)"
+                    ));
                 }
                 for sep in ["\n", "; "] {
-                    if !pattern.regex.is_match(&format!("{text}{sep}{destructive}")) {
+                    let with_real = pattern
+                        .regex
+                        .try_is_match(&format!("{text}{sep}{destructive}"));
+                    if with_real != Ok(true) {
                         failures.push(format!(
-                            "core.git:{name} misses `{destructive}` after {label} + {sep:?}"
+                            "core.git:{name} on {label} + {sep:?} + `{destructive}`: {with_real:?}, want Ok(true)"
                         ));
                     }
                 }
@@ -829,13 +837,17 @@ mod tests {
                 let rule = result.pattern_info.and_then(|p| p.pattern_name);
                 failures.push(format!("{label}: denied as core.git:{rule:?}"));
             }
+            // A denial has to be the rule's own finding: a search that gives up is reported
+            // under the same rule id, so the reason is what separates the two.
             let with_real = format!("{script}git checkout HEAD -- f.txt\n");
             let result = evaluate_command(&with_real, &config, &["git"], &overrides, &allowlists);
-            let rule = result.pattern_info.and_then(|p| p.pattern_name);
-            if rule.as_deref() != Some("checkout-ref-discard") {
-                failures.push(format!(
-                    "{label} + `git checkout HEAD -- f.txt`: {rule:?}, want checkout-ref-discard"
-                ));
+            let found = result.pattern_info.map(|p| (p.pattern_name, p.reason));
+            match &found {
+                Some((Some(rule), reason))
+                    if rule == "checkout-ref-discard" && !reason.contains("could not finish") => {}
+                _ => failures.push(format!(
+                    "{label} + `git checkout HEAD -- f.txt`: {found:?}, want checkout-ref-discard on its merits"
+                )),
             }
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
