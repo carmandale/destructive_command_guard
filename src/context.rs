@@ -714,6 +714,38 @@ pub fn classify_command(command: &str) -> CommandSpans {
     ContextClassifier::new().classify(command)
 }
 
+/// Byte offsets in `command` where a nested executed region opens.
+///
+/// `$(`, a backtick, and the inline-code payload of `bash -c` and friends each
+/// start a command the shell runs in its own right, and each sits *inside* the
+/// enclosing command's own text. A span computed over that text therefore runs
+/// straight through them. That is how an explicit GET anywhere in
+/// `gh api /a $(gh repo delete o/r) -X GET` came to exempt the deletion: the
+/// safe pattern's span ran from `api` to the trailing `GET` and swallowed the
+/// substitution in between (`.agent-config-bn3e1`).
+///
+/// Returns each such region's start offset, ascending and deduplicated.
+///
+/// A command with no `$(` and no backtick returns empty after two substring
+/// scans and never pays for classification. An inline-code payload alone
+/// (`bash -c '...'` with no substitution anywhere) is therefore NOT reported --
+/// those payloads ride along once a substitution has already paid for the pass.
+#[must_use]
+pub fn nested_execution_starts(command: &str) -> Vec<usize> {
+    if !command.contains("$(") && !command.contains('`') {
+        return Vec::new();
+    }
+    let mut starts: Vec<usize> = classify_command(command)
+        .spans()
+        .iter()
+        .filter(|span| span.kind == SpanKind::InlineCode)
+        .map(|span| span.byte_range.start)
+        .collect();
+    starts.sort_unstable();
+    starts.dedup();
+    starts
+}
+
 // =============================================================================
 // Safe String-Argument Registry (git_safety_guard-t8x.1)
 // =============================================================================
@@ -2181,6 +2213,45 @@ mod tests {
         let comment_span = spans.spans().iter().find(|s| s.kind == SpanKind::Comment);
         assert!(comment_span.is_some());
         assert_eq!(comment_span.unwrap().text(cmd), "# rm -rf /");
+    }
+
+    #[test]
+    fn bn3e1_nested_execution_starts_sees_quoted_substitution() {
+        // The .agent-config-bn3e1 shapes. A destructive gh reached the shell from
+        // inside each of these while the enclosing command's safe pattern spanned it.
+        let cases = [
+            "gh api /a $(gh repo delete o/r) -X GET",
+            "gh api /a `gh repo delete o/r` -X GET",
+            "gh -f \"$(gh repo delete o/r)\" status",
+            "gh -f \"`gh repo delete o/r`\" status",
+        ];
+        for cmd in cases {
+            let starts = nested_execution_starts(cmd);
+            println!("{cmd:?} -> {starts:?}");
+            assert!(
+                !starts.is_empty(),
+                "no nested opener found in {cmd:?}; the safe span will still swallow it"
+            );
+            let first = starts[0];
+            let opener = &cmd[first..];
+            assert!(
+                opener.starts_with("$(") || opener.starts_with('`'),
+                "opener at {first} in {cmd:?} is {:?}, not a substitution start",
+                &cmd[first..(first + 2).min(cmd.len())]
+            );
+        }
+    }
+
+    #[test]
+    fn bn3e1_nested_execution_starts_empty_without_substitution() {
+        // The control: a probe that cannot return empty proves nothing above.
+        for cmd in [
+            "gh api /repos/o/r/issues -X GET",
+            "gh -f \"some value\" status",
+            "gh api \"/repos/o/r/issues?state=open&per_page=100\" --method GET",
+        ] {
+            assert_eq!(nested_execution_starts(cmd), Vec::<usize>::new(), "{cmd:?}");
+        }
     }
 
     #[test]

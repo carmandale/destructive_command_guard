@@ -46,7 +46,7 @@
 use crate::allowlist::{AllowlistLayer, LayeredAllowlist};
 use crate::ast_matcher::DEFAULT_MATCHER;
 use crate::config::{Config, PolicyConfig};
-use crate::context::sanitize_for_pattern_matching;
+use crate::context::{nested_execution_starts, sanitize_for_pattern_matching};
 use crate::heredoc::{
     ExtractionResult, SkipReason, TriggerResult, check_triggers, extract_content,
 };
@@ -368,6 +368,71 @@ fn compute_normalized_offset(command_for_match: &str, normalized: &str) -> Optio
     }
 
     None
+}
+
+/// Stop each safe span at the first nested executed region that opens inside it.
+///
+/// A safe pattern exempts the command it covers. A command substitution is part
+/// of that command's *text* but is a different command, so the exemption must
+/// not reach it: `gh api /a $(gh repo delete o/r) -X GET` is a safe GET that
+/// runs a repo deletion, and the safe span ran from `api` to the trailing `GET`
+/// (`.agent-config-bn3e1`).
+///
+/// Clipping only ever moves a span's end DOWN and never moves its start, so it
+/// can add denials and cannot remove one. That matters here: an edit that
+/// relocates which match a pattern reports first can LOSE a denial
+/// (`.agent-config-kf3dq` look 3, 63 of them). Shortening cannot.
+///
+/// An opener exactly at the span start is left alone: the safe pattern matched
+/// inside the substitution, so that span is the nested command's own exemption.
+fn clip_safe_spans_at_nested(safe_spans: &mut [(usize, usize)], nested_starts: &[usize]) {
+    if nested_starts.is_empty() {
+        return;
+    }
+    for (start, end) in safe_spans.iter_mut() {
+        if let Some(&opener) = nested_starts
+            .iter()
+            .find(|&&opener| opener > *start && opener < *end)
+        {
+            *end = opener;
+        }
+    }
+}
+
+#[cfg(test)]
+mod bn3e1_nested_exemption_tests {
+    use super::clip_safe_spans_at_nested;
+
+    #[test]
+    fn clip_stops_a_span_at_the_opener_inside_it() {
+        // `gh api /a $(gh repo delete o/r) -X GET` -- opener at 10.
+        let mut spans = vec![(0, 38)];
+        clip_safe_spans_at_nested(&mut spans, &[10]);
+        assert_eq!(spans, vec![(0, 10)]);
+    }
+
+    #[test]
+    fn clip_leaves_an_opener_at_the_span_start_alone() {
+        // The safe pattern matched INSIDE the substitution; that is its own
+        // exemption and must survive.
+        let mut spans = vec![(10, 30)];
+        clip_safe_spans_at_nested(&mut spans, &[10]);
+        assert_eq!(spans, vec![(10, 30)]);
+    }
+
+    #[test]
+    fn clip_ignores_an_opener_outside_the_span() {
+        let mut spans = vec![(20, 40)];
+        clip_safe_spans_at_nested(&mut spans, &[5, 45]);
+        assert_eq!(spans, vec![(20, 40)]);
+    }
+
+    #[test]
+    fn clip_is_a_noop_without_openers() {
+        let mut spans = vec![(0, 38), (40, 50)];
+        clip_safe_spans_at_nested(&mut spans, &[]);
+        assert_eq!(spans, vec![(0, 38), (40, 50)]);
+    }
 }
 
 fn map_span_with_offset(
@@ -1760,6 +1825,10 @@ fn evaluate_packs_with_allowlists(
     // that blocks, and `git checkout -b f && git clean -fd && rsync -a --delete
     // /s/ /d/` warned where it used to be denied.
     let mut found_past_exemption: Option<(EvaluationResult, bool)> = None;
+    // Offsets where a command substitution or backtick opens, computed at most
+    // once and only when some pack actually produced a safe span
+    // (.agent-config-bn3e1). None means "not asked yet", not "none present".
+    let mut nested_starts: Option<Vec<usize>> = None;
 
     for &(pack_id, pack) in &candidate_packs {
         if deadline_exceeded(deadline) || remaining_below(deadline, &crate::perf::PATTERN_MATCH) {
@@ -1888,6 +1957,10 @@ fn evaluate_packs_with_allowlists(
                 // (`.agent-config-qte7t`).
                 continue;
             }
+            clip_safe_spans_at_nested(
+                &mut safe_spans,
+                nested_starts.get_or_insert_with(|| nested_execution_starts(command_for_packs)),
+            );
         }
 
         'patterns: for pattern in &pack.destructive_patterns {
@@ -1944,9 +2017,13 @@ fn evaluate_packs_with_allowlists(
                         // start is the command word, so this asks "is the command
                         // this safe pattern matched the same command that is about
                         // to be blocked".
-                        let Some(&(_, safe_end)) = spans.iter().find(|&&(safe_start, safe_end)| {
+                        // A match that reaches from outside a command
+                        // substitution into one is not the command this safe
+                        // pattern spoke for (.agent-config-bn3e1).
+                        let exemption = spans.iter().find(|&&(safe_start, safe_end)| {
                             start >= safe_start && start < safe_end
-                        }) else {
+                        });
+                        let Some(&(_, safe_end)) = exemption else {
                             break (MatchSpan { start, end }, from > 0);
                         };
                         // Resume where the safe span ends, not where the destructive
@@ -3376,6 +3453,56 @@ mod tests {
         let cmd = "bd create --notes This mentions rm -rf / but is just docs";
         let result = evaluate_command(cmd, &config, &["rm"], &compiled, &allowlists);
         assert!(result.is_allowed());
+    }
+
+    fn gh_packs_config() -> Config {
+        let mut config = Config::default();
+        config.packs.enabled = vec!["core".to_string(), "platform.github".to_string()];
+        config
+    }
+
+    /// A destructive `gh` inside `$( )`, backticks or a quoted value is judged on
+    /// its own -- the enclosing command's safe match must not exempt it
+    /// (`.agent-config-bn3e1`).
+    #[test]
+    fn bn3e1_destructive_gh_inside_a_substitution_is_denied() {
+        let config = gh_packs_config();
+        let compiled = default_compiled_overrides();
+        let allowlists = default_allowlists();
+        for cmd in [
+            "gh api /a $(gh repo delete o/r)",
+            "gh api /a $(gh repo delete o/r) -X GET",
+            "gh api /a `gh repo delete o/r` -X GET",
+            "gh api /a -X GET $(gh repo delete o/r)",
+            r#"gh -f "$(gh repo delete o/r)" status"#,
+            r#"gh -f "`gh repo delete o/r`" status"#,
+        ] {
+            let result = evaluate_command(cmd, &config, &["gh"], &compiled, &allowlists);
+            assert!(
+                result.is_denied(),
+                "a repo deletion inside a substitution was allowed: {cmd:?}"
+            );
+        }
+    }
+
+    /// The other side of the same edit: the enclosing safe commands stay exempt.
+    /// Without these rows the rule above is satisfied by denying everything.
+    #[test]
+    fn bn3e1_enclosing_safe_gh_commands_stay_exempt() {
+        let config = gh_packs_config();
+        let compiled = default_compiled_overrides();
+        let allowlists = default_allowlists();
+        for cmd in [
+            "gh api /repos/o/r/issues -X GET",
+            r#"gh api "/repos/o/r/issues?state=open&per_page=100" --method GET"#,
+            "gh api /repos/o/$(basename $PWD)/issues -X GET",
+            "gh status",
+            r#"gh -f "some value" status"#,
+            "gh pr list --json number",
+        ] {
+            let result = evaluate_command(cmd, &config, &["gh"], &compiled, &allowlists);
+            assert!(result.is_allowed(), "a safe gh command was denied: {cmd:?}");
+        }
     }
 
     #[test]
