@@ -43,9 +43,11 @@ fn first_call_in_a_process_does_not_pay_startup_from_its_budget() {
             assert_eq!(contents.len(), 1, "expected exactly one heredoc body");
             assert_eq!(contents[0].content, "line1");
         }
-        ExtractionResult::Skipped(ref reasons) | ExtractionResult::Partial { skipped: ref reasons, .. }
-            if reasons.iter().any(|r| format!("{r:?}").contains("Timeout")) =>
-        {
+        ExtractionResult::Skipped(ref reasons)
+        | ExtractionResult::Partial {
+            skipped: ref reasons,
+            ..
+        } if reasons.iter().any(|r| format!("{r:?}").contains("Timeout")) => {
             panic!(
                 "a 22-byte heredoc exhausted a 1ms budget, so pattern compilation \
                  is being charged to the per-command budget again: {result:?}"
