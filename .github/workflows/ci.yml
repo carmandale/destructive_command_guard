@@ -1,5 +1,22 @@
 name: ci
 
+# TOOLCHAIN: this repository is pinned, and rust-toolchain.toml is where the pin
+# lives. Read that file for the incident and the reasoning; this note is only
+# about how the pin survives contact with the steps below.
+#
+# The `dtolnay/rust-toolchain@nightly` steps in this workflow install rustup's
+# floating nightly and `rustup default` it. They do NOT decide what builds this
+# code. rust-toolchain.toml sits at the checkout root and overrides the runner
+# default for every cargo/rustc run in the job, so the pin holds even though the
+# refs below still say `@nightly`. The action stays because it also bootstraps
+# rustup where it is missing, and the now-redundant install is cheap: measured
+# at `--profile minimal`, 8.2s, in run 35062485196.
+#
+# The floating nightly still gets read -- in `toolchain-float`, at the bottom of
+# this file. Before 2026-09-16 that news arrived as a red `check` on an innocent
+# commit, which skipped every other job and darkened the pipeline for everyone
+# (.agent-config-nicdp).
+
 on:
   pull_request:
   push:
@@ -946,3 +963,72 @@ jobs:
           path: fuzz/artifacts/
           retention-days: 30
           if-no-files-found: ignore
+
+  # Early warning, deliberately not a gate.
+  #
+  # `check` builds with the nightly pinned in rust-toolchain.toml, so a
+  # toolchain roll can no longer turn main red on its own. This job is what
+  # keeps the other half of that trade: without it we would meet each new lint
+  # months late and all at once, at whatever moment someone bumped the pin.
+  #
+  # Nothing `needs:` this job, it never runs on a PR or a push, and
+  # `continue-on-error` keeps it from failing the workflow. It is allowed to be
+  # red. That is the point -- red here means "there is toolchain news", never
+  # "no work may land".
+  toolchain-float:
+    name: toolchain-float (advisory)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    continue-on-error: true
+    env:
+      # The one place that deliberately escapes the pin. RUSTUP_TOOLCHAIN
+      # outranks rust-toolchain.toml -- `rustup show active-toolchain` under it
+      # reports "overridden by environment variable RUSTUP_TOOLCHAIN".
+      RUSTUP_TOOLCHAIN: nightly
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+
+      - name: Report which toolchains are being compared
+        run: |
+          rustc --version --verbose
+          {
+            echo "## Floating nightly vs the pin"
+            echo ""
+            echo "| | toolchain |"
+            echo "|---|---|"
+            echo "| floating (this job) | \`$(rustc --version)\` |"
+            echo "| pinned (every other job) | \`$(grep '^channel' rust-toolchain.toml)\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: cargo fmt --check (floating nightly)
+        id: fmt
+        continue-on-error: true
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy (floating nightly)
+        id: clippy
+        continue-on-error: true
+        run: cargo clippy --all-targets -- -D warnings
+
+      # Both checks above swallow their own failure so neither hides the other.
+      # This step is what makes the job visibly red when there is news.
+      - name: Verdict
+        if: always()
+        run: |
+          fmt='${{ steps.fmt.outcome }}'
+          clippy='${{ steps.clippy.outcome }}'
+          echo "fmt=$fmt clippy=$clippy"
+          if [ "$fmt" = success ] && [ "$clippy" = success ]; then
+            echo "The pin can move to this nightly with no fallout." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo ""
+            echo "**Floating nightly disagrees with this tree** (fmt: $fmt, clippy: $clippy)."
+            echo "Nothing is blocked. Bumping the pin in \`rust-toolchain.toml\` will inherit this."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1

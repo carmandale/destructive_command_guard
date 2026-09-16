@@ -1,3 +1,43 @@
+# The compiler this repository builds and lints with, pinned on purpose.
+#
+# THIS FILE IS THE SINGLE SOURCE. Every cargo/rustc invoked from the checkout
+# root obeys it, including in CI: the `dtolnay/rust-toolchain@nightly` steps in
+# .github/workflows/*.yml run `rustup default nightly` on the runner, and this
+# file overrides that default for anything run inside the checkout. So local and
+# CI build with the same compiler by construction, and no second copy of the
+# version exists anywhere to drift out of sync.
+#
+# WHY PINNED -- .agent-config-nicdp, filed out of .agent-config-3p49m. This is a
+# cited incident, not a hypothetical. On 2026-09-16 a nightly roll turned the
+# `check` job red across the whole repository with no relevant code change
+# between the two runs:
+#
+#   run 35056540731  05:04 UTC  check SUCCESS
+#   run 35060180084  05:36 UTC  check FAILURE  (clippy, 81 sites)
+#
+# `check` is a `needs:` for every other job, so coverage, e2e, memory-tests,
+# benchmarks, perf-regression, scan-regression and fuzz were all skipped and the
+# pipeline went dark for everyone working on the repo. The failure also landed
+# on whoever pushed next rather than on whoever introduced the defect, so the
+# natural first hypothesis was always "what did I just break".
+#
+# WHAT PINNING COSTS, and where that cost went instead. The same roll is what
+# surfaced 81 genuinely wrong attributes; a pinned toolchain would have kept
+# them invisible. That early warning was worth keeping -- it just did not have
+# to be everybody's outage. It now lives in the `toolchain-float` job in
+# .github/workflows/ci.yml: floating nightly, on the nightly 3am schedule,
+# allowed to fail. New lint news is a thing you go and read, not a thing that
+# stops work from landing.
+#
+# TO BUMP: read `toolchain-float`'s most recent run first -- it already says
+# what will break. Then raise `channel` below and land the bump as its own
+# commit, so the toolchain move and its fallout are one reviewable change.
+#
+# This pin is deliberately the nightly CI was ALREADY running when it was
+# written -- nightly-2026-09-16 is rustc 1.100.0-nightly (215a8af4b 2026-09-15),
+# measured in run 35062485196. It therefore changes nothing about today's build
+# and hides no existing failure. The 81 clippy errors it does not hide are
+# .agent-config-3p49m.
 [toolchain]
-channel = "nightly"
+channel = "nightly-2026-09-16"
 components = ["rustfmt", "clippy"]
