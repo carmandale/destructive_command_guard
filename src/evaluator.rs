@@ -45,7 +45,7 @@
 
 use crate::allowlist::{AllowlistLayer, LayeredAllowlist};
 use crate::ast_matcher::DEFAULT_MATCHER;
-use crate::config::Config;
+use crate::config::{Config, PolicyConfig};
 use crate::context::sanitize_for_pattern_matching;
 use crate::heredoc::{
     ExtractionResult, SkipReason, TriggerResult, check_triggers, extract_content,
@@ -433,19 +433,46 @@ fn denied_because_search_gave_up(
     }
 }
 
-/// Keep the first held denial whose rule blocks: one that would only warn must
-/// not decide for one that blocks and was found later.
+/// Keep the first held denial whose rule the POLICY denies: one it would only
+/// warn on must not decide for one it blocks that was found later.
 fn hold_first_blocking(
-    slot: &mut Option<(EvaluationResult, crate::packs::Severity)>,
+    slot: &mut Option<(EvaluationResult, bool)>,
     decision: EvaluationResult,
-    severity: crate::packs::Severity,
+    denies: bool,
 ) {
     if slot
         .as_ref()
-        .is_none_or(|(_, held)| severity.blocks_by_default() && !held.blocks_by_default())
+        .is_none_or(|(_, held_denies)| denies && !held_denies)
     {
-        *slot = Some((decision, severity));
+        *slot = Some((decision, denies));
     }
+}
+
+/// Whether the policy denies the rule this denial names, asked with the same
+/// three fields the hook resolves the mode from (main.rs, `resolve_mode`).
+///
+/// Severity alone is not that answer: `[policy.rules]` can set a High rule to
+/// warn, and the live config does for `core.git:reset-hard`. Deciding "blocks"
+/// by severity, the evaluator returned that rule at once, the hook warned, and
+/// `git reset --hard && git stash clear` ran (.agent-config-5nyrn).
+fn policy_denies(policy: &PolicyConfig, decision: &EvaluationResult) -> bool {
+    decision.pattern_info.as_ref().is_none_or(|info| {
+        policy.resolve_mode(
+            info.pack_id.as_deref(),
+            info.pattern_name.as_deref(),
+            info.severity,
+        ) == crate::packs::DecisionMode::Deny
+    })
+}
+
+/// [`policy_denies`] for a rule before its match is judged, asked through the
+/// gave-up denial, which names the rule with the same fields a match denial does.
+fn policy_denies_rule(
+    policy: &PolicyConfig,
+    pack_id: &str,
+    pattern: &crate::packs::DestructivePattern,
+) -> bool {
+    policy_denies(policy, &denied_because_search_gave_up(pack_id, pattern))
 }
 
 /// Byte span of a match within the evaluated command string.
@@ -986,6 +1013,7 @@ pub fn evaluate_detailed_with_allowlists(
         &compiled_overrides,
         allowlists,
         &heredoc_settings,
+        config.policy(),
     );
 
     let evaluation_time_us = start.elapsed().as_micros() as u64;
@@ -1240,6 +1268,7 @@ fn evaluate_config_with_source(
         compiled_overrides,
         allowlists,
         &heredoc_settings,
+        config.policy(),
         None,
         None,
         deadline,
@@ -1259,6 +1288,7 @@ fn evaluate_config_with_source(
 /// * `ordered_packs` - Expanded pack IDs in deterministic evaluation order
 /// * `compiled_overrides` - Precompiled config overrides
 /// * `allowlists` - Layered allowlists (project/user/system)
+/// * `policy` - The config's `[policy]`, which decides which matched rule blocks
 #[must_use]
 pub fn evaluate_command_with_pack_order(
     command: &str,
@@ -1268,6 +1298,7 @@ pub fn evaluate_command_with_pack_order(
     compiled_overrides: &crate::config::CompiledOverrides,
     allowlists: &LayeredAllowlist,
     heredoc_settings: &crate::config::HeredocSettings,
+    policy: &PolicyConfig,
 ) -> EvaluationResult {
     evaluate_command_with_pack_order_at_path(
         command,
@@ -1277,6 +1308,7 @@ pub fn evaluate_command_with_pack_order(
         compiled_overrides,
         allowlists,
         heredoc_settings,
+        policy,
         None,
     )
 }
@@ -1292,6 +1324,7 @@ pub fn evaluate_command_with_pack_order_at_path(
     compiled_overrides: &crate::config::CompiledOverrides,
     allowlists: &LayeredAllowlist,
     heredoc_settings: &crate::config::HeredocSettings,
+    policy: &PolicyConfig,
     project_path: Option<&Path>,
 ) -> EvaluationResult {
     evaluate_command_with_pack_order_deadline_at_path(
@@ -1302,6 +1335,7 @@ pub fn evaluate_command_with_pack_order_at_path(
         compiled_overrides,
         allowlists,
         heredoc_settings,
+        policy,
         None,
         project_path,
         None,
@@ -1321,6 +1355,7 @@ pub fn evaluate_command_with_pack_order_at_path(
 /// * `compiled_overrides` - Precompiled config overrides
 /// * `allowlists` - Layered allowlist for overrides
 /// * `heredoc_settings` - Settings for heredoc analysis
+/// * `policy` - The config's `[policy]`, which decides which matched rule blocks
 /// * `deadline` - Optional deadline for fail-open behavior
 ///
 /// # Returns
@@ -1336,6 +1371,7 @@ pub fn evaluate_command_with_pack_order_deadline(
     compiled_overrides: &crate::config::CompiledOverrides,
     allowlists: &LayeredAllowlist,
     heredoc_settings: &crate::config::HeredocSettings,
+    policy: &PolicyConfig,
     allow_once_audit: Option<&crate::pending_exceptions::AllowOnceAuditConfig<'_>>,
     deadline: Option<&Deadline>,
 ) -> EvaluationResult {
@@ -1347,6 +1383,7 @@ pub fn evaluate_command_with_pack_order_deadline(
         compiled_overrides,
         allowlists,
         heredoc_settings,
+        policy,
         allow_once_audit,
         None,
         deadline,
@@ -1368,6 +1405,7 @@ pub fn evaluate_command_with_pack_order_deadline_at_path(
     compiled_overrides: &crate::config::CompiledOverrides,
     allowlists: &LayeredAllowlist,
     heredoc_settings: &crate::config::HeredocSettings,
+    policy: &PolicyConfig,
     allow_once_audit: Option<&crate::pending_exceptions::AllowOnceAuditConfig<'_>>,
     project_path: Option<&Path>,
     deadline: Option<&Deadline>,
@@ -1381,6 +1419,7 @@ pub fn evaluate_command_with_pack_order_deadline_at_path(
         compiled_overrides,
         allowlists,
         heredoc_settings,
+        policy,
         allow_once_audit,
         project_path,
         deadline,
@@ -1399,6 +1438,7 @@ fn evaluate_at_path_impl(
     compiled_overrides: &crate::config::CompiledOverrides,
     allowlists: &LayeredAllowlist,
     heredoc_settings: &crate::config::HeredocSettings,
+    policy: &PolicyConfig,
     allow_once_audit: Option<&crate::pending_exceptions::AllowOnceAuditConfig<'_>>,
     project_path: Option<&Path>,
     deadline: Option<&Deadline>,
@@ -1470,6 +1510,7 @@ fn evaluate_at_path_impl(
                     ordered_packs,
                     keyword_index,
                     compiled_overrides,
+                    policy,
                     allow_once_audit,
                 };
                 if let Some(blocked) =
@@ -1547,6 +1588,7 @@ fn evaluate_at_path_impl(
         ordered_packs,
         allowlists,
         keyword_index,
+        policy,
         None,
         project_path,
     );
@@ -1578,6 +1620,7 @@ fn evaluate_packs_with_allowlists(
     ordered_packs: &[String],
     allowlists: &LayeredAllowlist,
     keyword_index: Option<&crate::packs::EnabledKeywordIndex>,
+    policy: &PolicyConfig,
     deadline: Option<&Deadline>,
     project_path: Option<&Path>,
 ) -> EvaluationResult {
@@ -1662,13 +1705,15 @@ fn evaluate_packs_with_allowlists(
     //
     // The rm_parse optimization for core.filesystem is handled inline.
     let mut first_allowlist_hit: Option<(PatternMatch, AllowlistLayer, String)> = None;
-    let mut gave_up: Option<(&str, &crate::packs::DestructivePattern)> = None;
+    // A search that gave up, with whether the policy denies its rule.
+    let mut gave_up: Option<(&str, &crate::packs::DestructivePattern, bool)> = None;
     // A real match on a rule that only warns or logs is held, not returned: the
     // first destructive match used to decide the whole command, so putting a
     // Medium rule in front of a Critical one downgraded it -- `git stash drop &&
     // git stash clear` warned and ran, while `git stash clear` alone was denied
     // (.agent-config-3ktl8). Scanning continues so a rule that blocks can still
-    // be found; this is returned only when none was.
+    // be found; this is returned only when none was. "Only warns" is the
+    // policy's answer (`policy_denies`), not the severity's.
     let mut pending_non_blocking: Option<EvaluationResult> = None;
     // A match found by searching on past a safe exemption (.agent-config-35ysf),
     // with its rule's severity. The search that reached it never used to run, so
@@ -1677,7 +1722,7 @@ fn evaluate_packs_with_allowlists(
     // (live config: `core.git:clean-force`, High) pre-empted the rule after it
     // that blocks, and `git checkout -b f && git clean -fd && rsync -a --delete
     // /s/ /d/` warned where it used to be denied.
-    let mut found_past_exemption: Option<(EvaluationResult, crate::packs::Severity)> = None;
+    let mut found_past_exemption: Option<(EvaluationResult, bool)> = None;
 
     for &(pack_id, pack) in &candidate_packs {
         if deadline_exceeded(deadline) || remaining_below(deadline, &crate::perf::PATTERN_MATCH) {
@@ -1742,34 +1787,45 @@ fn evaluate_packs_with_allowlists(
                         continue;
                     }
 
-                    if let Some(span) = hit.span.as_ref().map(|span| MatchSpan {
-                        start: span.start,
-                        end: span.end,
-                    }) {
-                        if let Some(mapped_span) =
+                    let mapped_span = hit
+                        .span
+                        .as_ref()
+                        .map(|span| MatchSpan {
+                            start: span.start,
+                            end: span.end,
+                        })
+                        .and_then(|span| {
                             map_span_with_offset(span, normalized_offset, original_len)
-                        {
-                            return EvaluationResult::denied_by_pack_pattern_with_span(
-                                pack_id,
-                                hit.pattern_name,
-                                hit.reason,
-                                None,
-                                hit.severity,
-                                &[], // fast_match path doesn't have suggestions
-                                original_command,
-                                mapped_span,
-                            );
-                        }
-                    }
+                        });
+                    let decision = if let Some(mapped_span) = mapped_span {
+                        EvaluationResult::denied_by_pack_pattern_with_span(
+                            pack_id,
+                            hit.pattern_name,
+                            hit.reason,
+                            None,
+                            hit.severity,
+                            &[], // fast_match path doesn't have suggestions
+                            original_command,
+                            mapped_span,
+                        )
+                    } else {
+                        EvaluationResult::denied_by_pack_pattern(
+                            pack_id,
+                            hit.pattern_name,
+                            hit.reason,
+                            None,
+                            hit.severity,
+                            &[], // fast_match path doesn't have suggestions
+                        )
+                    };
 
-                    return EvaluationResult::denied_by_pack_pattern(
-                        pack_id,
-                        hit.pattern_name,
-                        hit.reason,
-                        None,
-                        hit.severity,
-                        &[], // fast_match path doesn't have suggestions
-                    );
+                    if policy_denies(policy, &decision) {
+                        return decision;
+                    }
+                    if pending_non_blocking.is_none() {
+                        pending_non_blocking = Some(decision);
+                    }
+                    continue;
                 }
             }
         } else if pack.matches_safe(command_for_packs) {
@@ -1798,8 +1854,9 @@ fn evaluate_packs_with_allowlists(
                 return EvaluationResult::allowed_due_to_budget();
             }
 
-            // All severity levels are now evaluated. The policy layer in main.rs
-            // determines whether to deny, warn, or log based on severity and config.
+            // All severity levels are evaluated. Whether a match denies, warns
+            // or logs is the policy's answer, asked here (`policy_denies`) with
+            // the same fields main.rs resolves the returned rule's mode from.
 
             // An exempted match does not end the search for this rule. Stopping
             // there let `rsync --dry-run --delete a b && rsync -a --delete /s/ /d/`
@@ -1866,14 +1923,14 @@ fn evaluate_packs_with_allowlists(
                                 .match_rule_at_path(pack_id, name, project_path)
                                 .is_some()
                         });
-                        // Keep the first one that blocks: a warn-only rule that gave up
-                        // first must not decide for a blocking one that gave up later.
-                        let outranks = gave_up.is_none_or(|(_, held)| {
-                            pattern.severity.blocks_by_default()
-                                && !held.severity.blocks_by_default()
-                        });
+                        // Keep the first one the policy denies: a rule it only
+                        // warns on that gave up first must not decide for one it
+                        // denies that gave up later.
+                        let denies = policy_denies_rule(policy, pack_id, pattern);
+                        let outranks =
+                            gave_up.is_none_or(|(_, _, held_denies)| denies && !held_denies);
                         if !allowlisted && outranks {
-                            gave_up = Some((pack_id, pattern));
+                            gave_up = Some((pack_id, pattern, denies));
                         }
                         continue 'patterns;
                     }
@@ -1884,8 +1941,8 @@ fn evaluate_packs_with_allowlists(
             // search that gave up on a rule that blocks: the hook would allow a
             // command the unknown rule might have stopped (.agent-config-ryyfo).
             // A match found past an exemption decides nothing here; it is held.
-            if let Some((held_pack, held)) = gave_up.filter(|_| !past_exemption) {
-                if held.severity.blocks_by_default() && !pattern.severity.blocks_by_default() {
+            if let Some((held_pack, held, held_denies)) = gave_up.filter(|_| !past_exemption) {
+                if held_denies && !policy_denies_rule(policy, pack_id, pattern) {
                     return denied_because_search_gave_up(held_pack, held);
                 }
             }
@@ -1946,12 +2003,13 @@ fn evaluate_packs_with_allowlists(
                     )
                 };
 
+                let denies = policy_denies(policy, &decision);
                 if past_exemption {
-                    hold_first_blocking(&mut found_past_exemption, decision, pattern.severity);
+                    hold_first_blocking(&mut found_past_exemption, decision, denies);
                     continue;
                 }
 
-                if pattern.severity.blocks_by_default() {
+                if denies {
                     return decision;
                 }
 
@@ -1976,7 +2034,8 @@ fn evaluate_packs_with_allowlists(
             };
 
             if past_exemption {
-                hold_first_blocking(&mut found_past_exemption, decision, pattern.severity);
+                let denies = policy_denies(policy, &decision);
+                hold_first_blocking(&mut found_past_exemption, decision, denies);
                 continue;
             }
 
@@ -1985,12 +2044,12 @@ fn evaluate_packs_with_allowlists(
     }
 
     // A match found past an exemption outranks what the first search held only
-    // when its rule blocks and theirs does not; otherwise the first search's
-    // answer stands, as it did before searching on existed.
+    // when the policy denies its rule and not theirs; otherwise the first
+    // search's answer stands, as it did before searching on existed.
     if found_past_exemption
         .as_ref()
-        .is_some_and(|(_, severity)| severity.blocks_by_default())
-        && gave_up.is_none_or(|(_, pattern)| !pattern.severity.blocks_by_default())
+        .is_some_and(|(_, denies)| *denies)
+        && gave_up.is_none_or(|(_, _, held_denies)| !held_denies)
     {
         if let Some((decision, _)) = found_past_exemption {
             return decision;
@@ -1999,7 +2058,7 @@ fn evaluate_packs_with_allowlists(
 
     // A search gave up and no other pattern matched: still a denial, told
     // as what it is rather than as the rule's finding (.agent-config-ryyfo).
-    if let Some((pack_id, pattern)) = gave_up {
+    if let Some((pack_id, pattern, _)) = gave_up {
         return denied_because_search_gave_up(pack_id, pattern);
     }
 
@@ -2114,6 +2173,7 @@ where
                 ordered_packs: &ordered_packs,
                 keyword_index: keyword_index.as_ref(),
                 compiled_overrides,
+                policy: config.policy(),
                 allow_once_audit: None,
             };
             if let Some(blocked) = evaluate_heredoc(command, context, &mut heredoc_allowlist_hit) {
@@ -2189,6 +2249,7 @@ where
         &ordered_packs,
         allowlists,
         keyword_index.as_ref(),
+        config.policy(),
         None,
         None, // project_path: legacy function, path-aware allowlisting unavailable
     );
@@ -2220,6 +2281,7 @@ struct HeredocEvaluationContext<'a> {
     ordered_packs: &'a [String],
     keyword_index: Option<&'a crate::packs::EnabledKeywordIndex>,
     compiled_overrides: &'a crate::config::CompiledOverrides,
+    policy: &'a PolicyConfig,
     allow_once_audit: Option<&'a crate::pending_exceptions::AllowOnceAuditConfig<'a>>,
 }
 
@@ -2471,6 +2533,7 @@ fn evaluate_heredoc(
                     context.compiled_overrides,
                     context.allowlists,
                     context.heredoc_settings,
+                    context.policy,
                     context.allow_once_audit,
                     context.project_path,
                     context.deadline,
@@ -3924,6 +3987,7 @@ mod tests {
                 &compiled_overrides,
                 &allowlists,
                 &heredoc_settings,
+                &PolicyConfig::default(),
                 None,
                 Some(&deadline),
             );
@@ -3960,6 +4024,7 @@ mod tests {
                 &compiled_overrides,
                 &allowlists,
                 &heredoc_settings,
+                &PolicyConfig::default(),
                 None,
                 Some(&deadline),
             );
@@ -3993,6 +4058,7 @@ mod tests {
                 &compiled_overrides,
                 &allowlists,
                 &heredoc_settings,
+                &PolicyConfig::default(),
                 None,
                 None, // No deadline
             );
@@ -4029,6 +4095,7 @@ mod tests {
                 &compiled_overrides,
                 &allowlists,
                 &heredoc_settings,
+                &PolicyConfig::default(),
                 None,
                 Some(&deadline),
             );

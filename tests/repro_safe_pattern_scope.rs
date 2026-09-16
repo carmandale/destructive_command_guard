@@ -52,6 +52,7 @@ fn is_denied_with(packs: &[&str], command: &str) -> bool {
         &overrides,
         &allowlists,
         &heredoc,
+        config.policy(),
     )
     .is_denied()
 }

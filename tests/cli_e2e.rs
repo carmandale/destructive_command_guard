@@ -3650,6 +3650,17 @@ mod custom_pack_loading_tests {
         allowlist: Option<&str>,
         command: &str,
     ) -> (spawn::Sandbox, std::process::Output) {
+        setup_custom_pack_env_with_config(pack_content, allowlist, "", command)
+    }
+
+    /// Like [`setup_custom_pack_env_with_allowlist`], with `extra_config`
+    /// appended to the generated config (a `[policy]` table, say).
+    fn setup_custom_pack_env_with_config(
+        pack_content: &str,
+        allowlist: Option<&str>,
+        extra_config: &str,
+        command: &str,
+    ) -> (spawn::Sandbox, std::process::Output) {
         let (mut cmd, sandbox) = spawn::dcg();
 
         // Create .git dir to make it a valid project root
@@ -3681,7 +3692,7 @@ mod custom_pack_loading_tests {
 [packs]
 enabled = ["core.git", "core.filesystem"]
 custom_paths = ["{}"]
-"#,
+{extra_config}"#,
             pack_path.to_string_lossy().replace('\\', "/")
         );
         let mut config_file =
@@ -3975,6 +3986,114 @@ safe_patterns:
         );
     }
 
+    /// Two rules whose first match is exempt and whose second is not, plus one
+    /// whose search gives up: `warn-me` and `give-up` are Critical but the
+    /// policy only warns on them, and Medium `deny-me` is the one it blocks.
+    ///
+    /// Both surviving matches are found past an exemption, so both go to the
+    /// held slot, and which of them the slot keeps -- and whether it outranks
+    /// the search that gave up -- was decided by severity, the question the
+    /// hook does not ask (.agent-config-35ysf's hold, re-keyed by 5nyrn).
+    const PAST_EXEMPTION_PACK: &str = r#"
+schema_version: 1
+id: custom.stage
+name: Custom Stage Rules
+version: 1.0.0
+keywords:
+  - stage
+destructive_patterns:
+  - name: give-up
+    pattern: stage\s(?=(a|a)*\1--prod)
+    severity: critical
+    description: Staging to production blocked
+  - name: warn-me
+    pattern: stage\s+--(?:dry-run|wipe)
+    severity: critical
+    description: Wiping the stage is blocked
+  - name: deny-me
+    pattern: stage\s+--(?:dry-run|nuke)
+    severity: medium
+    description: Nuking the stage is worth a warning
+safe_patterns:
+  - name: dry-run
+    pattern: stage\s+--dry-run
+    description: A dry run changes nothing
+"#;
+
+    /// The policy, not the severity, decides which match found past an
+    /// exemption is kept and whether it outranks a search that gave up
+    /// (.agent-config-5nyrn).
+    #[test]
+    fn a_match_past_an_exemption_is_judged_by_the_policy_not_the_severity() {
+        let policy = r#"
+[policy.rules]
+"custom.stage:give-up" = "warn"
+"custom.stage:warn-me" = "warn"
+"custom.stage:deny-me" = "deny"
+"#;
+        let crafted = format!("stage {}", "a".repeat(40));
+        // Both matches are found past the exemption; the slot must keep the one
+        // the policy denies, not the Critical one it only warns on.
+        let two_held = "stage --dry-run && stage --wipe && stage --nuke".to_string();
+        // The held match the policy denies must outrank a search that gave up
+        // on a rule the policy only warns on.
+        let held_vs_gave_up = format!("stage --dry-run && {crafted} && stage --nuke");
+        for command in [two_held.as_str(), held_vs_gave_up.as_str()] {
+            let (_temp, output) =
+                setup_custom_pack_env_with_config(PAST_EXEMPTION_PACK, None, policy, command);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+                panic!("{command:?} should be denied ({e})\nstdout:\n{stdout}\nstderr:\n{stderr}")
+            });
+            assert_eq!(
+                json["hookSpecificOutput"]["permissionDecision"], "deny",
+                "{command:?} should be denied\nstdout:\n{stdout}"
+            );
+            assert_eq!(
+                json["hookSpecificOutput"]["ruleId"], "custom.stage:deny-me",
+                "the rule the policy blocks must decide\ncommand: {command:?}\nstdout:\n{stdout}"
+            );
+        }
+
+        // Controls. The exemption really exempts, so the matches above are
+        // reached only by searching on; the policy really loaded, so the two
+        // Critical rules only warn; and the rule the policy blocks, alone,
+        // denies -- without which the two cases above could pass for the wrong
+        // reason.
+        let (_temp, output) =
+            setup_custom_pack_env_with_config(PAST_EXEMPTION_PACK, None, policy, "stage --dry-run");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.trim().is_empty(),
+            "the dry run is exempt and must be allowed\nstdout:\n{stdout}"
+        );
+
+        for (command, rule) in [
+            ("stage --wipe", "custom.stage:warn-me"),
+            ("stage aa--prod", "custom.stage:give-up"),
+        ] {
+            let (_temp, output) =
+                setup_custom_pack_env_with_config(PAST_EXEMPTION_PACK, None, policy, command);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success() && stdout.trim().is_empty() && stderr.contains(rule),
+                "{command:?} is warned by the policy, so it must warn and not deny\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            );
+        }
+
+        let (_temp, output) =
+            setup_custom_pack_env_with_config(PAST_EXEMPTION_PACK, None, policy, "stage --nuke");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let json: serde_json::Value = serde_json::from_str(stdout.trim())
+            .unwrap_or_else(|e| panic!("stage --nuke should be denied ({e})\nstdout:\n{stdout}"));
+        assert_eq!(
+            json["hookSpecificOutput"]["ruleId"], "custom.stage:deny-me",
+            "the Medium rule the policy denies must deny on its own\nstdout:\n{stdout}"
+        );
+    }
+
     /// A rule allowlisted for the project stays allowed when its search gives
     /// up, as it would be for a match, and the pack's other rules still apply.
     /// An allowlist entry for a DIFFERENT rule must not let a search that gave
@@ -4024,6 +4143,79 @@ reason = "test fixture allowlist entry"
                 "an allowlist covers the rules it names, not the pack\nallowlist:{allowlist}\nstdout:\n{stdout}"
             );
         }
+    }
+
+    /// Which search that gave up is kept, and whether a real match may stand in
+    /// for it, is decided by whether the POLICY blocks each rule, the question
+    /// the hook asks of the rule it is handed. Asked of the severity, the
+    /// critical `prod-deploy` outranked `probe` and returned; with the policy
+    /// warning on `prod-deploy` the hook allowed a command whose `probe` search,
+    /// which the policy denies, gave up (.agent-config-5nyrn).
+    #[test]
+    fn search_that_gives_up_is_judged_by_the_policy_not_the_severity() {
+        let policy = r#"
+[policy.rules]
+"custom.deploy:probe" = "deny"
+"custom.deploy:prod-deploy" = "warn"
+"custom.deploy:wipe" = "warn"
+"custom.deploy:stage" = "deny"
+"#;
+        let crafted = format!("deploy {}", "a".repeat(40));
+        let before_denied = format!("{crafted} && deploy --stage");
+        let before_warned_then_denied = format!("{crafted} && deploy --wipe && deploy --stage");
+        for (command, rule, reason) in [
+            // `probe` gave up and the policy denies it; `prod-deploy` gave up
+            // too, but the policy only warns on it.
+            (crafted.as_str(), "custom.deploy:probe", GAVE_UP),
+            // A real match on a rule the policy denies names itself.
+            (
+                before_denied.as_str(),
+                "custom.deploy:stage",
+                "Stage deploys are worth a warning",
+            ),
+            // A real match the policy only warns on may not stand in for
+            // `probe`: its search gave up on a rule the policy denies.
+            (
+                before_warned_then_denied.as_str(),
+                "custom.deploy:probe",
+                GAVE_UP,
+            ),
+        ] {
+            let (_temp, output) =
+                setup_custom_pack_env_with_config(GAVE_UP_PACK, None, policy, command);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+                panic!("{command:?} should be denied ({e})\nstdout:\n{stdout}\nstderr:\n{stderr}")
+            });
+            assert_eq!(
+                json["hookSpecificOutput"]["permissionDecision"], "deny",
+                "{command:?} should be denied\nstdout:\n{stdout}"
+            );
+            assert_eq!(
+                json["hookSpecificOutput"]["ruleId"], rule,
+                "{command:?} should be denied by {rule}\nstdout:\n{stdout}"
+            );
+            let given = json["hookSpecificOutput"]["permissionDecisionReason"]
+                .as_str()
+                .unwrap_or_default();
+            assert!(
+                given.contains(reason),
+                "{command:?} should be denied with {reason:?}\nstdout:\n{stdout}"
+            );
+        }
+
+        // Control: the policy loaded. A real `prod-deploy` match only warns.
+        let (_temp, output) =
+            setup_custom_pack_env_with_config(GAVE_UP_PACK, None, policy, "deploy aa--prod");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success()
+                && stdout.trim().is_empty()
+                && stderr.contains("custom.deploy:prod-deploy"),
+            "the policy warns on prod-deploy, so it must warn, not deny\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
     }
 
     /// A pack this command can never reach, so the only rules in play are the
