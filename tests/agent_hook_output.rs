@@ -599,3 +599,70 @@ fn test_policy_warned_rules_alone_still_only_warn() {
         assert_denied_by(command, run_hook_mode_with_warned_rules(command), rule);
     }
 }
+
+/// Run the hook under a policy that sets a heredoc / inline-script rule to
+/// warn. `heredoc.python.shutil_rmtree` splits into pack `heredoc.python` and
+/// pattern `shutil_rmtree` (`split_ast_rule_id`), which is the key the hook
+/// resolves the mode from.
+fn run_hook_mode_with_warned_heredoc_rule(command: &str) -> (String, String, i32) {
+    let sandbox = spawn::sandbox();
+    let config_path = sandbox.root().join("heredoc-policy.toml");
+    std::fs::write(
+        &config_path,
+        "[policy.rules]\n\
+         \"heredoc.python:shutil_rmtree\" = \"warn\"\n",
+    )
+    .expect("write policy config");
+    let mut cmd = spawn::dcg_in(&sandbox);
+    cmd.env("DCG_CONFIG", &config_path)
+        .env("DCG_PACKS", "core.git,core.filesystem");
+    run_hook(cmd, &sandbox, command)
+}
+
+/// `evaluate_heredoc` kept a match only when its SEVERITY blocked and returned
+/// the first one it kept, before the outer command's pack scan ever ran. The
+/// hook then resolved that rule's mode from `[policy.rules]`, so a
+/// policy-warned heredoc rule warned and the outer command -- a real
+/// `git stash clear` -- was never evaluated
+/// (.agent-config-dcg-heredoc-policy-warn-hides-outer-fxck7).
+#[test]
+fn test_policy_warned_heredoc_rule_does_not_hide_the_outer_command() {
+    let command =
+        "python3 -c \"import shutil; shutil.rmtree('/Users/someone/proj')\" && git stash clear";
+    assert_denied_by(
+        command,
+        run_hook_mode_with_warned_heredoc_rule(command),
+        "core.git:stash-clear",
+    );
+}
+
+/// Controls for the test above. The warned heredoc rule on its own still only
+/// warns AND names itself on stderr, which proves the policy key resolved --
+/// a wrong key would deny here instead. The blocking rule on its own is still
+/// denied, so the denial above is not a rule that merely started matching.
+#[test]
+fn test_warned_heredoc_rule_alone_warns_and_the_blocking_rule_alone_denies() {
+    let warned = "python3 -c \"import shutil; shutil.rmtree('/Users/someone/proj')\"";
+    let (stdout, stderr, exit_code) = run_hook_mode_with_warned_heredoc_rule(warned);
+    assert_eq!(
+        exit_code, 0,
+        "a warned rule exits 0\ncommand: {warned}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "a heredoc rule the policy warns on must not produce a hook denial\n\
+         command: {warned}\nstdout: {stdout}"
+    );
+    assert!(
+        stderr.contains("shutil_rmtree"),
+        "the warning names the warned heredoc rule, which proves the policy \
+         key resolved\ncommand: {warned}\nstderr: {stderr}"
+    );
+
+    let blocking = "git stash clear";
+    assert_denied_by(
+        blocking,
+        run_hook_mode_with_warned_heredoc_rule(blocking),
+        "core.git:stash-clear",
+    );
+}

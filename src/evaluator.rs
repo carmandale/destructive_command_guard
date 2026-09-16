@@ -475,6 +475,22 @@ fn policy_denies_rule(
     policy_denies(policy, &denied_because_search_gave_up(pack_id, pattern))
 }
 
+/// [`policy_denies`] for an AST match on the heredoc / inline-script path,
+/// asked with the same three fields that match's denial carries into
+/// `pattern_info`, so the hook resolves the identical mode.
+fn policy_denies_ast_match(
+    policy: &PolicyConfig,
+    pack_id: &str,
+    pattern_name: &str,
+    severity: crate::ast_matcher::Severity,
+) -> bool {
+    policy.resolve_mode(
+        Some(pack_id),
+        Some(pattern_name),
+        Some(ast_severity_to_pack_severity(severity)),
+    ) == crate::packs::DecisionMode::Deny
+}
+
 /// Byte span of a match within the evaluated command string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MatchSpan {
@@ -1481,6 +1497,9 @@ fn evaluate_at_path_impl(
     // Step 3: Heredoc / inline-script detection (Tier 1/2/3, fail-open).
     let mut precomputed_sanitized = None;
     let mut heredoc_allowlist_hit: Option<(PatternMatch, AllowlistLayer, String)> = None;
+    // A heredoc match the policy does not deny, held so the outer command is
+    // still scanned (.agent-config-dcg-heredoc-policy-warn-hides-outer-fxck7).
+    let mut heredoc_pending: Option<EvaluationResult> = None;
 
     let project_path = resolve_project_path(heredoc_settings, project_path);
     let project_path = project_path.as_deref();
@@ -1513,9 +1532,12 @@ fn evaluate_at_path_impl(
                     policy,
                     allow_once_audit,
                 };
-                if let Some(blocked) =
-                    evaluate_heredoc(command, context, &mut heredoc_allowlist_hit)
-                {
+                if let Some(blocked) = evaluate_heredoc(
+                    command,
+                    context,
+                    &mut heredoc_allowlist_hit,
+                    &mut heredoc_pending,
+                ) {
                     return blocked;
                 }
             }
@@ -1528,6 +1550,9 @@ fn evaluate_at_path_impl(
 
     // Step 4: Quick rejection - if no relevant keywords, allow immediately
     if pack_aware_quick_reject(command, enabled_keywords) {
+        if let Some(pending) = heredoc_pending {
+            return pending;
+        }
         if let Some((matched, layer, reason)) = heredoc_allowlist_hit {
             return EvaluationResult::allowed_by_allowlist(matched, layer, reason);
         }
@@ -1552,6 +1577,9 @@ fn evaluate_at_path_impl(
     let (quick_reject, normalized) =
         pack_aware_quick_reject_with_normalized(command_for_match, enabled_keywords);
     if matches!(sanitized, std::borrow::Cow::Owned(_)) && quick_reject {
+        if let Some(pending) = heredoc_pending {
+            return pending;
+        }
         if let Some((matched, layer, reason)) = heredoc_allowlist_hit {
             return EvaluationResult::allowed_by_allowlist(matched, layer, reason);
         }
@@ -1598,6 +1626,18 @@ fn evaluate_at_path_impl(
     // would let every destructive command sharing the line through (.agent-config-4lazh).
     // `skipped_due_to_budget` is excluded for the same reason: the hook turns a budget
     // skip into a denial, and relabelling it as an allowlist allow would discard that.
+    // The held heredoc match stands unless the pack scan produced a denial
+    // the POLICY denies -- that rule decides, which is the whole point of not
+    // returning the warned heredoc match up front. A budget skip is left
+    // alone: the hook turns it into a denial, stricter than this warn.
+    if let Some(pending) = heredoc_pending {
+        if !result.skipped_due_to_budget
+            && !(result.decision == EvaluationDecision::Deny && policy_denies(policy, &result))
+        {
+            return pending;
+        }
+    }
+
     if result.allowlist_override.is_none()
         && result.decision == EvaluationDecision::Allow
         && !result.skipped_due_to_budget
@@ -2151,6 +2191,9 @@ where
     let heredoc_settings = config.heredoc_settings();
     let mut precomputed_sanitized = None;
     let mut heredoc_allowlist_hit: Option<(PatternMatch, AllowlistLayer, String)> = None;
+    // A heredoc match the policy does not deny, held so the outer command is
+    // still scanned (.agent-config-dcg-heredoc-policy-warn-hides-outer-fxck7).
+    let mut heredoc_pending: Option<EvaluationResult> = None;
     let project_path = resolve_project_path(&heredoc_settings, None);
     let project_path = project_path.as_deref();
     if heredoc_settings.enabled && check_triggers(command) == TriggerResult::Triggered {
@@ -2176,7 +2219,12 @@ where
                 policy: config.policy(),
                 allow_once_audit: None,
             };
-            if let Some(blocked) = evaluate_heredoc(command, context, &mut heredoc_allowlist_hit) {
+            if let Some(blocked) = evaluate_heredoc(
+                command,
+                context,
+                &mut heredoc_allowlist_hit,
+                &mut heredoc_pending,
+            ) {
                 return blocked;
             }
         }
@@ -2184,6 +2232,9 @@ where
 
     // Step 4: Quick rejection - if no relevant keywords, allow immediately
     if pack_aware_quick_reject(command, enabled_keywords) {
+        if let Some(pending) = heredoc_pending {
+            return pending;
+        }
         if let Some((matched, layer, reason)) = heredoc_allowlist_hit {
             return EvaluationResult::allowed_by_allowlist(matched, layer, reason);
         }
@@ -2204,6 +2255,9 @@ where
     let (quick_reject, normalized) =
         pack_aware_quick_reject_with_normalized(command_for_match, enabled_keywords);
     if matches!(sanitized, std::borrow::Cow::Owned(_)) && quick_reject {
+        if let Some(pending) = heredoc_pending {
+            return pending;
+        }
         if let Some((matched, layer, reason)) = heredoc_allowlist_hit {
             return EvaluationResult::allowed_by_allowlist(matched, layer, reason);
         }
@@ -2259,6 +2313,19 @@ where
     // would let every destructive command sharing the line through (.agent-config-4lazh).
     // `skipped_due_to_budget` is excluded for the same reason: the hook turns a budget
     // skip into a denial, and relabelling it as an allowlist allow would discard that.
+    // The held heredoc match stands unless the pack scan produced a denial
+    // the POLICY denies -- that rule decides, which is the whole point of not
+    // returning the warned heredoc match up front. A budget skip is left
+    // alone: the hook turns it into a denial, stricter than this warn.
+    if let Some(pending) = heredoc_pending {
+        if !result.skipped_due_to_budget
+            && !(result.decision == EvaluationDecision::Deny
+                && policy_denies(config.policy(), &result))
+        {
+            return pending;
+        }
+    }
+
     if result.allowlist_override.is_none()
         && result.decision == EvaluationDecision::Allow
         && !result.skipped_due_to_budget
@@ -2290,6 +2357,7 @@ fn evaluate_heredoc(
     command: &str,
     context: HeredocEvaluationContext<'_>,
     first_allowlist_hit: &mut Option<(PatternMatch, AllowlistLayer, String)>,
+    held_non_denying: &mut Option<EvaluationResult>,
 ) -> Option<EvaluationResult> {
     if deadline_exceeded(context.deadline)
         || remaining_below(context.deadline, &crate::perf::FULL_HEREDOC_PIPELINE)
@@ -2610,11 +2678,18 @@ fn evaluate_heredoc(
         // the agent "could not finish evaluating — use allow-once" about a
         // command dcg had just matched.
         for m in matches {
-            if !m.severity.blocks_by_default() {
+            let (pack_id, pattern_name) = split_ast_rule_id(&m.rule_id);
+            let denies =
+                policy_denies_ast_match(context.policy, &pack_id, &pattern_name, m.severity);
+
+            // The old skip, narrowed by asking the policy first. Dropping a
+            // match on severity alone meant a `[policy.rules]` deny on a
+            // Medium heredoc rule could never block anything: the match was
+            // gone before the mode was ever resolved
+            // (.agent-config-dcg-heredoc-policy-warn-hides-outer-fxck7).
+            if !denies && !m.severity.blocks_by_default() {
                 continue;
             }
-
-            let (pack_id, pattern_name) = split_ast_rule_id(&m.rule_id);
 
             if let Some(hit) = context.allowlists.match_rule(&pack_id, &pattern_name) {
                 if first_allowlist_hit.is_none() {
@@ -2641,7 +2716,7 @@ fn evaluate_heredoc(
 
             let reason = format_heredoc_denial_reason(content, &m, &pack_id, &pattern_name);
             let mapped_span = map_heredoc_span(command, content, m.start, m.end);
-            return Some(EvaluationResult {
+            let found = EvaluationResult {
                 decision: EvaluationDecision::Deny,
                 pattern_info: Some(PatternMatch {
                     pack_id: Some(pack_id),
@@ -2658,7 +2733,23 @@ fn evaluate_heredoc(
                 effective_mode: Some(crate::packs::DecisionMode::Deny),
                 skipped_due_to_budget: false,
                 branch_context: None,
-            });
+            };
+
+            // The policy denies this rule: it decides, and the search ends
+            // here as it always has.
+            if denies {
+                return Some(found);
+            }
+
+            // The policy only warns it. Returning it here ended the whole
+            // evaluation before the OUTER command was ever scanned, so
+            // `python3 -c "shutil.rmtree(...)" && git stash clear` warned
+            // about the rmtree and ran the stash clear. Hold it, exactly as
+            // the pack loop holds `pending_non_blocking`, and let a rule the
+            // policy denies decide (.agent-config-dcg-heredoc-policy-warn-hides-outer-fxck7).
+            if held_non_denying.is_none() {
+                *held_non_denying = Some(found);
+            }
         }
     }
 
