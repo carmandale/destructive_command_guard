@@ -54,6 +54,12 @@ expected = "deny"
 rule_id = "core.git:reset-hard"
 
 [[case]]
+description = "force push is not exempted by a checkout -b on the line before it"
+command = "git checkout -b feat\ngit push --force origin main"
+expected = "deny"
+rule_id = "core.git:push-force-long"
+
+[[case]]
 description = "clean -fd is not exempted by an earlier clean -n"
 command = "git clean -n && git clean -fd"
 expected = "deny"
