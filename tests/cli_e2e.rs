@@ -3704,10 +3704,33 @@ mod custom_pack_loading_tests {
             .write_all(pack_content.as_bytes())
             .expect("failed to write pack");
 
-        // Write config that loads the custom pack
+        // Write config that loads the custom pack.
+        //
+        // The budget is pinned far above the 200ms default on purpose. These
+        // harnesses ask what a PATTERN decides, and one of them drives a
+        // pattern built to exhaust fancy_regex's backtrack limit -- a fixed
+        // step count, which is deterministic. The hook deadline is a clock,
+        // and a denial from the clock arrives under
+        // `core.limits:evaluation-timeout` rather than under the rule, so a
+        // loaded `--release` suite could turn an in-budget verdict into a
+        // phantom regression for whoever happened to hit it
+        // (.agent-config-60dbp).
+        //
+        // Measured 2026-09-16 on a release build: the crafted command's
+        // in-deadline work still finished under a 2ms budget at load ~48, and
+        // flipped to the timeout rule only at 1ms -- so this is not a slow path
+        // being papered over. It is a ~100x margin that only a heavily loaded
+        // box can close, and the full suite runs at load 430-490.
+        //
+        // `budget_overrun_denies_instead_of_allowing` and its neighbours own
+        // the timeout contract and write their own config, so nothing here is
+        // what proves the budget still fires.
         let config_path = sandbox.dcg_config_dir().join("config.toml");
         let config_content = format!(
             r#"
+[general]
+hook_timeout_ms = 20000
+
 [packs]
 enabled = ["core.git", "core.filesystem"]
 custom_paths = ["{}"]
