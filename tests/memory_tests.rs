@@ -396,15 +396,25 @@ fn memory_leak_self_test() {
 
     let result = std::panic::catch_unwind(|| {
         assert_no_leak("intentional_leak", 100, 1024 * 1024, || {
-            // `black_box` is load-bearing, not decoration. An allocation that
-            // is never observed may be removed outright, and at opt-level 3
-            // LLVM does exactly that: this leak measured 0 KB growth and the
-            // assert below fired with "Memory leak detection is BROKEN". It
-            // survived only because `[profile.release]` here is opt-level "z".
-            // See .agent-config-q8lht. Without this the suite's ONLY control
-            // is disarmed, and a real leak would go unnoticed.
-            let mut leaked: Vec<u8> = vec![0u8; 1024 * 1024];
-            leaked[0] = 1;
+            // Both halves are load-bearing, and CI measured each one under
+            // .agent-config-q8lht. The detector reads RSS, so this leak has
+            // to be both UNREMOVABLE and RESIDENT.
+            //
+            // `black_box` -- an allocation that is never observed may be
+            // removed outright. At opt-level 3 LLVM did exactly that: growth
+            // measured 0 KB and the assert below fired with "Memory leak
+            // detection is BROKEN".
+            //
+            // A NON-ZERO fill -- `vec![0u8; N]` lowers to `alloc_zeroed`, and
+            // those zero pages are faulted in lazily, so they are not
+            // resident until written. With `black_box` plus a single
+            // `leaked[0] = 1`, exactly one 4 KB page per 1 MB block faulted
+            // in and 100 iterations measured 400 KB, still under the 1024 KB
+            // limit. `vec![1u8; N]` cannot use `alloc_zeroed` and must
+            // memset, so every page is resident. At opt-level "z" the
+            // original code happened to memset too, which is the only reason
+            // this control ever worked.
+            let leaked: Vec<u8> = vec![1u8; 1024 * 1024];
             std::mem::forget(std::hint::black_box(leaked));
         });
     });
