@@ -55,18 +55,31 @@ fn create_safe_patterns() -> Vec<SafePattern> {
             r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret|variable|workflow|run|api)\b)\S+)?)*\s+run\s+view\b"
         ),
         // Safe only when GET is explicit (default method can vary by flags).
+        // The span stops at the command it covers. `.*` ran to the end of the line, and a match
+        // is exempted when it starts inside a safe span, so one harmless GET anywhere on a line
+        // exempted a real deletion elsewhere on it (.agent-config-kf3dq cold review look 2).
+        // The lookahead is not decoration: this safe pattern and the destructive
+        // `api ... DELETE` ones all START at the command word, and the exemption
+        // rule asks whether a destructive match starts INSIDE a safe span. Two
+        // spans that both start here satisfy that unconditionally, so before
+        // `.agent-config-nh7t4` a `-X GET` anywhere in the command exempted a
+        // `-X DELETE` in the SAME command -- in either order, and even when the
+        // GET was only text inside a quoted value. A GET pattern may only speak
+        // for a command that names no state-changing method.
         safe_pattern!(
             "gh-actions-api-explicit-get",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret|variable|workflow|run|api)\b)\S+)?)*\s+api\b.*(?:-X|--method)\s+GET\b"
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret|variable|workflow|run|api)\b)\S+)?)*\s+api\b(?![^;&|\n]*(?:-X|--method)\s+(?:DELETE|PUT|PATCH|POST)\b)[^;&|\n]*(?:-X|--method)\s+GET\b"
         ),
     ]
 }
 
 fn create_destructive_patterns() -> Vec<DestructivePattern> {
+    // Without the safe patterns' subcommand lookahead, for the reason in platform/github.rs
+    // (.agent-config-kf3dq).
     vec![
         destructive_pattern!(
             "gh-actions-secret-remove",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret|variable|workflow|run|api)\b)\S+)?)*\s+secret\s+(?:delete|remove)\b",
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+\S+)?)*\s+secret\s+(?:delete|remove)\b",
             "gh secret delete/remove deletes GitHub Actions secrets. This can break CI and may be hard to recover.",
             High,
             "Deleting a GitHub Actions secret removes it from the repository, organization, \
@@ -79,7 +92,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
         destructive_pattern!(
             "gh-actions-variable-remove",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret|variable|workflow|run|api)\b)\S+)?)*\s+variable\s+(?:delete|remove)\b",
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+\S+)?)*\s+variable\s+(?:delete|remove)\b",
             "gh variable delete/remove deletes GitHub Actions variables. This can break workflows.",
             Medium,
             "Removing a GitHub Actions variable makes it unavailable to all workflows that \
@@ -92,7 +105,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
         destructive_pattern!(
             "gh-actions-workflow-disable",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret|variable|workflow|run|api)\b)\S+)?)*\s+workflow\s+disable\b",
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+\S+)?)*\s+workflow\s+disable\b",
             "gh workflow disable disables workflows. This is reversible, but can disrupt CI.",
             Low,
             "Disabling a workflow prevents it from running on any triggers. This is reversible \
@@ -105,7 +118,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
         destructive_pattern!(
             "gh-actions-run-cancel",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret|variable|workflow|run|api)\b)\S+)?)*\s+run\s+cancel\b",
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+\S+)?)*\s+run\s+cancel\b",
             "gh run cancel cancels a running workflow. This is reversible, but may disrupt deployments.",
             Low,
             "Canceling a workflow run stops it mid-execution. Any in-progress deployments, \
@@ -118,7 +131,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
         destructive_pattern!(
             "gh-actions-api-delete-secrets",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret|variable|workflow|run|api)\b)\S+)?)*\s+api\b.*(?:-X|--method)\s+DELETE\b.*\b/?repos/[^\s/]+/[^\s/]+/actions/secrets\b",
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+\S+)?)*\s+api\b.*(?:-X|--method)\s+DELETE\b.*\b/?repos/[^\s/]+/[^\s/]+/actions/secrets\b",
             "gh api DELETE against /actions/secrets deletes GitHub Actions secrets.",
             High,
             "Making DELETE requests to the GitHub Actions secrets API removes secrets from \
@@ -131,7 +144,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
         destructive_pattern!(
             "gh-actions-api-delete-variables",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret|variable|workflow|run|api)\b)\S+)?)*\s+api\b.*(?:-X|--method)\s+DELETE\b.*\b/?repos/[^\s/]+/[^\s/]+/actions/variables\b",
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+\S+)?)*\s+api\b.*(?:-X|--method)\s+DELETE\b.*\b/?repos/[^\s/]+/[^\s/]+/actions/variables\b",
             "gh api DELETE against /actions/variables deletes GitHub Actions variables.",
             Medium,
             "Making DELETE requests to the GitHub Actions variables API removes variables \

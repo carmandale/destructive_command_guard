@@ -2022,6 +2022,116 @@ block = [
         // preventing normalization stripping, and classify the argument as InlineCode.
         assert_hook_denies(cmd);
     }
+
+    /// A match a safe pattern exempts does not end the search for that rule.
+    ///
+    /// The first `rsync` is a dry run, so its `--delete` is exempt. The rule used
+    /// to stop at that first match and `continue`, so the second `rsync`, which
+    /// really deletes, was never looked at and the line was ALLOWED
+    /// (.agent-config-35ysf). `remote` is enabled because the live guard runs it;
+    /// the default test packs would allow this line without evaluating rsync.
+    ///
+    /// The rule id is asserted, not only the decision: `rsync-del-short` cannot
+    /// match `--delete`, so only `rsync-delete` finding the second command proves
+    /// the search went on.
+    ///
+    /// The next two lines were DENIED before searching on existed, and must stay
+    /// denied by the same rule. In each, searching on gives a warn-only rule
+    /// (`core.git:branch-force-delete`, `remote.ssh:ssh-keygen-remove-host`) a
+    /// match the old rule never reached. The hook decides deny or warn from the
+    /// rule the evaluator returns, so a match found past an exemption is held
+    /// until the rules the first search reached have run; returned at once, it
+    /// turned each line into a warning and hid the blocking rule after it. The
+    /// last line is the same shape under a policy that warns on a High rule.
+    #[test]
+    fn hook_mode_safe_exemption_does_not_hide_a_later_destructive_command() {
+        let packs = std::ffi::OsStr::new("core,remote");
+        // The live config sets `core.git:clean-force`, a High rule, to warn. A
+        // match on it found past an exemption blocks by severity but only warns
+        // by policy, so returned at once it hid the rsync after it.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let policy = temp.path().join("dcg-config.toml");
+        std::fs::write(
+            &policy,
+            "[policy.rules]\n\"core.git:clean-force\" = \"warn\"\n",
+        )
+        .expect("write policy config");
+        let default_env = [("DCG_PACKS", packs)];
+        let policy_env = [("DCG_PACKS", packs), ("DCG_CONFIG", policy.as_os_str())];
+
+        // Control: the policy is in force, so clean-force alone only warns.
+        let run = run_dcg_hook_with_env("git clean -fd", &policy_env);
+        assert!(
+            run.output.status.success() && run.stdout_str().trim().is_empty(),
+            "the warn policy for clean-force did not load\nstdout:\n{}\nstderr:\n{}",
+            run.stdout_str(),
+            run.stderr_str()
+        );
+
+        for (command, rule, env) in [
+            (
+                "rsync --dry-run --delete a b && rsync -a --delete /src/ /dst/",
+                "remote.rsync:rsync-delete",
+                &default_env[..],
+            ),
+            // Across packs: core.git runs before remote.
+            (
+                "git checkout -b feat && git branch -D old && rsync -a --delete /src/ /dst/",
+                "remote.rsync:rsync-delete",
+                &default_env[..],
+            ),
+            // The bead's line behind a warn-only command: the warn match the
+            // first search holds must not outrank the blocking rsync found past
+            // the exemption.
+            (
+                "git branch -D old && rsync --dry-run --delete a b && rsync -a --delete /src/ /dst/",
+                "remote.rsync:rsync-delete",
+                &default_env[..],
+            ),
+            // Within one pack: the warn-only rule comes first in remote.ssh.
+            (
+                "ssh-keygen -l -f known ; ssh-keygen -R host ; ssh host sudo rm -r /data",
+                "remote.ssh:ssh-remote-sudo-rm",
+                &default_env[..],
+            ),
+            (
+                "git checkout -b feat && git clean -fd && rsync -a --delete /src/ /dst/",
+                "remote.rsync:rsync-delete",
+                &policy_env[..],
+            ),
+        ] {
+            let run = run_dcg_hook_with_env(command, env);
+            let stdout = run.stdout_str();
+            let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+                panic!(
+                    "{command:?} should produce a hook decision ({e})\nstdout:\n{stdout}\nstderr:\n{}",
+                    run.stderr_str()
+                )
+            });
+            assert_eq!(
+                json["hookSpecificOutput"]["permissionDecision"], "deny",
+                "{command:?} should be denied\nstdout:\n{stdout}"
+            );
+            assert_eq!(
+                json["hookSpecificOutput"]["ruleId"], rule,
+                "{command:?} should be denied by {rule}\nstdout:\n{stdout}"
+            );
+        }
+
+        // The other direction: searching on must still exempt every command a
+        // safe pattern covers, not only the first one.
+        let run = run_dcg_hook_with_env(
+            "rsync --dry-run --delete a b && rsync --dry-run --delete c d",
+            &[("DCG_PACKS", packs)],
+        );
+        assert!(
+            run.output.status.success() && run.stdout_str().trim().is_empty(),
+            "two dry runs must stay allowed (exit {:?})\nstdout:\n{}\nstderr:\n{}",
+            run.output.status.code(),
+            run.stdout_str(),
+            run.stderr_str()
+        );
+    }
 }
 
 // ============================================================================
@@ -3559,6 +3669,17 @@ mod custom_pack_loading_tests {
         allowlist: Option<&str>,
         command: &str,
     ) -> (spawn::Sandbox, std::process::Output) {
+        setup_custom_pack_env_with_config(pack_content, allowlist, "", command)
+    }
+
+    /// Like [`setup_custom_pack_env_with_allowlist`], with `extra_config`
+    /// appended to the generated config (a `[policy]` table, say).
+    fn setup_custom_pack_env_with_config(
+        pack_content: &str,
+        allowlist: Option<&str>,
+        extra_config: &str,
+        command: &str,
+    ) -> (spawn::Sandbox, std::process::Output) {
         let (mut cmd, sandbox) = spawn::dcg();
 
         // Create .git dir to make it a valid project root
@@ -3590,7 +3711,7 @@ mod custom_pack_loading_tests {
 [packs]
 enabled = ["core.git", "core.filesystem"]
 custom_paths = ["{}"]
-"#,
+{extra_config}"#,
             pack_path.to_string_lossy().replace('\\', "/")
         );
         let mut config_file =
@@ -3820,6 +3941,213 @@ safe_patterns:
         }
     }
 
+    /// A search that gives up after a safe pattern exempted an earlier match of
+    /// the same rule still denies.
+    ///
+    /// The first `deploy aa--prod` is a dry run and exempt, so the rule searches
+    /// on (.agent-config-35ysf) and the crafted command after it exhausts the
+    /// backtrack limit. That error has to be held like any other search that
+    /// gave up (.agent-config-ryyfo), not dropped because it came after an
+    /// exemption.
+    #[test]
+    fn search_that_gives_up_after_an_exemption_denies() {
+        let pack_content = r#"
+schema_version: 1
+id: custom.deploy
+name: Custom Deploy Rules
+version: 1.0.0
+keywords:
+  - deploy
+destructive_patterns:
+  - name: prod-deploy
+    pattern: deploy\s(?=(a|a)*\1--prod)
+    severity: critical
+    description: Direct production deployment blocked
+safe_patterns:
+  - name: dry-run
+    pattern: deploy\s+aa--prod\s+--dry-run
+    description: A dry run changes nothing
+"#;
+
+        // Control: the exemption applies, so the gave-up case below is reached
+        // only by searching on past it.
+        let exempt = "deploy aa--prod --dry-run";
+        let (_temp, output) = setup_custom_pack_env(pack_content, exempt);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.trim().is_empty(),
+            "{exempt:?} should be allowed\nstdout:\n{stdout}"
+        );
+
+        let command = format!("{exempt} && deploy {}", "a".repeat(40));
+        let (_temp, output) = setup_custom_pack_env(pack_content, &command);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+            panic!("{command:?} should produce a hook decision ({e})\nstdout:\n{stdout}")
+        });
+        assert_eq!(
+            json["hookSpecificOutput"]["permissionDecision"], "deny",
+            "{command:?} should be denied\nstdout:\n{stdout}"
+        );
+        assert_eq!(
+            json["hookSpecificOutput"]["ruleId"], "custom.deploy:prod-deploy",
+            "{command:?} should be denied by prod-deploy\nstdout:\n{stdout}"
+        );
+        let given = json["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            given.contains(GAVE_UP),
+            "{command:?} should be denied as a search that gave up\nstdout:\n{stdout}"
+        );
+    }
+
+    /// Two rules whose first match is exempt and whose second is not, plus one
+    /// whose search gives up: `warn-me` and `give-up` are Critical but the
+    /// policy only warns on them, and Medium `deny-me` is the one it blocks.
+    ///
+    /// Both surviving matches are found past an exemption, so both go to the
+    /// held slot, and which of them the slot keeps -- and whether it outranks
+    /// the search that gave up -- was decided by severity, the question the
+    /// hook does not ask (.agent-config-35ysf's hold, re-keyed by 5nyrn).
+    ///
+    /// `deny-first` is here so the slot is tested in both directions: it is
+    /// denied by the policy and comes BEFORE `warn-me` in pack order, so
+    /// keeping it is the half that a slot which simply overwrites would lose.
+    const PAST_EXEMPTION_PACK: &str = r#"
+schema_version: 1
+id: custom.stage
+name: Custom Stage Rules
+version: 1.0.0
+keywords:
+  - stage
+destructive_patterns:
+  - name: give-up
+    pattern: stage\s(?=(a|a)*\1--prod)
+    severity: critical
+    description: Staging to production blocked
+  - name: deny-first
+    pattern: stage\s+--(?:dry-run|zap)
+    severity: medium
+    description: Zapping the stage is worth a warning
+  - name: warn-me
+    pattern: stage\s+--(?:dry-run|wipe)
+    severity: critical
+    description: Wiping the stage is blocked
+  - name: deny-me
+    pattern: stage\s+--(?:dry-run|nuke)
+    severity: medium
+    description: Nuking the stage is worth a warning
+safe_patterns:
+  - name: dry-run
+    pattern: stage\s+--dry-run
+    description: A dry run changes nothing
+"#;
+
+    /// The policy, not the severity, decides which match found past an
+    /// exemption is kept and whether it outranks a search that gave up
+    /// (.agent-config-5nyrn).
+    #[test]
+    fn a_match_past_an_exemption_is_judged_by_the_policy_not_the_severity() {
+        let policy = r#"
+[policy.rules]
+"custom.stage:give-up" = "warn"
+"custom.stage:warn-me" = "warn"
+"custom.stage:deny-me" = "deny"
+"custom.stage:deny-first" = "deny"
+"#;
+        let crafted = format!("stage {}", "a".repeat(40));
+        // Both matches are found past the exemption; the slot must keep the one
+        // the policy denies, not the Critical one it only warns on.
+        let two_held = "stage --dry-run && stage --wipe && stage --nuke".to_string();
+        // The held match the policy denies must outrank a search that gave up
+        // on a rule the policy only warns on.
+        let held_vs_gave_up = format!("stage --dry-run && {crafted} && stage --nuke");
+        // The other direction: the rule the policy denies is found FIRST, and a
+        // later match on a rule it only warns on must not take the slot from it.
+        // A slot that simply overwrote would lose exactly this one, and every
+        // other case here would stay green (cold review of 345fb16).
+        let denying_first = "stage --dry-run && stage --zap && stage --wipe".to_string();
+        for command in [
+            two_held.as_str(),
+            held_vs_gave_up.as_str(),
+            denying_first.as_str(),
+        ] {
+            let (_temp, output) =
+                setup_custom_pack_env_with_config(PAST_EXEMPTION_PACK, None, policy, command);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+                panic!("{command:?} should be denied ({e})\nstdout:\n{stdout}\nstderr:\n{stderr}")
+            });
+            assert_eq!(
+                json["hookSpecificOutput"]["permissionDecision"], "deny",
+                "{command:?} should be denied\nstdout:\n{stdout}"
+            );
+            let expected = if command == denying_first {
+                "custom.stage:deny-first"
+            } else {
+                "custom.stage:deny-me"
+            };
+            assert_eq!(
+                json["hookSpecificOutput"]["ruleId"], expected,
+                "the rule the policy blocks must decide\ncommand: {command:?}\nstdout:\n{stdout}"
+            );
+        }
+
+        // Controls. The exemption really exempts, so the matches above are
+        // reached only by searching on; the policy really loaded, so the two
+        // Critical rules only warn; and the rule the policy blocks, alone,
+        // denies -- without which the two cases above could pass for the wrong
+        // reason.
+        let (_temp, output) =
+            setup_custom_pack_env_with_config(PAST_EXEMPTION_PACK, None, policy, "stage --dry-run");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.trim().is_empty(),
+            "the dry run is exempt and must be allowed\nstdout:\n{stdout}"
+        );
+
+        for (command, rule) in [
+            ("stage --wipe", "custom.stage:warn-me"),
+            ("stage aa--prod", "custom.stage:give-up"),
+        ] {
+            let (_temp, output) =
+                setup_custom_pack_env_with_config(PAST_EXEMPTION_PACK, None, policy, command);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success() && stdout.trim().is_empty() && stderr.contains(rule),
+                "{command:?} is warned by the policy, so it must warn and not deny\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            );
+        }
+
+        // Control for held_vs_gave_up: the crafted command really does exhaust
+        // the backtrack limit. Without this, an engine that stopped giving up
+        // would leave that case asserting only the held match, and the
+        // held-versus-gave-up precedence would stop being tested silently.
+        let (_temp, output) =
+            setup_custom_pack_env_with_config(PAST_EXEMPTION_PACK, None, policy, &crafted);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stdout.trim().is_empty()
+                && stderr.contains("custom.stage:give-up")
+                && stderr.contains(GAVE_UP),
+            "the crafted command must give up on give-up, which the policy warns on\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+
+        let (_temp, output) =
+            setup_custom_pack_env_with_config(PAST_EXEMPTION_PACK, None, policy, "stage --nuke");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let json: serde_json::Value = serde_json::from_str(stdout.trim())
+            .unwrap_or_else(|e| panic!("stage --nuke should be denied ({e})\nstdout:\n{stdout}"));
+        assert_eq!(
+            json["hookSpecificOutput"]["ruleId"], "custom.stage:deny-me",
+            "the Medium rule the policy denies must deny on its own\nstdout:\n{stdout}"
+        );
+    }
+
     /// A rule allowlisted for the project stays allowed when its search gives
     /// up, as it would be for a match, and the pack's other rules still apply.
     /// An allowlist entry for a DIFFERENT rule must not let a search that gave
@@ -3869,6 +4197,79 @@ reason = "test fixture allowlist entry"
                 "an allowlist covers the rules it names, not the pack\nallowlist:{allowlist}\nstdout:\n{stdout}"
             );
         }
+    }
+
+    /// Which search that gave up is kept, and whether a real match may stand in
+    /// for it, is decided by whether the POLICY blocks each rule, the question
+    /// the hook asks of the rule it is handed. Asked of the severity, the
+    /// critical `prod-deploy` outranked `probe` and returned; with the policy
+    /// warning on `prod-deploy` the hook allowed a command whose `probe` search,
+    /// which the policy denies, gave up (.agent-config-5nyrn).
+    #[test]
+    fn search_that_gives_up_is_judged_by_the_policy_not_the_severity() {
+        let policy = r#"
+[policy.rules]
+"custom.deploy:probe" = "deny"
+"custom.deploy:prod-deploy" = "warn"
+"custom.deploy:wipe" = "warn"
+"custom.deploy:stage" = "deny"
+"#;
+        let crafted = format!("deploy {}", "a".repeat(40));
+        let before_denied = format!("{crafted} && deploy --stage");
+        let before_warned_then_denied = format!("{crafted} && deploy --wipe && deploy --stage");
+        for (command, rule, reason) in [
+            // `probe` gave up and the policy denies it; `prod-deploy` gave up
+            // too, but the policy only warns on it.
+            (crafted.as_str(), "custom.deploy:probe", GAVE_UP),
+            // A real match on a rule the policy denies names itself.
+            (
+                before_denied.as_str(),
+                "custom.deploy:stage",
+                "Stage deploys are worth a warning",
+            ),
+            // A real match the policy only warns on may not stand in for
+            // `probe`: its search gave up on a rule the policy denies.
+            (
+                before_warned_then_denied.as_str(),
+                "custom.deploy:probe",
+                GAVE_UP,
+            ),
+        ] {
+            let (_temp, output) =
+                setup_custom_pack_env_with_config(GAVE_UP_PACK, None, policy, command);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+                panic!("{command:?} should be denied ({e})\nstdout:\n{stdout}\nstderr:\n{stderr}")
+            });
+            assert_eq!(
+                json["hookSpecificOutput"]["permissionDecision"], "deny",
+                "{command:?} should be denied\nstdout:\n{stdout}"
+            );
+            assert_eq!(
+                json["hookSpecificOutput"]["ruleId"], rule,
+                "{command:?} should be denied by {rule}\nstdout:\n{stdout}"
+            );
+            let given = json["hookSpecificOutput"]["permissionDecisionReason"]
+                .as_str()
+                .unwrap_or_default();
+            assert!(
+                given.contains(reason),
+                "{command:?} should be denied with {reason:?}\nstdout:\n{stdout}"
+            );
+        }
+
+        // Control: the policy loaded. A real `prod-deploy` match only warns.
+        let (_temp, output) =
+            setup_custom_pack_env_with_config(GAVE_UP_PACK, None, policy, "deploy aa--prod");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success()
+                && stdout.trim().is_empty()
+                && stderr.contains("custom.deploy:prod-deploy"),
+            "the policy warns on prod-deploy, so it must warn, not deny\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
     }
 
     /// A pack this command can never reach, so the only rules in play are the

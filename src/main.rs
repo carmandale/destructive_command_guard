@@ -283,11 +283,7 @@ fn print_version_row(label: &str, value: &str) {
 fn format_build_timestamp(ts: &str) -> String {
     match ts.split_once('T') {
         Some((date, time)) => {
-            let seconds = time
-                .split('.')
-                .next()
-                .unwrap_or(time)
-                .trim_end_matches('Z');
+            let seconds = time.split('.').next().unwrap_or(time).trim_end_matches('Z');
             format!("{date} {seconds}Z")
         }
         None => ts.to_string(),
@@ -602,6 +598,7 @@ fn main() {
         &compiled_overrides,
         &allowlists,
         &heredoc_settings,
+        config.policy(),
         None, // allow_once_audit
         None, // project_path
         Some(&deadline),

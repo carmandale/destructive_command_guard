@@ -20,7 +20,16 @@ fn run_hook_mode(command: &str) -> (String, String, i32) {
     // downgrade (`"core.git:reset-hard" = "warn"`) makes dcg emit a stderr
     // warning and no JSON — and eleven tests here fail for a reason that has
     // nothing to do with dcg.
-    let (mut cmd, sandbox) = spawn::dcg();
+    let (cmd, sandbox) = spawn::dcg();
+    run_hook(cmd, &sandbox, command)
+}
+
+/// Send `command` as a PreToolUse payload to an already-configured dcg.
+fn run_hook(
+    mut cmd: std::process::Command,
+    sandbox: &spawn::Sandbox,
+    command: &str,
+) -> (String, String, i32) {
     let input = payload::pre_tool_use(sandbox.root(), command).to_string();
     let mut child = cmd
         .stdin(Stdio::piped())
@@ -472,5 +481,121 @@ fn test_warn_only_stash_rule_alone_is_still_allowed() {
             json["hookSpecificOutput"]["permissionDecision"], "deny",
             "git stash drop is Medium and must not be denied\nstdout: {stdout}"
         );
+    }
+}
+
+/// Run the hook under a policy that sets High and Critical rules to warn, as
+/// the live config does for `core.git:reset-hard` and `core.git:clean-force`.
+fn run_hook_mode_with_warned_rules(command: &str) -> (String, String, i32) {
+    let sandbox = spawn::sandbox();
+    let config_path = sandbox.root().join("policy.toml");
+    std::fs::write(
+        &config_path,
+        "[policy.rules]\n\
+         \"core.git:reset-hard\" = \"warn\"\n\
+         \"core.git:clean-force\" = \"warn\"\n\
+         \"core.filesystem:rm-rf-general\" = \"warn\"\n",
+    )
+    .expect("write policy config");
+    let mut cmd = spawn::dcg_in(&sandbox);
+    cmd.env("DCG_CONFIG", &config_path)
+        .env("DCG_PACKS", "core.git,core.filesystem,remote.rsync");
+    run_hook(cmd, &sandbox, command)
+}
+
+/// Assert the hook denied `command` and named `rule`.
+fn assert_denied_by(command: &str, (stdout, stderr, exit_code): (String, String, i32), rule: &str) {
+    assert_eq!(
+        exit_code, 0,
+        "hook mode should exit 0 even on deny\ncommand: {command}\nstderr: {stderr}"
+    );
+    assert!(
+        !stdout.is_empty(),
+        "a rule the policy blocks must produce hook JSON, not a bare stderr \
+         warning\ncommand: {command}\nstderr: {stderr}"
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("hook output should be valid JSON");
+    let hook_output = &json["hookSpecificOutput"];
+    assert_eq!(
+        hook_output["permissionDecision"], "deny",
+        "command: {command}\nstdout: {stdout}"
+    );
+    assert_eq!(
+        hook_output["ruleId"], rule,
+        "the denial must name the rule the policy blocks\ncommand: {command}\nstdout: {stdout}"
+    );
+}
+
+/// 3ktl8's hold asked the SEVERITY whether a rule blocks, and the hook asks the
+/// POLICY. A High rule the policy sets to warn was therefore returned at once,
+/// the hook warned and allowed, and a later rule the policy blocks was never
+/// reported: `git reset --hard && git stash clear` ran (.agent-config-5nyrn).
+#[test]
+fn test_policy_warned_high_rule_in_front_does_not_hide_a_blocking_rule() {
+    let command = "git reset --hard && git stash clear";
+    assert_denied_by(
+        command,
+        run_hook_mode_with_warned_rules(command),
+        "core.git:stash-clear",
+    );
+}
+
+/// The same across packs: the warned core.git rule is in an earlier pack than
+/// the rsync rule it hid.
+#[test]
+fn test_policy_warned_rule_does_not_hide_a_blocking_rule_in_a_later_pack() {
+    let command = "git clean -fd && rsync -a --delete /src/ /dst/";
+    assert_denied_by(
+        command,
+        run_hook_mode_with_warned_rules(command),
+        "remote.rsync:rsync-delete",
+    );
+}
+
+/// core.filesystem decides through its rm parser, which returned its denial
+/// without asking whether the policy blocks it.
+#[test]
+fn test_policy_warned_rm_rule_does_not_hide_a_blocking_rule_in_a_later_pack() {
+    let command = "rm -rf ./build && rsync -a --delete /src/ /dst/";
+    assert_denied_by(
+        command,
+        run_hook_mode_with_warned_rules(command),
+        "remote.rsync:rsync-delete",
+    );
+}
+
+/// Controls for the three tests above. Each warned rule on its own still only
+/// warns, so the policy loaded and the denials above are not the policy being
+/// ignored; and each blocking rule on its own is denied, so they are not a
+/// rule that stopped matching.
+#[test]
+fn test_policy_warned_rules_alone_still_only_warn() {
+    for (command, rule) in [
+        ("git reset --hard", "core.git:reset-hard"),
+        ("git clean -fd", "core.git:clean-force"),
+        ("rm -rf ./build", "core.filesystem:rm-rf-general"),
+    ] {
+        let (stdout, stderr, exit_code) = run_hook_mode_with_warned_rules(command);
+        assert_eq!(
+            exit_code, 0,
+            "a warned rule exits 0\ncommand: {command}\nstderr: {stderr}"
+        );
+        assert!(
+            stdout.is_empty(),
+            "a rule the policy warns on must not produce a hook denial\n\
+             command: {command}\nstdout: {stdout}"
+        );
+        assert!(
+            stderr.contains(rule),
+            "the warning names the warned rule, which proves the policy loaded\n\
+             command: {command}\nstderr: {stderr}"
+        );
+    }
+    for (command, rule) in [
+        ("git stash clear", "core.git:stash-clear"),
+        ("rsync -a --delete /src/ /dst/", "remote.rsync:rsync-delete"),
+    ] {
+        assert_denied_by(command, run_hook_mode_with_warned_rules(command), rule);
     }
 }

@@ -370,6 +370,7 @@ pub fn evaluate_extracted_command(
         &ctx.compiled_overrides,
         &ctx.allowlists,
         &ctx.heredoc_settings,
+        config.policy(),
         project_path.as_deref(),
     );
 

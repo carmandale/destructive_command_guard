@@ -45,7 +45,7 @@
 
 use crate::allowlist::{AllowlistLayer, LayeredAllowlist};
 use crate::ast_matcher::DEFAULT_MATCHER;
-use crate::config::Config;
+use crate::config::{Config, PolicyConfig};
 use crate::context::sanitize_for_pattern_matching;
 use crate::heredoc::{
     ExtractionResult, SkipReason, TriggerResult, check_triggers, extract_content,
@@ -412,6 +412,24 @@ const SEARCH_GAVE_UP_EXPLANATION: &str = "The regex search for this rule stopped
 /// The denial for a destructive pattern whose search gave up: its reason and
 /// explanation say so, and it carries none of the rule's suggestions, which
 /// are advice about a match nobody saw.
+/// The answer when the clock runs out part-way through pack evaluation.
+///
+/// A blocking rule whose search already gave up is a rule this command was
+/// never proven safe against, and it names itself; `core.limits:evaluation-timeout`
+/// does not. Returning the bare budget answer here would discard it, which is
+/// the same fail-open shape `.agent-config-ryyfo` closed for the non-timeout
+/// path -- and it is reachable now that the deadline actually reaches this
+/// function (.agent-config-q7zym). The end of the pack loop resolves a pending
+/// `gave_up` the same way.
+fn budget_answer(
+    gave_up: Option<(&str, &crate::packs::DestructivePattern, bool)>,
+) -> EvaluationResult {
+    match gave_up {
+        Some((pack_id, pattern, _)) => denied_because_search_gave_up(pack_id, pattern),
+        None => EvaluationResult::allowed_due_to_budget(),
+    }
+}
+
 fn denied_because_search_gave_up(
     pack_id: &str,
     pattern: &crate::packs::DestructivePattern,
@@ -431,6 +449,52 @@ fn denied_because_search_gave_up(
             Some(SEARCH_GAVE_UP_EXPLANATION),
         ),
     }
+}
+
+/// Keep the first held denial whose rule the POLICY denies: one it would only
+/// warn on must not decide for one it blocks that was found later.
+fn hold_first_blocking(
+    slot: &mut Option<(EvaluationResult, bool)>,
+    decision: EvaluationResult,
+    denies: bool,
+) {
+    if slot
+        .as_ref()
+        .is_none_or(|(_, held_denies)| denies && !held_denies)
+    {
+        *slot = Some((decision, denies));
+    }
+}
+
+/// Whether the policy denies the rule this denial names, asked with the same
+/// three fields the hook resolves the mode from (main.rs, `resolve_mode`).
+///
+/// It answers the policy's question only: `apply_confidence_scoring` runs after
+/// `resolve_mode` in main.rs and can still downgrade that Deny to Warn, which
+/// this cannot see. Confidence scoring is off by default.
+///
+/// Severity alone is not that answer: `[policy.rules]` can set a High rule to
+/// warn, and the live config does for `core.git:reset-hard`. Deciding "blocks"
+/// by severity, the evaluator returned that rule at once, the hook warned, and
+/// `git reset --hard && git stash clear` ran (.agent-config-5nyrn).
+fn policy_denies(policy: &PolicyConfig, decision: &EvaluationResult) -> bool {
+    decision.pattern_info.as_ref().is_none_or(|info| {
+        policy.resolve_mode(
+            info.pack_id.as_deref(),
+            info.pattern_name.as_deref(),
+            info.severity,
+        ) == crate::packs::DecisionMode::Deny
+    })
+}
+
+/// [`policy_denies`] for a rule before its match is judged, asked through the
+/// gave-up denial, which names the rule with the same fields a match denial does.
+fn policy_denies_rule(
+    policy: &PolicyConfig,
+    pack_id: &str,
+    pattern: &crate::packs::DestructivePattern,
+) -> bool {
+    policy_denies(policy, &denied_because_search_gave_up(pack_id, pattern))
 }
 
 /// Byte span of a match within the evaluated command string.
@@ -971,6 +1035,7 @@ pub fn evaluate_detailed_with_allowlists(
         &compiled_overrides,
         allowlists,
         &heredoc_settings,
+        config.policy(),
     );
 
     let evaluation_time_us = start.elapsed().as_micros() as u64;
@@ -1225,6 +1290,7 @@ fn evaluate_config_with_source(
         compiled_overrides,
         allowlists,
         &heredoc_settings,
+        config.policy(),
         None,
         None,
         deadline,
@@ -1244,6 +1310,7 @@ fn evaluate_config_with_source(
 /// * `ordered_packs` - Expanded pack IDs in deterministic evaluation order
 /// * `compiled_overrides` - Precompiled config overrides
 /// * `allowlists` - Layered allowlists (project/user/system)
+/// * `policy` - The config's `[policy]`, which decides which matched rule blocks
 #[must_use]
 pub fn evaluate_command_with_pack_order(
     command: &str,
@@ -1253,6 +1320,7 @@ pub fn evaluate_command_with_pack_order(
     compiled_overrides: &crate::config::CompiledOverrides,
     allowlists: &LayeredAllowlist,
     heredoc_settings: &crate::config::HeredocSettings,
+    policy: &PolicyConfig,
 ) -> EvaluationResult {
     evaluate_command_with_pack_order_at_path(
         command,
@@ -1262,6 +1330,7 @@ pub fn evaluate_command_with_pack_order(
         compiled_overrides,
         allowlists,
         heredoc_settings,
+        policy,
         None,
     )
 }
@@ -1277,6 +1346,7 @@ pub fn evaluate_command_with_pack_order_at_path(
     compiled_overrides: &crate::config::CompiledOverrides,
     allowlists: &LayeredAllowlist,
     heredoc_settings: &crate::config::HeredocSettings,
+    policy: &PolicyConfig,
     project_path: Option<&Path>,
 ) -> EvaluationResult {
     evaluate_command_with_pack_order_deadline_at_path(
@@ -1287,6 +1357,7 @@ pub fn evaluate_command_with_pack_order_at_path(
         compiled_overrides,
         allowlists,
         heredoc_settings,
+        policy,
         None,
         project_path,
         None,
@@ -1306,6 +1377,7 @@ pub fn evaluate_command_with_pack_order_at_path(
 /// * `compiled_overrides` - Precompiled config overrides
 /// * `allowlists` - Layered allowlist for overrides
 /// * `heredoc_settings` - Settings for heredoc analysis
+/// * `policy` - The config's `[policy]`, which decides which matched rule blocks
 /// * `deadline` - Optional deadline for fail-open behavior
 ///
 /// # Returns
@@ -1321,6 +1393,7 @@ pub fn evaluate_command_with_pack_order_deadline(
     compiled_overrides: &crate::config::CompiledOverrides,
     allowlists: &LayeredAllowlist,
     heredoc_settings: &crate::config::HeredocSettings,
+    policy: &PolicyConfig,
     allow_once_audit: Option<&crate::pending_exceptions::AllowOnceAuditConfig<'_>>,
     deadline: Option<&Deadline>,
 ) -> EvaluationResult {
@@ -1332,6 +1405,7 @@ pub fn evaluate_command_with_pack_order_deadline(
         compiled_overrides,
         allowlists,
         heredoc_settings,
+        policy,
         allow_once_audit,
         None,
         deadline,
@@ -1353,6 +1427,7 @@ pub fn evaluate_command_with_pack_order_deadline_at_path(
     compiled_overrides: &crate::config::CompiledOverrides,
     allowlists: &LayeredAllowlist,
     heredoc_settings: &crate::config::HeredocSettings,
+    policy: &PolicyConfig,
     allow_once_audit: Option<&crate::pending_exceptions::AllowOnceAuditConfig<'_>>,
     project_path: Option<&Path>,
     deadline: Option<&Deadline>,
@@ -1366,6 +1441,7 @@ pub fn evaluate_command_with_pack_order_deadline_at_path(
         compiled_overrides,
         allowlists,
         heredoc_settings,
+        policy,
         allow_once_audit,
         project_path,
         deadline,
@@ -1384,6 +1460,7 @@ fn evaluate_at_path_impl(
     compiled_overrides: &crate::config::CompiledOverrides,
     allowlists: &LayeredAllowlist,
     heredoc_settings: &crate::config::HeredocSettings,
+    policy: &PolicyConfig,
     allow_once_audit: Option<&crate::pending_exceptions::AllowOnceAuditConfig<'_>>,
     project_path: Option<&Path>,
     deadline: Option<&Deadline>,
@@ -1455,6 +1532,7 @@ fn evaluate_at_path_impl(
                     ordered_packs,
                     keyword_index,
                     compiled_overrides,
+                    policy,
                     allow_once_audit,
                 };
                 if let Some(blocked) =
@@ -1532,7 +1610,23 @@ fn evaluate_at_path_impl(
         ordered_packs,
         allowlists,
         keyword_index,
-        None,
+        policy,
+        // The clock, not `None`. Every budget check inside pack evaluation --
+        // the per-pack one, the per-pattern one, and the resume loop's -- reads
+        // this argument, and this call site passed `None`, so on the path the
+        // hook actually takes all of them were dead code. Measured here: a line
+        // of 12,000 exempted `git clean -n` in front of a real `git clean -fd`
+        // took 10.18 s to answer against a 50 ms deadline, because nothing
+        // between this call and the end of the pack loop looked at a clock; with
+        // the clock passed it answers in 55 ms (.agent-config-q7zym). The stage
+        // checks around this call did see the overrun afterwards, which is why
+        // it denied rather than allowed -- but only after running 203x past the
+        // budget the hook promised its caller, which is long enough for the
+        // harness to abandon the hook and run the command unjudged.
+        //
+        // `evaluate_command_with_legacy` still passes `None` below: it has no
+        // deadline to pass, and its callers are not the hook.
+        deadline,
         project_path,
     );
     // A heredoc allowlist hit explains why an otherwise-clean command is allowed. It must
@@ -1563,6 +1657,7 @@ fn evaluate_packs_with_allowlists(
     ordered_packs: &[String],
     allowlists: &LayeredAllowlist,
     keyword_index: Option<&crate::packs::EnabledKeywordIndex>,
+    policy: &PolicyConfig,
     deadline: Option<&Deadline>,
     project_path: Option<&Path>,
 ) -> EvaluationResult {
@@ -1647,18 +1742,28 @@ fn evaluate_packs_with_allowlists(
     //
     // The rm_parse optimization for core.filesystem is handled inline.
     let mut first_allowlist_hit: Option<(PatternMatch, AllowlistLayer, String)> = None;
-    let mut gave_up: Option<(&str, &crate::packs::DestructivePattern)> = None;
+    // A search that gave up, with whether the policy denies its rule.
+    let mut gave_up: Option<(&str, &crate::packs::DestructivePattern, bool)> = None;
     // A real match on a rule that only warns or logs is held, not returned: the
     // first destructive match used to decide the whole command, so putting a
     // Medium rule in front of a Critical one downgraded it -- `git stash drop &&
     // git stash clear` warned and ran, while `git stash clear` alone was denied
     // (.agent-config-3ktl8). Scanning continues so a rule that blocks can still
-    // be found; this is returned only when none was.
+    // be found; this is returned only when none was. "Only warns" is the
+    // policy's answer (`policy_denies`), not the severity's.
     let mut pending_non_blocking: Option<EvaluationResult> = None;
+    // A match found by searching on past a safe exemption (.agent-config-35ysf),
+    // with whether the policy denies its rule. The search that reached it never used to run, so
+    // it waits until every rule the first search reached has had its say:
+    // returned at once, a rule found this way that the policy only warns on
+    // (live config: `core.git:clean-force`, High) pre-empted the rule after it
+    // that blocks, and `git checkout -b f && git clean -fd && rsync -a --delete
+    // /s/ /d/` warned where it used to be denied.
+    let mut found_past_exemption: Option<(EvaluationResult, bool)> = None;
 
     for &(pack_id, pack) in &candidate_packs {
         if deadline_exceeded(deadline) || remaining_below(deadline, &crate::perf::PATTERN_MATCH) {
-            return EvaluationResult::allowed_due_to_budget();
+            return budget_answer(gave_up);
         }
 
         // Spans of this pack's safe patterns. Empty means "nothing safe here",
@@ -1719,34 +1824,45 @@ fn evaluate_packs_with_allowlists(
                         continue;
                     }
 
-                    if let Some(span) = hit.span.as_ref().map(|span| MatchSpan {
-                        start: span.start,
-                        end: span.end,
-                    }) {
-                        if let Some(mapped_span) =
+                    let mapped_span = hit
+                        .span
+                        .as_ref()
+                        .map(|span| MatchSpan {
+                            start: span.start,
+                            end: span.end,
+                        })
+                        .and_then(|span| {
                             map_span_with_offset(span, normalized_offset, original_len)
-                        {
-                            return EvaluationResult::denied_by_pack_pattern_with_span(
-                                pack_id,
-                                hit.pattern_name,
-                                hit.reason,
-                                None,
-                                hit.severity,
-                                &[], // fast_match path doesn't have suggestions
-                                original_command,
-                                mapped_span,
-                            );
-                        }
-                    }
+                        });
+                    let decision = if let Some(mapped_span) = mapped_span {
+                        EvaluationResult::denied_by_pack_pattern_with_span(
+                            pack_id,
+                            hit.pattern_name,
+                            hit.reason,
+                            None,
+                            hit.severity,
+                            &[], // fast_match path doesn't have suggestions
+                            original_command,
+                            mapped_span,
+                        )
+                    } else {
+                        EvaluationResult::denied_by_pack_pattern(
+                            pack_id,
+                            hit.pattern_name,
+                            hit.reason,
+                            None,
+                            hit.severity,
+                            &[], // fast_match path doesn't have suggestions
+                        )
+                    };
 
-                    return EvaluationResult::denied_by_pack_pattern(
-                        pack_id,
-                        hit.pattern_name,
-                        hit.reason,
-                        None,
-                        hit.severity,
-                        &[], // fast_match path doesn't have suggestions
-                    );
+                    if policy_denies(policy, &decision) {
+                        return decision;
+                    }
+                    if pending_non_blocking.is_none() {
+                        pending_non_blocking = Some(decision);
+                    }
+                    continue;
                 }
             }
         } else if pack.matches_safe(command_for_packs) {
@@ -1756,73 +1872,147 @@ fn evaluate_packs_with_allowlists(
             // harmless `rsync --dry-run` after `&&` used to whitelist the real
             // `rsync --delete` in front of it (.agent-config-it2wk).
             safe_spans = pack.safe_spans(command_for_packs);
-            if safe_spans.is_empty() {
+            if safe_spans.is_empty() && !pack.any_safe_pattern_matches_line(command_for_packs) {
                 // The RegexSet fast path said a safe pattern matched but no
                 // individual pattern yielded a span. Keep the old wholesale
                 // skip rather than turning an unexplained disagreement into a
                 // denial.
+                //
+                // Empty spans alone are no longer that disagreement. Safe
+                // patterns are matched one command at a time, so empty also
+                // means "a safe pattern matched only by reading across two
+                // commands, and speaks for neither" — a real answer, and the
+                // pack still has to run. Skipping the pack there turned it off
+                // wholesale: `docker system prune -af && cat --dry-run` matches
+                // `docker\s+.*--dry-run` as a line and no command
+                // (`.agent-config-qte7t`).
                 continue;
             }
         }
 
-        for pattern in &pack.destructive_patterns {
+        'patterns: for pattern in &pack.destructive_patterns {
             if deadline_exceeded(deadline) || remaining_below(deadline, &crate::perf::PATTERN_MATCH)
             {
-                return EvaluationResult::allowed_due_to_budget();
+                return budget_answer(gave_up);
             }
 
-            // All severity levels are now evaluated. The policy layer in main.rs
-            // determines whether to deny, warn, or log based on severity and config.
+            // All severity levels are evaluated. Whether a match denies, warns
+            // or logs is the policy's answer, asked here (`policy_denies`) with
+            // the same fields main.rs resolves the returned rule's mode from --
+            // everywhere but the unnamed-pattern return below, which no pack
+            // reaches today (every built-in and external pattern is named).
 
-            let matched_span = match pattern.regex.find_command_word(command_for_packs) {
-                Ok(found) => found.map(|(start, end)| MatchSpan { start, end }),
-                // The engine gave up before answering (fancy_regex's backtrack
-                // limit). For a pattern that blocks, unknown has to deny: read
-                // as "no match", a command crafted to exhaust the limit got
-                // through (.agent-config-ryyfo). The denial waits until every
-                // other pattern has run, so a real match elsewhere in the
-                // command is the rule that gets named. There is no match
-                // location, so no safe span can be shown to cover it.
-                Err(_) => {
-                    let allowlisted = pattern.name.is_some_and(|name| {
-                        allowlists
-                            .match_rule_at_path(pack_id, name, project_path)
-                            .is_some()
-                    });
-                    // Keep the first one that blocks: a warn-only rule that gave up
-                    // first must not decide for a blocking one that gave up later.
-                    let outranks = gave_up.is_none_or(|(_, held)| {
-                        pattern.severity.blocks_by_default() && !held.severity.blocks_by_default()
-                    });
-                    if !allowlisted && outranks {
-                        gave_up = Some((pack_id, pattern));
+            // An exempted match does not end the search for this rule. Stopping
+            // there let `rsync --dry-run --delete a b && rsync -a --delete /s/ /d/`
+            // through: the dry run's match was exempt, and the real delete after
+            // it was never looked at (.agent-config-35ysf).
+            let mut from = 0;
+            let (span, past_exemption) = loop {
+                match pattern
+                    .regex
+                    .find_command_word_from(command_for_packs, from)
+                {
+                    Ok(Some((start, end))) => {
+                        // One span list, read the same way on every pass. It used
+                        // to be two: each pattern's FIRST match until a match had
+                        // been exempted, then every match for the rest of the line,
+                        // because the second of two dry runs needs a span of its own
+                        // (`.agent-config-35ysf`). That split made the verdict depend
+                        // on the order of unrelated commands — a pattern that matched
+                        // an earlier harmless command left the command being judged
+                        // with no span at all, and `from == 0` is exactly when a
+                        // destructive match in a LATER command is judged
+                        // (`.agent-config-nlid7`).
+                        //
+                        // 35ysf kept first-match-only because every span from the
+                        // start let a wide safe pattern's later match
+                        // (`docker\s+(?:inspect|logs)\s+.*\btraefik\b` reaching past
+                        // `; docker kill traefik`) exempt a command the first match
+                        // left denied. A span can no longer reach past the command it
+                        // starts in (`.agent-config-qte7t`), so a later match exempts
+                        // only its own command and those lines stay denied.
+                        //
+                        // A match found past an exemption is still held until the
+                        // first search is done (`found_past_exemption`), so it cannot
+                        // pre-empt a rule after it.
+                        let spans = safe_spans.as_slice();
+                        // A safe pattern covers this match only if the match
+                        // STARTS inside it. Containment of the whole span is too
+                        // strict: in `rsync --dry-run -a --delete src dst` the safe
+                        // match ends at `--dry-run` while the destructive one runs
+                        // on to `--delete`, and that command is genuinely safe. The
+                        // start is the command word, so this asks "is the command
+                        // this safe pattern matched the same command that is about
+                        // to be blocked".
+                        let Some(&(_, safe_end)) = spans.iter().find(|&&(safe_start, safe_end)| {
+                            start >= safe_start && start < safe_end
+                        }) else {
+                            break (MatchSpan { start, end }, from > 0);
+                        };
+                        // Resume where the safe span ends, not where the destructive
+                        // match ends: a destructive regex that runs across `&&`
+                        // (core.git's `git\s+(?:\S+\s+)*`) ends past the real
+                        // command after it. Any match starting inside the span is
+                        // exempt by the same test. `safe_end > start >= from`, so
+                        // every pass moves forward and `from` is never 0 again.
+                        from = safe_end;
+                        // Every resume restarts a full command-word scan over
+                        // what is left of the line, so a line with N exempted
+                        // matches costs O(N x len) INSIDE this one pattern.
+                        // Nothing between the top of `'patterns` and the next
+                        // pattern reads the clock, so without this check a long
+                        // safe prefix runs arbitrarily far past the hook budget:
+                        // 2.43 s measured against a 50 ms deadline with the
+                        // clock reaching this function but this check deleted,
+                        // and 2,816 ms against the 200 ms built-in budget on the
+                        // release binary when the reviewer first found it, 18.5x
+                        // the same bytes in the other order (.agent-config-q7zym,
+                        // .agent-config-uyc9l cold review MAJOR 2). The deadline
+                        // is the hook's
+                        // whole answer time, and main.rs turns a budget skip
+                        // into a deny (.agent-config-9ky33), so stopping here is
+                        // fail-closed -- what is NOT fail-closed is blowing past
+                        // the timeout and letting the harness abandon the hook.
+                        if deadline_exceeded(deadline)
+                            || remaining_below(deadline, &crate::perf::PATTERN_MATCH)
+                        {
+                            return budget_answer(gave_up);
+                        }
                     }
-                    continue;
+                    Ok(None) => continue 'patterns,
+                    // The engine gave up before answering (fancy_regex's backtrack
+                    // limit). For a pattern that blocks, unknown has to deny: read
+                    // as "no match", a command crafted to exhaust the limit got
+                    // through (.agent-config-ryyfo). The denial waits until every
+                    // other pattern has run, so a real match elsewhere in the
+                    // command is the rule that gets named. There is no match
+                    // location, so no safe span can be shown to cover it.
+                    Err(_) => {
+                        let allowlisted = pattern.name.is_some_and(|name| {
+                            allowlists
+                                .match_rule_at_path(pack_id, name, project_path)
+                                .is_some()
+                        });
+                        // Keep the first one the policy denies: a rule it only
+                        // warns on that gave up first must not decide for one it
+                        // denies that gave up later.
+                        let denies = policy_denies_rule(policy, pack_id, pattern);
+                        let outranks =
+                            gave_up.is_none_or(|(_, _, held_denies)| denies && !held_denies);
+                        if !allowlisted && outranks {
+                            gave_up = Some((pack_id, pattern, denies));
+                        }
+                        continue 'patterns;
+                    }
                 }
             };
-            let Some(span) = matched_span else {
-                continue;
-            };
-
-            // A safe pattern covers this match only if the match STARTS inside
-            // it. Containment of the whole span is too strict: in
-            // `rsync --dry-run -a --delete src dst` the safe match ends at
-            // `--dry-run` while the destructive one runs on to `--delete`, and
-            // that command is genuinely safe. The start is the command word, so
-            // this asks "is the command this safe pattern matched the same
-            // command that is about to be blocked".
-            if safe_spans
-                .iter()
-                .any(|&(start, end)| span.start >= start && span.start < end)
-            {
-                continue;
-            }
 
             // A real match that would only warn or log must not stand in for a
             // search that gave up on a rule that blocks: the hook would allow a
             // command the unknown rule might have stopped (.agent-config-ryyfo).
-            if let Some((held_pack, held)) = gave_up {
-                if held.severity.blocks_by_default() && !pattern.severity.blocks_by_default() {
+            // A match found past an exemption decides nothing here; it is held.
+            if let Some((held_pack, held, held_denies)) = gave_up.filter(|_| !past_exemption) {
+                if held_denies && !policy_denies_rule(policy, pack_id, pattern) {
                     return denied_because_search_gave_up(held_pack, held);
                 }
             }
@@ -1883,7 +2073,13 @@ fn evaluate_packs_with_allowlists(
                     )
                 };
 
-                if pattern.severity.blocks_by_default() {
+                let denies = policy_denies(policy, &decision);
+                if past_exemption {
+                    hold_first_blocking(&mut found_past_exemption, decision, denies);
+                    continue;
+                }
+
+                if denies {
                     return decision;
                 }
 
@@ -1895,28 +2091,58 @@ fn evaluate_packs_with_allowlists(
                 continue;
             }
 
-            if let Some(mapped_span) = mapped_span {
-                return EvaluationResult::denied_by_pack_with_span(
+            let decision = if let Some(mapped_span) = mapped_span {
+                EvaluationResult::denied_by_pack_with_span(
                     pack_id,
                     reason,
                     pattern.explanation,
                     original_command,
                     mapped_span,
-                );
+                )
+            } else {
+                EvaluationResult::denied_by_pack(pack_id, reason, pattern.explanation)
+            };
+
+            if past_exemption {
+                let denies = policy_denies(policy, &decision);
+                hold_first_blocking(&mut found_past_exemption, decision, denies);
+                continue;
             }
 
-            return EvaluationResult::denied_by_pack(pack_id, reason, pattern.explanation);
+            // An unnamed pattern has no rule id, so `[policy.rules]` cannot
+            // name it and only a pack or global override could downgrade it.
+            // No pack reaches this: `destructive_pattern!`'s two-argument form
+            // is unused, and external packs always carry a name.
+            return decision;
+        }
+    }
+
+    // A match found past an exemption outranks what the first search held only
+    // when the policy denies its rule and not theirs; otherwise the first
+    // search's answer stands, as it did before searching on existed.
+    if found_past_exemption
+        .as_ref()
+        .is_some_and(|(_, denies)| *denies)
+        && gave_up.is_none_or(|(_, _, held_denies)| !held_denies)
+    {
+        if let Some((decision, _)) = found_past_exemption {
+            return decision;
         }
     }
 
     // A search gave up and no other pattern matched: still a denial, told
     // as what it is rather than as the rule's finding (.agent-config-ryyfo).
-    if let Some((pack_id, pattern)) = gave_up {
+    if let Some((pack_id, pattern, _)) = gave_up {
         return denied_because_search_gave_up(pack_id, pattern);
     }
 
     // Nothing blocked, so the warn/log match held above is the answer after all.
     if let Some(decision) = pending_non_blocking {
+        return decision;
+    }
+
+    // Only a warn/log match past an exemption was found.
+    if let Some((decision, _)) = found_past_exemption {
         return decision;
     }
 
@@ -2021,6 +2247,7 @@ where
                 ordered_packs: &ordered_packs,
                 keyword_index: keyword_index.as_ref(),
                 compiled_overrides,
+                policy: config.policy(),
                 allow_once_audit: None,
             };
             if let Some(blocked) = evaluate_heredoc(command, context, &mut heredoc_allowlist_hit) {
@@ -2096,6 +2323,7 @@ where
         &ordered_packs,
         allowlists,
         keyword_index.as_ref(),
+        config.policy(),
         None,
         None, // project_path: legacy function, path-aware allowlisting unavailable
     );
@@ -2127,6 +2355,7 @@ struct HeredocEvaluationContext<'a> {
     ordered_packs: &'a [String],
     keyword_index: Option<&'a crate::packs::EnabledKeywordIndex>,
     compiled_overrides: &'a crate::config::CompiledOverrides,
+    policy: &'a PolicyConfig,
     allow_once_audit: Option<&'a crate::pending_exceptions::AllowOnceAuditConfig<'a>>,
 }
 
@@ -2378,6 +2607,7 @@ fn evaluate_heredoc(
                     context.compiled_overrides,
                     context.allowlists,
                     context.heredoc_settings,
+                    context.policy,
                     context.allow_once_audit,
                     context.project_path,
                     context.deadline,
@@ -3831,6 +4061,7 @@ mod tests {
                 &compiled_overrides,
                 &allowlists,
                 &heredoc_settings,
+                &PolicyConfig::default(),
                 None,
                 Some(&deadline),
             );
@@ -3867,6 +4098,7 @@ mod tests {
                 &compiled_overrides,
                 &allowlists,
                 &heredoc_settings,
+                &PolicyConfig::default(),
                 None,
                 Some(&deadline),
             );
@@ -3900,6 +4132,7 @@ mod tests {
                 &compiled_overrides,
                 &allowlists,
                 &heredoc_settings,
+                &PolicyConfig::default(),
                 None,
                 None, // No deadline
             );
@@ -3936,6 +4169,7 @@ mod tests {
                 &compiled_overrides,
                 &allowlists,
                 &heredoc_settings,
+                &PolicyConfig::default(),
                 None,
                 Some(&deadline),
             );

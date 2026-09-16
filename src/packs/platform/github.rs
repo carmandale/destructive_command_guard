@@ -77,95 +77,111 @@ fn create_safe_patterns() -> Vec<SafePattern> {
             r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+status\b"
         ),
         // Safe API GETs
+        // The span stops at the command it covers. `.*` ran to the end of the line, and a match
+        // is exempted when it starts inside a safe span, so one harmless GET anywhere on a line
+        // exempted a real deletion elsewhere on it (.agent-config-kf3dq cold review look 2).
+        // The lookahead is not decoration: this safe pattern and the destructive
+        // `api ... DELETE` ones all START at the command word, and the exemption
+        // rule asks whether a destructive match starts INSIDE a safe span. Two
+        // spans that both start here satisfy that unconditionally, so before
+        // `.agent-config-nh7t4` a `-X GET` anywhere in the command exempted a
+        // `-X DELETE` in the SAME command -- in either order, and even when the
+        // GET was only text inside a quoted value. A GET pattern may only speak
+        // for a command that names no state-changing method.
         safe_pattern!(
             "gh-api-explicit-get",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+api\b.*(?:-X|--method)\s+GET\b"
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+api\b(?![^;&|\n]*(?:-X|--method)\s+(?:DELETE|PUT|PATCH|POST)\b)[^;&|\n]*(?:-X|--method)\s+GET\b"
         ),
     ]
 }
 
 fn create_destructive_patterns() -> Vec<DestructivePattern> {
+    // The safe patterns' skipper without its subcommand lookahead. That lookahead only removes
+    // parses, so for a rule that blocks it could only lose commands (`gh -R repo repo delete`),
+    // and it put every rule on the backtracking engine, where a run of dash tokens ran out of
+    // backtracks and denied `gh -f ... pr list` (.agent-config-kf3dq). The safe patterns keep
+    // it: a wider safe match exempts more.
     vec![
         destructive_pattern!(
             "gh-repo-delete",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+repo\s+delete\b",
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+repo\s+delete\b",
             "gh repo delete permanently deletes a GitHub repository. This cannot be undone."
         ),
         destructive_pattern!(
             "gh-repo-archive",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+repo\s+archive\b",
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+repo\s+archive\b",
             "gh repo archive makes a repository read-only. While reversible, it stops all write access."
         ),
         destructive_pattern!(
             "gh-gist-delete",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+gist\s+delete\b",
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+gist\s+delete\b",
             "gh gist delete permanently deletes a Gist."
         ),
         destructive_pattern!(
             "gh-release-delete",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+release\s+delete\b",
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+release\s+delete\b",
             "gh release delete permanently deletes a release."
         ),
         destructive_pattern!(
             "gh-issue-delete",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+issue\s+delete\b",
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+issue\s+delete\b",
             "gh issue delete permanently deletes an issue."
         ),
         destructive_pattern!(
             "gh-ssh-key-delete",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+ssh-key\s+delete\b",
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+ssh-key\s+delete\b",
             "gh ssh-key delete removes an SSH key, potentially breaking access."
         ),
         destructive_pattern!(
             "gh-secret-delete",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+secret\s+(?:delete|remove)\b",
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+secret\s+(?:delete|remove)\b",
             "gh secret delete removes GitHub Actions secrets."
         ),
         destructive_pattern!(
             "gh-variable-delete",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+variable\s+(?:delete|remove)\b",
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+variable\s+(?:delete|remove)\b",
             "gh variable delete removes GitHub Actions variables."
         ),
         destructive_pattern!(
             "gh-repo-deploy-key-delete",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+repo\s+deploy-key\s+delete\b",
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+repo\s+deploy-key\s+delete\b",
             "gh repo deploy-key delete removes a deploy key and can break access."
         ),
         destructive_pattern!(
             "gh-run-cancel",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+run\s+cancel\b",
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+run\s+cancel\b",
             "gh run cancel stops a workflow run and may interrupt deployments."
         ),
         destructive_pattern!(
             "gh-api-delete-actions-secret",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+api\b.*(?:-X|--method)\s+DELETE\b.*(?:/)?repos/[^/\s]+/[^/\s]+/actions/secrets/",
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+api\b.*(?:-X|--method)\s+DELETE\b.*(?:/)?repos/[^/\s]+/[^/\s]+/actions/secrets/",
             "gh api DELETE actions/secrets removes GitHub Actions secrets."
         ),
         destructive_pattern!(
             "gh-api-delete-actions-variable",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+api\b.*(?:-X|--method)\s+DELETE\b.*(?:/)?repos/[^/\s]+/[^/\s]+/actions/variables/",
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+api\b.*(?:-X|--method)\s+DELETE\b.*(?:/)?repos/[^/\s]+/[^/\s]+/actions/variables/",
             "gh api DELETE actions/variables removes GitHub Actions variables."
         ),
         destructive_pattern!(
             "gh-api-delete-hook",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+api\b.*(?:-X|--method)\s+DELETE\b.*(?:/)?repos/[^/\s]+/[^/\s]+/hooks/",
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+api\b.*(?:-X|--method)\s+DELETE\b.*(?:/)?repos/[^/\s]+/[^/\s]+/hooks/",
             "gh api DELETE hooks removes repository webhooks."
         ),
         destructive_pattern!(
             "gh-api-delete-deploy-key",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+api\b.*(?:-X|--method)\s+DELETE\b.*(?:/)?repos/[^/\s]+/[^/\s]+/keys/",
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+api\b.*(?:-X|--method)\s+DELETE\b.*(?:/)?repos/[^/\s]+/[^/\s]+/keys/",
             "gh api DELETE keys removes deploy keys."
         ),
         destructive_pattern!(
             "gh-api-delete-release",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+api\b.*(?:-X|--method)\s+DELETE\b.*(?:/)?repos/[^/\s]+/[^/\s]+/releases/",
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+api\b.*(?:-X|--method)\s+DELETE\b.*(?:/)?repos/[^/\s]+/[^/\s]+/releases/",
             "gh api DELETE releases removes GitHub releases."
         ),
         // API Deletes
         // DELETE /repos/{owner}/{repo} -> Delete a repository
         destructive_pattern!(
             "gh-api-delete-repo",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+api\b.*(?:-X|--method)\s+DELETE\b",
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+api\b.*(?:-X|--method)\s+DELETE\b",
             "gh api DELETE calls can be destructive. Please verify the endpoint."
         ),
     ]

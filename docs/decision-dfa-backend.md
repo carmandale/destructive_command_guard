@@ -56,7 +56,18 @@ The current implementation already achieves **sub-50ns matching** and **~650 MiB
 
 ## Action Items
 
-1. Keep `regex-automata` as dev-dependency only (for benchmark comparisons)
+1. ~~Keep `regex-automata` as dev-dependency only (for benchmark comparisons)~~
+   **Superseded 2026-09-16 (.agent-config-mo4zj).** The dev-dependency, the
+   `[[bench]]` target and `benches/regex_automata_comparison.rs` were removed.
+   The comparison this item meant to preserve never ran: the bench workflow
+   only ever invoked `--bench heredoc_perf`, so the target was compiled by
+   nobody and executed by nobody in the whole time since this decision. It was
+   not free either -- it pulled a dependency into the bench build that
+   .agent-config-h4qaa had just finished shrinking to fit a 16 GB runner.
+   Nothing is lost: the source is in history at `cf4644bc`, and the numbers are
+   in the feasibility report linked below. To revisit, restore with
+   `git show cf4644bc:benches/regex_automata_comparison.rs` and re-add
+   `regex-automata` to `[dev-dependencies]`.
 2. Close ksk.8 and ksk.8.2 as "dropped/deferred"
 3. Remove from active roadmap
 4. Revisit if:
@@ -67,5 +78,5 @@ The current implementation already achieves **sub-50ns matching** and **~650 MiB
 ## References
 
 - [Feasibility Report](regex-automata-feasibility-report.md)
-- Benchmark code: `benches/regex_automata_comparison.rs`
+- Benchmark code: removed 2026-09-16; `git show cf4644bc:benches/regex_automata_comparison.rs`
 - Task tracker: ksk.8, ksk.8.1, ksk.8.2

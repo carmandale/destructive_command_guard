@@ -56,7 +56,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // uninstall / delete
         destructive_pattern!(
             "uninstall",
-            r"helm\s+(?:uninstall|delete)\b(?!.*--dry-run)",
+            r"helm\s+(?:uninstall|delete)\b(?![^;&|\n]*--dry-run)",
             "helm uninstall removes the release and all its resources. Use --dry-run first.",
             Critical,
             "helm uninstall deletes the release and ALL Kubernetes resources created by it:\n\n\
@@ -73,7 +73,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // rollback without dry-run
         destructive_pattern!(
             "rollback",
-            r"helm\s+rollback\b(?!.*--dry-run)",
+            r"helm\s+rollback\b(?![^;&|\n]*--dry-run)",
             "helm rollback reverts to a previous release. Use --dry-run to preview changes.",
             High,
             "helm rollback reverts the release to a previous revision. This can cause unexpected \

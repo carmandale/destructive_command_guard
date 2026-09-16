@@ -48,9 +48,17 @@ fn create_safe_patterns() -> Vec<SafePattern> {
             "gitlab-runner-status",
             r"gitlab-runner(?:\s+--?\S+(?:\s+\S+)?)*\s+status\b"
         ),
+        // The lookahead is not decoration: this safe pattern and the destructive
+        // `api ... DELETE` ones all START at the command word, and the exemption
+        // rule asks whether a destructive match starts INSIDE a safe span. Two
+        // spans that both start here satisfy that unconditionally, so before
+        // `.agent-config-nh7t4` a `-X GET` anywhere in the command exempted a
+        // `-X DELETE` in the SAME command -- in either order, and even when the
+        // GET was only text inside a quoted value. A GET pattern may only speak
+        // for a command that names no state-changing method.
         safe_pattern!(
             "glab-api-explicit-get",
-            r"glab(?:\s+--?\S+(?:\s+\S+)?)*\s+api\b.*(?:-X|--method)\s+GET\b"
+            r"glab(?:\s+--?\S+(?:\s+\S+)?)*\s+api\b(?![^;&|\n]*(?:-X|--method)\s+(?:DELETE|PUT|PATCH|POST)\b).*(?:-X|--method)\s+GET\b"
         ),
     ]
 }
