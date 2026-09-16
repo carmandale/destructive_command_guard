@@ -247,9 +247,36 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-cov-
 
+      # `--all-features` is deliberately absent here; see .agent-config-u8eec.
+      #
+      # It was the only `--all-features` in the repository, and the only thing
+      # that turned on `rich-output`, which swaps the whole CLI renderer for
+      # rich_rust. Nothing ships that: `dist.yml` builds `cargo build
+      # --release` with default features. So this job was measuring coverage
+      # of a binary no user gets, and failing on the difference -- 24 cli_e2e
+      # tests pin the default renderer's text and nothing pins the rich one.
+      # `doctor_pretty_output_basics` wants "Checking configuration... USING
+      # DEFAULTS"; the rich path prints "Configuration: No config file found;
+      # using defaults". Two UIs, one contract.
+      #
+      # The instrumentation was never the cause, which is worth writing down
+      # because the job's name makes llvm-cov the obvious suspect. Measured
+      # 2026-09-16 on macOS with no coverage tooling in the loop:
+      #
+      #   cargo test --test cli_e2e                  -> 127 passed, 0 failed
+      #   cargo test --test cli_e2e --all-features   -> 103 passed, 24 failed
+      #
+      # and those 24 are the same 24 names, exactly, that the coverage job
+      # reports on ubuntu (run 35052834031, job 104661764384).
+      #
+      # Consequence, tracked by .agent-config-swwbz: with this flag gone,
+      # nothing in CI compiles `rich-output` at all. That feature is
+      # mid-migration and already broken -- it emits literal `[bold green]`
+      # and `[/]` markup to the terminal -- so that bead owns both the defect
+      # and the question of where it should be built.
       - name: Run tests with coverage
         run: |
-          cargo llvm-cov --all-features --workspace \
+          cargo llvm-cov --workspace \
             --ignore-filename-regex='(tests/|benches/|\.cargo/)' \
             --no-report
 
