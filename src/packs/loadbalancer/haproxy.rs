@@ -10,13 +10,21 @@ use crate::{destructive_pattern, safe_pattern};
 
 /// Create the `HAProxy` load balancer pack.
 #[must_use]
+/// Command words that let this pack be consulted at all.
+///
+/// The registry's `PackEntry` points at this same const. They used to be two
+/// lists, and 26 of 80 packs had drifted: the pack claimed a keyword the
+/// registry gate did not carry, so rules for those words could never run
+/// (`.agent-config-x74pe`).
+pub const KEYWORDS: &[&str] = &["haproxy", "socat"];
+
 pub fn create_pack() -> Pack {
     Pack {
         id: "loadbalancer.haproxy".to_string(),
         name: "HAProxy",
         description: "Protects against destructive HAProxy load balancer operations like stopping \
                       the service or disabling backends via runtime API.",
-        keywords: &["haproxy", "socat"],
+        keywords: KEYWORDS,
         safe_patterns: create_safe_patterns(),
         destructive_patterns: create_destructive_patterns(),
         keyword_matcher: None,

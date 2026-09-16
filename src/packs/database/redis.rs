@@ -11,13 +11,21 @@ use crate::{destructive_pattern, safe_pattern};
 
 /// Create the Redis pack.
 #[must_use]
+/// Command words that let this pack be consulted at all.
+///
+/// The registry's `PackEntry` points at this same const. They used to be two
+/// lists, and 26 of 80 packs had drifted: the pack claimed a keyword the
+/// registry gate did not carry, so rules for those words could never run
+/// (`.agent-config-x74pe`).
+pub const KEYWORDS: &[&str] = &["redis-cli", "FLUSHALL", "FLUSHDB", "DEBUG", "redis"];
+
 pub fn create_pack() -> Pack {
     Pack {
         id: "database.redis".to_string(),
         name: "Redis",
         description: "Protects against destructive Redis operations like FLUSHALL, \
                       FLUSHDB, and mass key deletion",
-        keywords: &["redis", "FLUSHALL", "FLUSHDB", "DEBUG"],
+        keywords: KEYWORDS,
         safe_patterns: create_safe_patterns(),
         destructive_patterns: create_destructive_patterns(),
         keyword_matcher: None,

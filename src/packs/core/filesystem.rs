@@ -481,12 +481,20 @@ fn path_is_root_home(path: &PathToken<'_>) -> bool {
 
 /// Create the core filesystem pack.
 #[must_use]
+/// Command words that let this pack be consulted at all.
+///
+/// The registry's `PackEntry` points at this same const. They used to be two
+/// lists, and 26 of 80 packs had drifted: the pack claimed a keyword the
+/// registry gate did not carry, so rules for those words could never run
+/// (`.agent-config-x74pe`).
+pub const KEYWORDS: &[&str] = &["rm", "/rm"];
+
 pub fn create_pack() -> Pack {
     Pack {
         id: "core.filesystem".to_string(),
         name: "Core Filesystem",
         description: "Protects against dangerous rm -rf commands outside temp directories",
-        keywords: &["rm"],
+        keywords: KEYWORDS,
         safe_patterns: create_safe_patterns(),
         destructive_patterns: create_destructive_patterns(),
         keyword_matcher: None,

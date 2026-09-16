@@ -12,21 +12,29 @@ use crate::{destructive_pattern, safe_pattern};
 
 /// Create the `Braintree` pack.
 #[must_use]
+/// Command words that let this pack be consulted at all.
+///
+/// The registry's `PackEntry` points at this same const. They used to be two
+/// lists, and 26 of 80 packs had drifted: the pack claimed a keyword the
+/// registry gate did not carry, so rules for those words could never run
+/// (`.agent-config-x74pe`).
+pub const KEYWORDS: &[&str] = &[
+    "braintree",
+    "braintreegateway.com",
+    "braintree.",
+    "gateway.customer.",
+    "gateway.merchant_account.",
+    "gateway.payment_method.",
+    "gateway.subscription.",
+];
+
 pub fn create_pack() -> Pack {
     Pack {
         id: "payment.braintree".to_string(),
         name: "Braintree",
         description: "Protects against destructive Braintree/PayPal payment operations like deleting customers \
                       or cancelling subscriptions via API/SDK calls.",
-        keywords: &[
-            "braintree",
-            "braintreegateway.com",
-            "braintree.",
-            "gateway.customer.",
-            "gateway.merchant_account.",
-            "gateway.payment_method.",
-            "gateway.subscription.",
-        ],
+        keywords: KEYWORDS,
         safe_patterns: create_safe_patterns(),
         destructive_patterns: create_destructive_patterns(),
         keyword_matcher: None,

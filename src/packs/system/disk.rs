@@ -16,6 +16,35 @@ use crate::{destructive_pattern, safe_pattern};
 
 /// Create the Disk pack.
 #[must_use]
+/// Command words that let this pack be consulted at all.
+///
+/// The registry's `PackEntry` points at this same const. They used to be two
+/// lists, and 26 of 80 packs had drifted: the pack claimed a keyword the
+/// registry gate did not carry, so rules for those words could never run
+/// (`.agent-config-x74pe`).
+pub const KEYWORDS: &[&str] = &[
+    "dd",
+    "mkfs",
+    "fdisk",
+    "parted",
+    "wipefs",
+    "mdadm",
+    "btrfs",
+    "dmsetup",
+    "nbd-client",
+    "pvremove",
+    "vgremove",
+    "lvremove",
+    "vgreduce",
+    "lvreduce",
+    "lvresize",
+    "pvmove",
+    "lvconvert",
+    "mount",
+    "/dev/",
+    "umount",
+];
+
 pub fn create_pack() -> Pack {
     Pack {
         id: "system.disk".to_string(),
@@ -23,26 +52,7 @@ pub fn create_pack() -> Pack {
         description: "Protects against destructive disk operations like dd to devices, \
                       mkfs, partition table modifications, RAID management, \
                       btrfs/LVM/device-mapper operations, and network block devices",
-        keywords: &[
-            "dd",
-            "fdisk",
-            "mkfs",
-            "parted",
-            "mount",
-            "wipefs",
-            "/dev/",
-            "mdadm",
-            "btrfs",
-            "dmsetup",
-            "nbd-client",
-            "pvremove",
-            "vgremove",
-            "lvremove",
-            "vgreduce",
-            "lvreduce",
-            "lvresize",
-            "pvmove",
-        ],
+        keywords: KEYWORDS,
         safe_patterns: create_safe_patterns(),
         destructive_patterns: create_destructive_patterns(),
         keyword_matcher: None,

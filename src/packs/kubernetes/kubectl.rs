@@ -115,13 +115,21 @@ const DELETE_FROM_DIR_SUGGESTIONS: &[PatternSuggestion] = &[
 
 /// Create the kubectl pack.
 #[must_use]
+/// Command words that let this pack be consulted at all.
+///
+/// The registry's `PackEntry` points at this same const. They used to be two
+/// lists, and 26 of 80 packs had drifted: the pack claimed a keyword the
+/// registry gate did not carry, so rules for those words could never run
+/// (`.agent-config-x74pe`).
+pub const KEYWORDS: &[&str] = &["kubectl", "delete", "drain", "cordon", "taint"];
+
 pub fn create_pack() -> Pack {
     Pack {
         id: "kubernetes.kubectl".to_string(),
         name: "kubectl",
         description: "Protects against destructive kubectl operations like delete namespace, \
                       drain, and mass deletion",
-        keywords: &["kubectl", "delete", "drain", "cordon", "taint"],
+        keywords: KEYWORDS,
         safe_patterns: create_safe_patterns(),
         destructive_patterns: create_destructive_patterns(),
         keyword_matcher: None,

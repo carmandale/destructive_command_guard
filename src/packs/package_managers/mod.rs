@@ -11,16 +11,29 @@ use crate::{destructive_pattern, safe_pattern};
 
 /// Create the Package Managers pack.
 #[must_use]
+/// Command words that let this pack be consulted at all.
+///
+/// The registry's `PackEntry` points at this same const. They used to be two
+/// lists, and 26 of 80 packs had drifted: the pack claimed a keyword the
+/// registry gate did not carry, so rules for those words could never run
+/// (`.agent-config-x74pe`).
+/// `apt-get` and `pip3` are listed separately from `apt` and `pip` on purpose:
+/// the gate matches whole command words and a hyphen or digit continues one, so
+/// `apt` never reaches `apt-get remove` and `pip` never reaches
+/// `pip3 uninstall`. A rule that names a spelling needs that spelling here
+/// (`.agent-config-x74pe`).
+pub const KEYWORDS: &[&str] = &[
+    "npm", "yarn", "pnpm", "pip", "cargo", "gem", "composer", "go", "apt", "yum", "dnf", "brew",
+    "poetry", "mvn", "mvnw", "gradle", "gradlew", "publish", "apt-get", "pip3",
+];
+
 pub fn create_pack() -> Pack {
     Pack {
         id: "package_managers".to_string(),
         name: "Package Managers",
         description: "Protects against dangerous package manager operations like publishing \
                       packages and removing critical system packages",
-        keywords: &[
-            "npm", "yarn", "pnpm", "pip", "apt", "yum", "dnf", "cargo", "gem", "brew", "poetry",
-            "mvn", "mvnw", "gradle", "gradlew", "publish",
-        ],
+        keywords: KEYWORDS,
         safe_patterns: create_safe_patterns(),
         destructive_patterns: create_destructive_patterns(),
         keyword_matcher: None,

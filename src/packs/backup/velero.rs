@@ -10,12 +10,20 @@ use crate::{destructive_pattern, safe_pattern};
 
 /// Create the `Velero` pack.
 #[must_use]
+/// Command words that let this pack be consulted at all.
+///
+/// The registry's `PackEntry` points at this same const. They used to be two
+/// lists, and 26 of 80 packs had drifted: the pack claimed a keyword the
+/// registry gate did not carry, so rules for those words could never run
+/// (`.agent-config-x74pe`).
+pub const KEYWORDS: &[&str] = &["velero"];
+
 pub fn create_pack() -> Pack {
     Pack {
         id: "backup.velero".to_string(),
         name: "Velero",
         description: "Protects against destructive velero operations like deleting backups, schedules, and locations.",
-        keywords: &["velero"],
+        keywords: KEYWORDS,
         safe_patterns: create_safe_patterns(),
         destructive_patterns: create_destructive_patterns(),
         keyword_matcher: None,

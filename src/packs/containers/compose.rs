@@ -10,13 +10,21 @@ use crate::{destructive_pattern, safe_pattern};
 
 /// Create the Docker Compose pack.
 #[must_use]
+/// Command words that let this pack be consulted at all.
+///
+/// The registry's `PackEntry` points at this same const. They used to be two
+/// lists, and 26 of 80 packs had drifted: the pack claimed a keyword the
+/// registry gate did not carry, so rules for those words could never run
+/// (`.agent-config-x74pe`).
+pub const KEYWORDS: &[&str] = &["docker-compose", "docker compose", "compose"];
+
 pub fn create_pack() -> Pack {
     Pack {
         id: "containers.compose".to_string(),
         name: "Docker Compose",
         description: "Protects against destructive Docker Compose operations like \
                       'down -v' which removes volumes",
-        keywords: &["docker-compose", "docker compose", "compose"],
+        keywords: KEYWORDS,
         safe_patterns: create_safe_patterns(),
         destructive_patterns: create_destructive_patterns(),
         keyword_matcher: None,

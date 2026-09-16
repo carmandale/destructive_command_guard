@@ -10,13 +10,21 @@ use crate::{destructive_pattern, safe_pattern};
 
 /// Create the `Stripe` pack.
 #[must_use]
+/// Command words that let this pack be consulted at all.
+///
+/// The registry's `PackEntry` points at this same const. They used to be two
+/// lists, and 26 of 80 packs had drifted: the pack claimed a keyword the
+/// registry gate did not carry, so rules for those words could never run
+/// (`.agent-config-x74pe`).
+pub const KEYWORDS: &[&str] = &["stripe", "api.stripe.com"];
+
 pub fn create_pack() -> Pack {
     Pack {
         id: "payment.stripe".to_string(),
         name: "Stripe",
         description: "Protects against destructive Stripe CLI/API operations like deleting webhook endpoints \
                       and customers, or rotating API keys without coordination.",
-        keywords: &["stripe", "api.stripe.com"],
+        keywords: KEYWORDS,
         safe_patterns: create_safe_patterns(),
         destructive_patterns: create_destructive_patterns(),
         keyword_matcher: None,

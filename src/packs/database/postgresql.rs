@@ -125,16 +125,39 @@ const PG_DUMP_CLEAN_SUGGESTIONS: &[PatternSuggestion] = &[
 
 /// Create the `PostgreSQL` pack.
 #[must_use]
+/// Command words that let this pack be consulted at all.
+///
+/// The registry's `PackEntry` points at this same const. They used to be two
+/// lists, and 26 of 80 packs had drifted: the pack claimed a keyword the
+/// registry gate did not carry, so rules for those words could never run
+/// (`.agent-config-x74pe`).
+/// Includes the lowercase `drop`/`delete`/`truncate` the pack has always
+/// carried. They also select this pack on prose that uses those words, and
+/// one bead description in an 18,723-command population is denied that way
+/// (`.agent-config-w22qy`) — but removing them would stop a lowercase SQL
+/// statement reaching the rules at all, which is worse.
+pub const KEYWORDS: &[&str] = &[
+    "psql",
+    "dropdb",
+    "createdb",
+    "pg_dump",
+    "pg_restore",
+    "DROP",
+    "TRUNCATE",
+    "DELETE",
+    "postgres",
+    "delete",
+    "drop",
+    "truncate",
+];
+
 pub fn create_pack() -> Pack {
     Pack {
         id: "database.postgresql".to_string(),
         name: "PostgreSQL",
         description: "Protects against destructive PostgreSQL operations like DROP DATABASE, \
                       TRUNCATE, and dropdb",
-        keywords: &[
-            "psql", "dropdb", "DROP", "TRUNCATE", "pg_dump", "postgres", "DELETE", "delete",
-            "drop", "truncate",
-        ],
+        keywords: KEYWORDS,
         safe_patterns: create_safe_patterns(),
         destructive_patterns: create_destructive_patterns(),
         keyword_matcher: None,

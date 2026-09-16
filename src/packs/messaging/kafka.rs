@@ -8,28 +8,36 @@ use crate::{destructive_pattern, safe_pattern};
 
 /// Create the Kafka messaging pack.
 #[must_use]
+/// Command words that let this pack be consulted at all.
+///
+/// The registry's `PackEntry` points at this same const. They used to be two
+/// lists, and 26 of 80 packs had drifted: the pack claimed a keyword the
+/// registry gate did not carry, so rules for those words could never run
+/// (`.agent-config-x74pe`).
+pub const KEYWORDS: &[&str] = &[
+    "kafka-topics",
+    "kafka-consumer-groups",
+    "kafka-configs",
+    "kafka-acls",
+    "kafka-delete-records",
+    "rpk",
+    "kafka-topics.sh",
+    "kafka-consumer-groups.sh",
+    "kafka-configs.sh",
+    "kafka-acls.sh",
+    "kafka-delete-records.sh",
+    "kafka-console-consumer",
+    "kafka-console-producer",
+    "kafka-broker-api-versions",
+];
+
 pub fn create_pack() -> Pack {
     Pack {
         id: "messaging.kafka".to_string(),
         name: "Apache Kafka",
         description: "Protects against destructive Kafka CLI operations like deleting topics, \
                       removing consumer groups, resetting offsets, and deleting records.",
-        keywords: &[
-            "kafka-topics",
-            "kafka-topics.sh",
-            "kafka-consumer-groups",
-            "kafka-consumer-groups.sh",
-            "kafka-configs",
-            "kafka-configs.sh",
-            "kafka-acls",
-            "kafka-acls.sh",
-            "kafka-delete-records",
-            "kafka-delete-records.sh",
-            "kafka-console-consumer",
-            "kafka-console-producer",
-            "kafka-broker-api-versions",
-            "rpk",
-        ],
+        keywords: KEYWORDS,
         safe_patterns: create_safe_patterns(),
         destructive_patterns: create_destructive_patterns(),
         keyword_matcher: None,

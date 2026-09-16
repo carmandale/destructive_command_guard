@@ -10,13 +10,21 @@ use crate::{destructive_pattern, safe_pattern};
 
 /// Create the `New Relic` pack.
 #[must_use]
+/// Command words that let this pack be consulted at all.
+///
+/// The registry's `PackEntry` points at this same const. They used to be two
+/// lists, and 26 of 80 packs had drifted: the pack claimed a keyword the
+/// registry gate did not carry, so rules for those words could never run
+/// (`.agent-config-x74pe`).
+pub const KEYWORDS: &[&str] = &["newrelic", "api.newrelic.com", "graphql"];
+
 pub fn create_pack() -> Pack {
     Pack {
         id: "monitoring.newrelic".to_string(),
         name: "New Relic",
         description: "Protects against destructive New Relic CLI/API operations like deleting entities \
                       or alerting resources.",
-        keywords: &["newrelic", "api.newrelic.com", "graphql"],
+        keywords: KEYWORDS,
         safe_patterns: create_safe_patterns(),
         destructive_patterns: create_destructive_patterns(),
         keyword_matcher: None,

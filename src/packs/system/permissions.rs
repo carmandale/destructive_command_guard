@@ -37,13 +37,21 @@ const CHOWN_RECURSIVE_SUGGESTIONS: &[PatternSuggestion] = &[
 
 /// Create the Permissions pack.
 #[must_use]
+/// Command words that let this pack be consulted at all.
+///
+/// The registry's `PackEntry` points at this same const. They used to be two
+/// lists, and 26 of 80 packs had drifted: the pack claimed a keyword the
+/// registry gate did not carry, so rules for those words could never run
+/// (`.agent-config-x74pe`).
+pub const KEYWORDS: &[&str] = &["chmod", "chown", "setfacl", "chgrp"];
+
 pub fn create_pack() -> Pack {
     Pack {
         id: "system.permissions".to_string(),
         name: "Permissions",
         description: "Protects against dangerous permission changes like chmod 777, \
                       recursive chmod/chown on system directories",
-        keywords: &["chmod", "chown", "chgrp", "setfacl"],
+        keywords: KEYWORDS,
         safe_patterns: create_safe_patterns(),
         destructive_patterns: create_destructive_patterns(),
         keyword_matcher: None,

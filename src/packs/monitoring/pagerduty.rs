@@ -9,13 +9,21 @@ use crate::{destructive_pattern, safe_pattern};
 
 /// Create the `PagerDuty` pack.
 #[must_use]
+/// Command words that let this pack be consulted at all.
+///
+/// The registry's `PackEntry` points at this same const. They used to be two
+/// lists, and 26 of 80 packs had drifted: the pack claimed a keyword the
+/// registry gate did not carry, so rules for those words could never run
+/// (`.agent-config-x74pe`).
+pub const KEYWORDS: &[&str] = &["pd", "pagerduty", "api.pagerduty.com"];
+
 pub fn create_pack() -> Pack {
     Pack {
         id: "monitoring.pagerduty".to_string(),
         name: "PagerDuty",
         description: "Protects against destructive PagerDuty CLI/API operations like deleting \
                       services and schedules (which can break incident routing).",
-        keywords: &["pd", "pagerduty", "api.pagerduty.com"],
+        keywords: KEYWORDS,
         safe_patterns: create_safe_patterns(),
         destructive_patterns: create_destructive_patterns(),
         keyword_matcher: None,

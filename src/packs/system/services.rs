@@ -10,20 +10,27 @@ use crate::{destructive_pattern, safe_pattern};
 
 /// Create the Services pack.
 #[must_use]
+/// Command words that let this pack be consulted at all.
+///
+/// The registry's `PackEntry` points at this same const. They used to be two
+/// lists, and 26 of 80 packs had drifted: the pack claimed a keyword the
+/// registry gate did not carry, so rules for those words could never run
+/// (`.agent-config-x74pe`).
+/// `shutdown`, `reboot` and `init` are deliberately NOT here. Their rules are
+/// bare words (`\bshutdown\b`), and over 18,723 real recorded commands turning
+/// them on denied six lines that only MENTIONED a reboot — a bead description,
+/// an incident note written through a heredoc — against two that were reboots.
+/// They need a command-position anchor and heredoc-body masking first:
+/// `.agent-config-w22qy` holds that, with the measurement.
+pub const KEYWORDS: &[&str] = &["systemctl", "service", "upstart"];
+
 pub fn create_pack() -> Pack {
     Pack {
         id: "system.services".to_string(),
         name: "Services",
         description: "Protects against dangerous service operations like stopping critical \
                       services and modifying init configuration",
-        keywords: &[
-            "systemctl",
-            "service",
-            "init",
-            "upstart",
-            "shutdown",
-            "reboot",
-        ],
+        keywords: KEYWORDS,
         safe_patterns: create_safe_patterns(),
         destructive_patterns: create_destructive_patterns(),
         keyword_matcher: None,
@@ -180,30 +187,38 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
 mod tests {
     use super::*;
 
+    /// PARKED, not reachable: `shutdown` is not in this pack's KEYWORDS.
+    ///
+    /// The rule is a bare word, and over 18,723 real recorded commands enabling
+    /// it denied lines that only MENTIONED a reboot — a bead description, an
+    /// incident note written through a heredoc — more often than real ones.
+    /// `.agent-config-w22qy` carries the anchoring and heredoc-masking work that
+    /// has to land before this flips back. Asserting reachability here would
+    /// assert the defect.
     #[test]
-    fn shutdown_is_reachable_via_keywords() {
+    fn shutdown_is_parked_until_it_stops_matching_prose() {
         let pack = create_pack();
         assert!(
-            pack.might_match("shutdown -h now"),
-            "shutdown should be included in pack keywords to prevent false negatives"
+            !pack.keywords.contains(&"shutdown"),
+            "`shutdown` is back in the gate — see .agent-config-w22qy before enabling it"
         );
-        let matched = pack
-            .check("shutdown -h now")
-            .expect("shutdown should be blocked by services pack");
-        assert_eq!(matched.name, Some("shutdown"));
     }
 
+    /// PARKED, not reachable: `reboot` is not in this pack's KEYWORDS.
+    ///
+    /// The rule is a bare word, and over 18,723 real recorded commands enabling
+    /// it denied lines that only MENTIONED a reboot — a bead description, an
+    /// incident note written through a heredoc — more often than real ones.
+    /// `.agent-config-w22qy` carries the anchoring and heredoc-masking work that
+    /// has to land before this flips back. Asserting reachability here would
+    /// assert the defect.
     #[test]
-    fn reboot_is_reachable_via_keywords() {
+    fn reboot_is_parked_until_it_stops_matching_prose() {
         let pack = create_pack();
         assert!(
-            pack.might_match("reboot"),
-            "reboot should be included in pack keywords to prevent false negatives"
+            !pack.keywords.contains(&"reboot"),
+            "`reboot` is back in the gate — see .agent-config-w22qy before enabling it"
         );
-        let matched = pack
-            .check("reboot")
-            .expect("reboot should be blocked by services pack");
-        assert_eq!(matched.name, Some("reboot"));
     }
 
     #[test]

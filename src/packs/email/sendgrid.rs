@@ -12,13 +12,21 @@ use crate::packs::{DestructivePattern, Pack, SafePattern};
 
 /// Create the `SendGrid` pack.
 #[must_use]
+/// Command words that let this pack be consulted at all.
+///
+/// The registry's `PackEntry` points at this same const. They used to be two
+/// lists, and 26 of 80 packs had drifted: the pack claimed a keyword the
+/// registry gate did not carry, so rules for those words could never run
+/// (`.agent-config-x74pe`).
+pub const KEYWORDS: &[&str] = &["sendgrid", "api.sendgrid.com"];
+
 pub fn create_pack() -> Pack {
     Pack {
         id: "email.sendgrid".to_string(),
         name: "SendGrid",
         description: "Protects against destructive SendGrid API operations like template deletion, \
                       API key deletion, and domain authentication removal.",
-        keywords: &["sendgrid", "api.sendgrid.com"],
+        keywords: KEYWORDS,
         safe_patterns: create_safe_patterns(),
         destructive_patterns: create_destructive_patterns(),
         keyword_matcher: None,
