@@ -63,15 +63,15 @@ These patterns match potentially destructive commands:
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
 | `ses-delete-identity` | aws ses delete-identity removes a verified email identity. | high |
-| `ses-delete-template` | aws ses delete-template removes an email template. | high |
+| `ses-delete-template` | aws ses delete-template removes an email template. | medium |
 | `ses-delete-configuration-set` | aws ses delete-configuration-set removes a configuration set. | high |
-| `ses-delete-receipt-rule-set` | aws ses delete-receipt-rule-set removes a receipt rule set. | high |
+| `ses-delete-receipt-rule-set` | aws ses delete-receipt-rule-set removes a receipt rule set. | critical |
 | `ses-delete-receipt-rule` | aws ses delete-receipt-rule removes a receipt rule. | high |
 | `sesv2-delete-email-identity` | aws sesv2 delete-email-identity removes a verified email identity. | high |
-| `sesv2-delete-email-template` | aws sesv2 delete-email-template removes an email template. | high |
+| `sesv2-delete-email-template` | aws sesv2 delete-email-template removes an email template. | medium |
 | `sesv2-delete-configuration-set` | aws sesv2 delete-configuration-set removes a configuration set. | high |
 | `sesv2-delete-contact-list` | aws sesv2 delete-contact-list removes a contact list. | high |
-| `sesv2-delete-dedicated-ip-pool` | aws sesv2 delete-dedicated-ip-pool removes a dedicated IP pool. | high |
+| `sesv2-delete-dedicated-ip-pool` | aws sesv2 delete-dedicated-ip-pool removes a dedicated IP pool. | critical |
 
 ### Allowlist Guidance
 
@@ -114,13 +114,13 @@ These patterns match potentially destructive commands:
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
 | `sendgrid-delete-template` | DELETE to SendGrid /v3/templates removes a transactional template. | high |
-| `sendgrid-delete-api-key` | DELETE to SendGrid /v3/api_keys removes an API key. | high |
-| `sendgrid-delete-whitelabel-domain` | DELETE to SendGrid /v3/whitelabel/domains removes domain authentication. | high |
+| `sendgrid-delete-api-key` | DELETE to SendGrid /v3/api_keys removes an API key. | critical |
+| `sendgrid-delete-whitelabel-domain` | DELETE to SendGrid /v3/whitelabel/domains removes domain authentication. | critical |
 | `sendgrid-delete-sender` | DELETE to SendGrid /v3/senders or /v3/verified_senders removes a sender identity. | high |
-| `sendgrid-delete-teammate` | DELETE to SendGrid /v3/teammates removes a teammate from the account. | high |
+| `sendgrid-delete-teammate` | DELETE to SendGrid /v3/teammates removes a teammate from the account. | medium |
 | `sendgrid-delete-suppression` | DELETE to SendGrid suppression endpoints removes entries from suppression lists. | high |
-| `sendgrid-delete-webhook` | DELETE to SendGrid /v3/user/webhooks removes a webhook configuration. | high |
-| `sendgrid-delete-subuser` | DELETE to SendGrid /v3/subusers removes a subuser account. | high |
+| `sendgrid-delete-webhook` | DELETE to SendGrid /v3/user/webhooks removes a webhook configuration. | medium |
+| `sendgrid-delete-subuser` | DELETE to SendGrid /v3/subusers removes a subuser account. | critical |
 
 ### Allowlist Guidance
 
@@ -162,13 +162,13 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `mailgun-delete-domain` | DELETE to Mailgun /v3/domains removes a domain configuration. | high |
+| `mailgun-delete-domain` | DELETE to Mailgun /v3/domains removes a domain configuration. | critical |
 | `mailgun-delete-route` | DELETE to Mailgun /v3/routes removes an email route. | high |
 | `mailgun-delete-list` | DELETE to Mailgun /v3/lists removes a mailing list. | high |
-| `mailgun-delete-template` | DELETE to Mailgun templates endpoint removes an email template. | high |
-| `mailgun-delete-webhook` | DELETE to Mailgun webhooks endpoint removes a webhook. | high |
+| `mailgun-delete-template` | DELETE to Mailgun templates endpoint removes an email template. | medium |
+| `mailgun-delete-webhook` | DELETE to Mailgun webhooks endpoint removes a webhook. | medium |
 | `mailgun-delete-credential` | DELETE to Mailgun credentials endpoint removes SMTP credentials. | high |
-| `mailgun-delete-tag` | DELETE to Mailgun tags endpoint removes a tag. | high |
+| `mailgun-delete-tag` | DELETE to Mailgun tags endpoint removes a tag. | low |
 | `mailgun-delete-suppression` | DELETE to Mailgun suppression endpoints removes suppression entries. | high |
 
 ### Allowlist Guidance
@@ -211,11 +211,11 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `postmark-delete-server` | DELETE to Postmark /servers removes a server configuration. | high |
-| `postmark-delete-template` | DELETE to Postmark /templates removes an email template. | high |
-| `postmark-delete-domain` | DELETE to Postmark /domains removes a domain configuration. | high |
+| `postmark-delete-server` | DELETE to Postmark /servers removes a server configuration. | critical |
+| `postmark-delete-template` | DELETE to Postmark /templates removes an email template. | medium |
+| `postmark-delete-domain` | DELETE to Postmark /domains removes a domain configuration. | critical |
 | `postmark-delete-sender-signature` | DELETE to Postmark /senders removes a sender signature. | high |
-| `postmark-delete-webhook` | DELETE to Postmark /webhooks removes a webhook configuration. | high |
+| `postmark-delete-webhook` | DELETE to Postmark /webhooks removes a webhook configuration. | medium |
 | `postmark-delete-suppression` | DELETE to Postmark suppressions endpoint removes suppression entries. | high |
 | `postmark-delete-message-stream` | DELETE to Postmark /message-streams removes a message stream. | high |
 

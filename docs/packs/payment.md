@@ -43,7 +43,7 @@ These patterns match potentially destructive commands:
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
 | `stripe-webhook-endpoints-delete` | stripe webhook_endpoints delete removes a Stripe webhook endpoint, breaking notifications. | high |
-| `stripe-customers-delete` | stripe customers delete permanently deletes a customer. | high |
+| `stripe-customers-delete` | stripe customers delete permanently deletes a customer. | critical |
 | `stripe-products-delete` | stripe products delete permanently deletes a product. | high |
 | `stripe-prices-delete` | stripe prices delete permanently deletes a price. | high |
 | `stripe-coupons-delete` | stripe coupons delete permanently deletes a coupon. | high |
@@ -106,9 +106,9 @@ These patterns match potentially destructive commands:
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
 | `braintree-api-delete` | Braintree API DELETE calls remove payment resources (customers, webhooks, etc.). | high |
-| `braintree-customer-delete` | braintree.Customer.delete permanently deletes a Braintree customer. | high |
-| `braintree-gateway-customer-delete` | gateway.customer.delete permanently deletes a Braintree customer. | high |
-| `braintree-merchant-account-delete` | gateway.merchant_account.delete removes a Braintree merchant account. | high |
+| `braintree-customer-delete` | braintree.Customer.delete permanently deletes a Braintree customer. | critical |
+| `braintree-gateway-customer-delete` | gateway.customer.delete permanently deletes a Braintree customer. | critical |
+| `braintree-merchant-account-delete` | gateway.merchant_account.delete removes a Braintree merchant account. | critical |
 | `braintree-payment-method-delete` | gateway.payment_method.delete removes a stored payment method. | high |
 | `braintree-subscription-cancel` | gateway.subscription.cancel cancels a subscription, impacting billing. | high |
 
@@ -164,8 +164,8 @@ These patterns match potentially destructive commands:
 |--------------|--------|----------|
 | `square-catalog-delete` | square catalog delete removes catalog objects, impacting products and inventory. | high |
 | `square-api-delete-catalog-object` | Square API DELETE /v2/catalog/object/{id} deletes a catalog object. | high |
-| `square-api-delete-customer` | Square API DELETE /v2/customers/{id} deletes a customer. | high |
-| `square-api-delete-location` | Square API DELETE /v2/locations/{id} deletes a location. | high |
+| `square-api-delete-customer` | Square API DELETE /v2/customers/{id} deletes a customer. | critical |
+| `square-api-delete-location` | Square API DELETE /v2/locations/{id} deletes a location. | critical |
 | `square-api-delete-webhook-subscription` | Square API DELETE /v2/webhooks/subscriptions/{id} deletes a webhook subscription. | high |
 
 ### Allowlist Guidance

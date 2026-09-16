@@ -49,17 +49,19 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `delete-namespace` | kubectl delete namespace removes the entire namespace and ALL resources within it. | high |
+| `delete-namespace` | kubectl delete namespace removes the entire namespace and ALL resources within it. | critical |
 | `delete-all` | kubectl delete --all removes ALL resources of that type. Use --dry-run=client first. | high |
-| `delete-all-namespaces` | kubectl delete with -A/--all-namespaces affects ALL namespaces. Very dangerous! | high |
+| `delete-all-namespaces` | kubectl delete with -A/--all-namespaces affects ALL namespaces. Very dangerous! | critical |
 | `drain-node` | kubectl drain evicts all pods from a node. Ensure proper pod disruption budgets. | high |
-| `cordon-node` | kubectl cordon marks a node unschedulable. Existing pods continue running. | high |
+| `cordon-node` | kubectl cordon marks a node unschedulable. Existing pods continue running. | medium |
 | `taint-noexecute` | kubectl taint with NoExecute evicts existing pods that don't tolerate the taint. | high |
 | `delete-workload` | kubectl delete deployment/statefulset/daemonset removes the workload. Use --dry-run first. | high |
-| `delete-pvc` | kubectl delete pvc may permanently delete data if ReclaimPolicy is Delete. | high |
-| `delete-pv` | kubectl delete pv may permanently delete the underlying storage. | high |
+| `delete-pvc` | kubectl delete pvc may permanently delete data if ReclaimPolicy is Delete. | critical |
+| `delete-pv` | kubectl delete pv may permanently delete the underlying storage. | critical |
 | `scale-to-zero` | kubectl scale --replicas=0 stops all pods for the workload. | high |
-| `delete-force` | kubectl delete --force --grace-period=0 immediately removes resources without graceful shutdown. | high |
+| `delete-force` | kubectl delete --force --grace-period=0 immediately removes resources without graceful shutdown. | critical |
+| `apply-force` | kubectl apply --force deletes and recreates resources, causing downtime. | high |
+| `delete-from-directory` | kubectl delete -f with directories or --recursive deletes many resources at once. | high |
 
 ### Allowlist Guidance
 
@@ -122,7 +124,7 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `uninstall` | helm uninstall removes the release and all its resources. Use --dry-run first. | high |
+| `uninstall` | helm uninstall removes the release and all its resources. Use --dry-run first. | critical |
 | `rollback` | helm rollback reverts to a previous release. Use --dry-run to preview changes. | high |
 | `upgrade-force` | helm upgrade --force deletes and recreates resources, causing downtime. | high |
 | `upgrade-reset-values` | helm upgrade --reset-values discards all previously set values. | high |
@@ -178,9 +180,9 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `kustomize-delete` | kustomize build \| kubectl delete removes all resources in the kustomization. | high |
-| `kubectl-kustomize-delete` | kubectl kustomize \| kubectl delete removes all resources in the kustomization. | high |
-| `kubectl-delete-k` | kubectl delete -k removes all resources defined in the kustomization. Use --dry-run first. | high |
+| `kustomize-delete` | kustomize build \| kubectl delete removes all resources in the kustomization. | critical |
+| `kubectl-kustomize-delete` | kubectl kustomize \| kubectl delete removes all resources in the kustomization. | critical |
+| `kubectl-delete-k` | kubectl delete -k removes all resources defined in the kustomization. Use --dry-run first. | critical |
 
 ### Allowlist Guidance
 

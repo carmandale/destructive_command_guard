@@ -51,20 +51,20 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `ec2-terminate` | aws ec2 terminate-instances permanently destroys EC2 instances. | high |
+| `ec2-terminate` | aws ec2 terminate-instances permanently destroys EC2 instances. | critical |
 | `removes AWS resources` | aws ec2 delete-* permanently removes AWS resources. | high |
-| `s3-rm-recursive` | aws s3 rm --recursive permanently deletes all objects in the path. | high |
-| `s3-rb` | aws s3 rb removes the entire S3 bucket. | high |
-| `s3api-delete-bucket` | aws s3api delete-bucket removes the entire S3 bucket. | high |
-| `rds-delete` | aws rds delete-db-instance/cluster permanently destroys the database. | high |
-| `cfn-delete-stack` | aws cloudformation delete-stack removes the entire stack and its resources. | high |
+| `s3-rm-recursive` | aws s3 rm --recursive permanently deletes all objects in the path. | critical |
+| `s3-rb` | aws s3 rb removes the entire S3 bucket. | critical |
+| `s3api-delete-bucket` | aws s3api delete-bucket removes the entire S3 bucket. | critical |
+| `rds-delete` | aws rds delete-db-instance/cluster permanently destroys the database. | critical |
+| `cfn-delete-stack` | aws cloudformation delete-stack removes the entire stack and its resources. | critical |
 | `lambda-delete` | aws lambda delete-function permanently removes the Lambda function. | high |
 | `iam-delete` | aws iam delete-* removes IAM resources. Verify dependencies first. | high |
-| `dynamodb-delete` | aws dynamodb delete-table permanently deletes the table and all data. | high |
-| `eks-delete` | aws eks delete-cluster removes the entire EKS cluster. | high |
+| `dynamodb-delete` | aws dynamodb delete-table permanently deletes the table and all data. | critical |
+| `eks-delete` | aws eks delete-cluster removes the entire EKS cluster. | critical |
 | `ecr-delete-repository` | aws ecr delete-repository permanently deletes the repository and its images. | high |
 | `ecr-batch-delete-image` | aws ecr batch-delete-image permanently deletes one or more images. | high |
-| `ecr-delete-lifecycle-policy` | aws ecr delete-lifecycle-policy removes the repository lifecycle policy. | high |
+| `ecr-delete-lifecycle-policy` | aws ecr delete-lifecycle-policy removes the repository lifecycle policy. | medium |
 | `logs-delete-log-group` | aws logs delete-log-group permanently deletes a log group and all events. | high |
 | `logs-delete-log-stream` | aws logs delete-log-stream permanently deletes a log stream and all events. | high |
 
@@ -101,6 +101,7 @@ Commands containing these keywords are checked against this pack:
 
 - `gcloud`
 - `gsutil`
+- `bq`
 - `delete`
 - `instances`
 - `artifacts`
@@ -127,19 +128,19 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `compute-delete` | gcloud compute instances delete permanently destroys VM instances. | high |
-| `disk-delete` | gcloud compute disks delete permanently destroys disk data. | high |
-| `sql-delete` | gcloud sql instances delete permanently destroys the Cloud SQL instance. | high |
-| `gsutil-rm-recursive` | gsutil rm -r permanently deletes all objects in the path. | high |
-| `gsutil-rb` | gsutil rb removes the entire GCS bucket. | high |
-| `gke-delete` | gcloud container clusters delete removes the entire GKE cluster. | high |
-| `project-delete` | gcloud projects delete removes the entire GCP project and ALL its resources! | high |
+| `compute-delete` | gcloud compute instances delete permanently destroys VM instances. | critical |
+| `disk-delete` | gcloud compute disks delete permanently destroys disk data. | critical |
+| `sql-delete` | gcloud sql instances delete permanently destroys the Cloud SQL instance. | critical |
+| `gsutil-rm-recursive` | gsutil rm -r permanently deletes all objects in the path. | critical |
+| `gsutil-rb` | gsutil rb removes the entire GCS bucket. | critical |
+| `gke-delete` | gcloud container clusters delete removes the entire GKE cluster. | critical |
+| `project-delete` | gcloud projects delete removes the entire GCP project and ALL its resources! | critical |
 | `functions-delete` | gcloud functions delete removes the Cloud Function. | high |
 | `pubsub-delete` | gcloud pubsub delete removes Pub/Sub topics or subscriptions. | high |
-| `firestore-delete` | gcloud firestore delete removes Firestore data. | high |
+| `firestore-delete` | gcloud firestore delete removes Firestore data. | critical |
 | `container-images-delete` | gcloud container images delete permanently deletes container images. | high |
 | `artifacts-docker-images-delete` | gcloud artifacts docker images delete permanently deletes container images. | high |
-| `artifacts-repositories-delete` | gcloud artifacts repositories delete permanently deletes the repository. | high |
+| `artifacts-repositories-delete` | gcloud artifacts repositories delete permanently deletes the repository. | critical |
 
 ### Allowlist Guidance
 
@@ -200,20 +201,20 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `vm-delete` | az vm delete permanently destroys virtual machines. | high |
-| `storage-delete` | az storage account delete permanently destroys the storage account and all data. | high |
+| `vm-delete` | az vm delete permanently destroys virtual machines. | critical |
+| `storage-delete` | az storage account delete permanently destroys the storage account and all data. | critical |
 | `blob-delete` | az storage blob/container delete permanently removes data. | high |
-| `sql-delete` | az sql server/db delete permanently destroys the database. | high |
-| `group-delete` | az group delete removes the entire resource group and ALL resources within it! | high |
-| `aks-delete` | az aks delete removes the entire AKS cluster. | high |
+| `sql-delete` | az sql server/db delete permanently destroys the database. | critical |
+| `group-delete` | az group delete removes the entire resource group and ALL resources within it! | critical |
+| `aks-delete` | az aks delete removes the entire AKS cluster. | critical |
 | `webapp-delete` | az webapp delete removes the App Service. | high |
 | `functionapp-delete` | az functionapp delete removes the Azure Function App. | high |
-| `cosmosdb-delete` | az cosmosdb delete permanently destroys the Cosmos DB resource. | high |
-| `keyvault-delete` | az keyvault delete removes the Key Vault. Secrets may be unrecoverable. | high |
+| `cosmosdb-delete` | az cosmosdb delete permanently destroys the Cosmos DB resource. | critical |
+| `keyvault-delete` | az keyvault delete removes the Key Vault. Secrets may be unrecoverable. | critical |
 | `vnet-delete` | az network vnet delete removes the virtual network. | high |
-| `acr-delete` | az acr delete removes the container registry and all images. | high |
+| `acr-delete` | az acr delete removes the container registry and all images. | critical |
 | `acr-repository-delete` | az acr repository delete permanently deletes the repository and its images. | high |
-| `acr-repository-untag` | az acr repository untag removes tags from images. | high |
+| `acr-repository-untag` | az acr repository untag removes tags from images. | medium |
 
 ### Allowlist Guidance
 

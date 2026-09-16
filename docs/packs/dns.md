@@ -43,7 +43,7 @@ These patterns match potentially destructive commands:
 |--------------|--------|----------|
 | `cloudflare-wrangler-dns-delete` | wrangler dns-records delete removes a Cloudflare DNS record. | high |
 | `cloudflare-api-delete-dns-record` | curl -X DELETE against /dns_records/{id} deletes a Cloudflare DNS record. | high |
-| `cloudflare-api-delete-zone` | curl -X DELETE against /zones/{id} deletes a Cloudflare zone. | high |
+| `cloudflare-api-delete-zone` | curl -X DELETE against /zones/{id} deletes a Cloudflare zone. | critical |
 | `cloudflare-terraform-destroy-record` | terraform destroy -target=cloudflare_record deletes specific DNS records. | high |
 
 ### Allowlist Guidance
@@ -97,10 +97,10 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `route53-delete-hosted-zone` | aws route53 delete-hosted-zone permanently deletes a Route53 hosted zone. | high |
+| `route53-delete-hosted-zone` | aws route53 delete-hosted-zone permanently deletes a Route53 hosted zone. | critical |
 | `route53-change-resource-record-sets-delete` | aws route53 change-resource-record-sets with DELETE removes DNS records. | high |
 | `route53-delete-health-check` | aws route53 delete-health-check permanently deletes a Route53 health check. | high |
-| `route53-delete-query-logging-config` | aws route53 delete-query-logging-config removes a Route53 query logging configuration. | high |
+| `route53-delete-query-logging-config` | aws route53 delete-query-logging-config removes a Route53 query logging configuration. | medium |
 | `route53-delete-traffic-policy` | aws route53 delete-traffic-policy permanently deletes a Route53 traffic policy. | high |
 | `route53-delete-reusable-delegation-set` | aws route53 delete-reusable-delegation-set permanently deletes a reusable delegation set. | high |
 
@@ -157,8 +157,8 @@ These patterns match potentially destructive commands:
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
 | `dns-nsupdate-delete` | nsupdate delete commands remove DNS records. | high |
-| `dns-nsupdate-local` | nsupdate -l applies local updates which can modify DNS records. | high |
-| `dns-dig-zone-transfer` | dig AXFR/IXFR zone transfers can exfiltrate full zone data. | high |
+| `dns-nsupdate-local` | nsupdate -l applies local updates which can modify DNS records. | medium |
+| `dns-dig-zone-transfer` | dig AXFR/IXFR zone transfers can exfiltrate full zone data. | medium |
 
 ### Allowlist Guidance
 

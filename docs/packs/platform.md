@@ -36,7 +36,7 @@ These patterns match safe commands that are always allowed:
 | `gh-variable-list` | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo\|gist\|release\|issue\|ssh-key\|secret\|variable\|run\|auth\|status\|api)\b)(?:(?:\x22[^\x22]*\x22)\|(?:'[^']*')\|\S+))?)*\s+variable\s+list\b` |
 | `gh-auth-status` | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo\|gist\|release\|issue\|ssh-key\|secret\|variable\|run\|auth\|status\|api)\b)(?:(?:\x22[^\x22]*\x22)\|(?:'[^']*')\|\S+))?)*\s+auth\s+status\b` |
 | `gh-status` | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo\|gist\|release\|issue\|ssh-key\|secret\|variable\|run\|auth\|status\|api)\b)(?:(?:\x22[^\x22]*\x22)\|(?:'[^']*')\|\S+))?)*\s+status\b` |
-| `gh-api-explicit-get` | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo\|gist\|release\|issue\|ssh-key\|secret\|variable\|run\|auth\|status\|api)\b)(?:(?:\x22[^\x22]*\x22)\|(?:'[^']*')\|\S+))?)*\s+api\b.*(?:-X\|--method)\s+GET\b` |
+| `gh-api-explicit-get` | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo\|gist\|release\|issue\|ssh-key\|secret\|variable\|run\|auth\|status\|api)\b)(?:(?:\x22[^\x22]*\x22)\|(?:'[^']*')\|\S+))?)*\s+api\b(?![^;&\|\n]*(?:-X\|--method)\s+(?:DELETE\|PUT\|PATCH\|POST)\b)[^;&\|\n]*(?:-X\|--method)\s+GET\b` |
 
 ### Destructive Patterns (Blocked)
 

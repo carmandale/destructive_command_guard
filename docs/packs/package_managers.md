@@ -22,11 +22,13 @@ Commands containing these keywords are checked against this pack:
 - `yarn`
 - `pnpm`
 - `pip`
+- `cargo`
+- `gem`
+- `composer`
+- `go`
 - `apt`
 - `yum`
 - `dnf`
-- `cargo`
-- `gem`
 - `brew`
 - `poetry`
 - `mvn`
@@ -34,6 +36,8 @@ Commands containing these keywords are checked against this pack:
 - `gradle`
 - `gradlew`
 - `publish`
+- `apt-get`
+- `pip3`
 
 ### Safe Patterns (Allowed)
 
@@ -56,6 +60,8 @@ These patterns match safe commands that are always allowed:
 | `apt-get-list` | `apt-get\s+(?:update\|upgrade)(?!\s+.*-y)` |
 | `npm-dry-run` | `npm\s+.*--dry-run` |
 | `cargo-dry-run` | `cargo\s+.*--dry-run` |
+| `yarn-dry-run` | `yarn\s+.*--dry-run` |
+| `pnpm-dry-run` | `pnpm\s+.*--dry-run` |
 
 ### Destructive Patterns (Blocked)
 

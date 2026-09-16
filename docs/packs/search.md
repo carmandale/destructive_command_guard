@@ -22,8 +22,6 @@ Protects against destructive Elasticsearch REST API operations like index deleti
 Commands containing these keywords are checked against this pack:
 
 - `elasticsearch`
-- `curl`
-- `http`
 - `9200`
 - `_search`
 - `_cluster`
@@ -31,6 +29,8 @@ Commands containing these keywords are checked against this pack:
 - `_doc`
 - `_all`
 - `_delete_by_query`
+- `curl`
+- `http`
 
 ### Safe Patterns (Allowed)
 
@@ -51,15 +51,15 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `es-curl-delete-doc` | curl -X DELETE against /_doc deletes a document from Elasticsearch. | high |
+| `es-curl-delete-doc` | curl -X DELETE against /_doc deletes a document from Elasticsearch. | medium |
 | `es-curl-delete-by-query` | curl -X POST to _delete_by_query deletes documents matching the query. | high |
 | `es-curl-close-index` | curl -X POST to _close closes an index, making it unavailable for reads/writes. | high |
-| `es-curl-delete-index` | curl -X DELETE against an Elasticsearch index (or _all/*) deletes data permanently. | high |
+| `es-curl-delete-index` | curl -X DELETE against an Elasticsearch index (or _all/*) deletes data permanently. | critical |
 | `es-curl-cluster-settings` | curl -X PUT to /_cluster/settings changes cluster settings and can be dangerous. | high |
-| `es-http-delete-doc` | http DELETE against /_doc deletes a document from Elasticsearch. | high |
+| `es-http-delete-doc` | http DELETE against /_doc deletes a document from Elasticsearch. | medium |
 | `es-http-delete-by-query` | http POST to _delete_by_query deletes documents matching the query. | high |
 | `es-http-close-index` | http POST to _close closes an index, making it unavailable for reads/writes. | high |
-| `es-http-delete-index` | http DELETE against an Elasticsearch index (or _all/*) deletes data permanently. | high |
+| `es-http-delete-index` | http DELETE against an Elasticsearch index (or _all/*) deletes data permanently. | critical |
 | `es-http-cluster-settings` | http PUT to /_cluster/settings changes cluster settings and can be dangerous. | high |
 
 ### Allowlist Guidance
@@ -94,9 +94,6 @@ Protects against destructive OpenSearch REST API operations and AWS CLI domain d
 Commands containing these keywords are checked against this pack:
 
 - `opensearch`
-- `aws`
-- `curl`
-- `http`
 - `9200`
 - `_search`
 - `_cluster`
@@ -104,6 +101,9 @@ Commands containing these keywords are checked against this pack:
 - `_doc`
 - `_all`
 - `_delete_by_query`
+- `aws`
+- `curl`
+- `http`
 
 ### Safe Patterns (Allowed)
 
@@ -126,18 +126,18 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `os-curl-delete-doc` | curl -X DELETE against /_doc deletes a document from OpenSearch. | high |
+| `os-curl-delete-doc` | curl -X DELETE against /_doc deletes a document from OpenSearch. | medium |
 | `os-curl-delete-by-query` | curl -X POST to _delete_by_query deletes documents matching the query. | high |
 | `os-curl-close-index` | curl -X POST to _close closes an index, making it unavailable for reads/writes. | high |
-| `os-curl-delete-index` | curl -X DELETE against an OpenSearch index (or _all/*) deletes data permanently. | high |
-| `os-http-delete-doc` | http DELETE against /_doc deletes a document from OpenSearch. | high |
+| `os-curl-delete-index` | curl -X DELETE against an OpenSearch index (or _all/*) deletes data permanently. | critical |
+| `os-http-delete-doc` | http DELETE against /_doc deletes a document from OpenSearch. | medium |
 | `os-http-delete-by-query` | http POST to _delete_by_query deletes documents matching the query. | high |
 | `os-http-close-index` | http POST to _close closes an index, making it unavailable for reads/writes. | high |
-| `os-http-delete-index` | http DELETE against an OpenSearch index (or _all/*) deletes data permanently. | high |
-| `aws-opensearch-delete-domain` | aws opensearch delete-domain permanently deletes an OpenSearch domain. | high |
+| `os-http-delete-index` | http DELETE against an OpenSearch index (or _all/*) deletes data permanently. | critical |
+| `aws-opensearch-delete-domain` | aws opensearch delete-domain permanently deletes an OpenSearch domain. | critical |
 | `aws-opensearch-delete-inbound-connection` | aws opensearch delete-inbound-connection removes an OpenSearch connection. | high |
 | `aws-opensearch-delete-outbound-connection` | aws opensearch delete-outbound-connection removes an OpenSearch connection. | high |
-| `aws-opensearch-delete-package` | aws opensearch delete-package removes an OpenSearch package. | high |
+| `aws-opensearch-delete-package` | aws opensearch delete-package removes an OpenSearch package. | medium |
 
 ### Allowlist Guidance
 
@@ -190,12 +190,12 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `algolia-indices-delete` | algolia indices delete permanently removes an Algolia index. | high |
+| `algolia-indices-delete` | algolia indices delete permanently removes an Algolia index. | critical |
 | `algolia-indices-clear` | algolia indices clear removes all objects from an Algolia index. | high |
-| `algolia-rules-delete` | algolia rules delete removes index rules. | high |
-| `algolia-synonyms-delete` | algolia synonyms delete removes synonym entries. | high |
+| `algolia-rules-delete` | algolia rules delete removes index rules. | medium |
+| `algolia-synonyms-delete` | algolia synonyms delete removes synonym entries. | medium |
 | `algolia-apikeys-delete` | algolia apikeys delete removes API keys and can break integrations. | high |
-| `algolia-sdk-delete-index` | Algolia SDK deleteIndex removes an index. | high |
+| `algolia-sdk-delete-index` | Algolia SDK deleteIndex removes an index. | critical |
 | `algolia-sdk-clear-objects` | Algolia SDK clearObjects removes all records from an index. | high |
 
 ### Allowlist Guidance
@@ -256,16 +256,16 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `meili-curl-delete-document` | curl -X DELETE against /documents/{id} removes a document from Meilisearch. | high |
+| `meili-curl-delete-document` | curl -X DELETE against /documents/{id} removes a document from Meilisearch. | medium |
 | `meili-curl-delete-documents` | curl -X DELETE against /documents removes documents from Meilisearch. | high |
 | `meili-curl-delete-batch` | curl -X POST to /documents/delete-batch deletes documents in bulk. | high |
 | `meili-curl-delete-key` | curl -X DELETE against /keys removes a Meilisearch API key. | high |
-| `meili-curl-delete-index` | curl -X DELETE against /indexes/{uid} deletes a Meilisearch index. | high |
-| `meili-http-delete-document` | http DELETE against /documents/{id} removes a document from Meilisearch. | high |
+| `meili-curl-delete-index` | curl -X DELETE against /indexes/{uid} deletes a Meilisearch index. | critical |
+| `meili-http-delete-document` | http DELETE against /documents/{id} removes a document from Meilisearch. | medium |
 | `meili-http-delete-documents` | http DELETE against /documents removes documents from Meilisearch. | high |
 | `meili-http-delete-batch` | http POST to /documents/delete-batch deletes documents in bulk. | high |
 | `meili-http-delete-key` | http DELETE against /keys removes a Meilisearch API key. | high |
-| `meili-http-delete-index` | http DELETE against /indexes/{uid} deletes a Meilisearch index. | high |
+| `meili-http-delete-index` | http DELETE against /indexes/{uid} deletes a Meilisearch index. | critical |
 
 ### Allowlist Guidance
 

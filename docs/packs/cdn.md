@@ -47,14 +47,14 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `wrangler-delete` | wrangler delete removes a Worker from Cloudflare. | high |
+| `wrangler-delete` | wrangler delete removes a Worker from Cloudflare. | critical |
 | `wrangler-deployments-rollback` | wrangler deployments rollback reverts to a previous Worker version. | high |
-| `wrangler-kv-key-delete` | wrangler kv:key delete removes a key from KV storage. | high |
-| `wrangler-kv-namespace-delete` | wrangler kv:namespace delete removes an entire KV namespace. | high |
+| `wrangler-kv-key-delete` | wrangler kv:key delete removes a key from KV storage. | medium |
+| `wrangler-kv-namespace-delete` | wrangler kv:namespace delete removes an entire KV namespace. | critical |
 | `wrangler-kv-bulk-delete` | wrangler kv:bulk delete removes multiple keys from KV storage. | high |
-| `wrangler-r2-object-delete` | wrangler r2 object delete removes an object from R2 storage. | high |
-| `wrangler-r2-bucket-delete` | wrangler r2 bucket delete removes an entire R2 bucket. | high |
-| `wrangler-d1-delete` | wrangler d1 delete removes a D1 database. | high |
+| `wrangler-r2-object-delete` | wrangler r2 object delete removes an object from R2 storage. | medium |
+| `wrangler-r2-bucket-delete` | wrangler r2 bucket delete removes an entire R2 bucket. | critical |
+| `wrangler-d1-delete` | wrangler d1 delete removes a D1 database. | critical |
 
 ### Allowlist Guidance
 
@@ -116,17 +116,17 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `fastly-service-delete` | fastly service delete removes a Fastly service entirely. | high |
+| `fastly-service-delete` | fastly service delete removes a Fastly service entirely. | critical |
 | `fastly-domain-delete` | fastly domain delete removes a domain from a service. | high |
 | `fastly-backend-delete` | fastly backend delete removes a backend origin server. | high |
 | `fastly-vcl-delete` | fastly vcl delete removes VCL configuration. | high |
 | `fastly-dictionary-delete` | fastly dictionary delete removes an edge dictionary. | high |
-| `fastly-dictionary-item-delete` | fastly dictionary-item delete removes dictionary entries. | high |
+| `fastly-dictionary-item-delete` | fastly dictionary-item delete removes dictionary entries. | medium |
 | `fastly-acl-delete` | fastly acl delete removes an access control list. | high |
-| `fastly-acl-entry-delete` | fastly acl-entry delete removes ACL entries. | high |
+| `fastly-acl-entry-delete` | fastly acl-entry delete removes ACL entries. | medium |
 | `fastly-logging-delete` | fastly logging delete removes logging endpoints. | high |
 | `fastly-version-activate` | fastly service version activate can cause service disruption if misconfigured. | high |
-| `fastly-compute-delete` | fastly compute delete removes compute package. | high |
+| `fastly-compute-delete` | fastly compute delete removes compute package. | critical |
 
 ### Allowlist Guidance
 
@@ -186,13 +186,13 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `cloudfront-delete-distribution` | aws cloudfront delete-distribution removes a CloudFront distribution. | high |
+| `cloudfront-delete-distribution` | aws cloudfront delete-distribution removes a CloudFront distribution. | critical |
 | `cloudfront-delete-cache-policy` | aws cloudfront delete-cache-policy removes a cache policy. | high |
 | `cloudfront-delete-origin-request-policy` | aws cloudfront delete-origin-request-policy removes an origin request policy. | high |
 | `cloudfront-delete-function` | aws cloudfront delete-function removes a CloudFront function. | high |
 | `cloudfront-delete-response-headers-policy` | aws cloudfront delete-response-headers-policy removes a response headers policy. | high |
-| `cloudfront-delete-key-group` | aws cloudfront delete-key-group removes a key group used for signed URLs. | high |
-| `cloudfront-create-invalidation` | aws cloudfront create-invalidation creates a cache invalidation (has cost implications). | high |
+| `cloudfront-delete-key-group` | aws cloudfront delete-key-group removes a key group used for signed URLs. | critical |
+| `cloudfront-create-invalidation` | aws cloudfront create-invalidation creates a cache invalidation (has cost implications). | medium |
 
 ### Allowlist Guidance
 

@@ -54,13 +54,13 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `flipt-flag-delete` | flipt flag delete permanently removes a feature flag. This cannot be undone. | high |
+| `flipt-flag-delete` | flipt flag delete permanently removes a feature flag. This cannot be undone. | critical |
 | `flipt-segment-delete` | flipt segment delete removes a segment and its constraints. | high |
-| `flipt-namespace-delete` | flipt namespace delete removes a namespace and all its flags, segments, and rules. | high |
+| `flipt-namespace-delete` | flipt namespace delete removes a namespace and all its flags, segments, and rules. | critical |
 | `flipt-rule-delete` | flipt rule delete removes a targeting rule from a flag. | high |
-| `flipt-constraint-delete` | flipt constraint delete removes a constraint from a segment. | high |
+| `flipt-constraint-delete` | flipt constraint delete removes a constraint from a segment. | medium |
 | `flipt-variant-delete` | flipt variant delete removes a variant from a flag. | high |
-| `flipt-distribution-delete` | flipt distribution delete removes a distribution from a rule. | high |
+| `flipt-distribution-delete` | flipt distribution delete removes a distribution from a rule. | medium |
 | `flipt-api-delete` | DELETE request to Flipt API can remove flags, segments, or rules. | high |
 
 ### Allowlist Guidance
@@ -128,16 +128,16 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `ldcli-flags-delete` | ldcli flags delete permanently removes a feature flag. This cannot be undone. | high |
+| `ldcli-flags-delete` | ldcli flags delete permanently removes a feature flag. This cannot be undone. | critical |
 | `ldcli-flags-archive` | ldcli flags archive soft-deletes a feature flag. While recoverable, this affects all environments. | high |
-| `ldcli-projects-delete` | ldcli projects delete removes an entire project and all its flags, environments, and settings. | high |
-| `ldcli-environments-delete` | ldcli environments delete removes an environment and all its flag configurations. | high |
+| `ldcli-projects-delete` | ldcli projects delete removes an entire project and all its flags, environments, and settings. | critical |
+| `ldcli-environments-delete` | ldcli environments delete removes an environment and all its flag configurations. | critical |
 | `ldcli-segments-delete` | ldcli segments delete removes a user segment and its targeting rules. | high |
 | `ldcli-metrics-delete` | ldcli metrics delete removes a metric and its experiment data. | high |
-| `launchdarkly-api-delete-environments` | DELETE request to LaunchDarkly API removes environments. | high |
-| `launchdarkly-api-delete-flags` | DELETE request to LaunchDarkly API removes feature flags. | high |
+| `launchdarkly-api-delete-environments` | DELETE request to LaunchDarkly API removes environments. | critical |
+| `launchdarkly-api-delete-flags` | DELETE request to LaunchDarkly API removes feature flags. | critical |
 | `launchdarkly-api-delete-segments` | DELETE request to LaunchDarkly API removes segments. | high |
-| `launchdarkly-api-delete-projects` | DELETE request to LaunchDarkly API removes projects. | high |
+| `launchdarkly-api-delete-projects` | DELETE request to LaunchDarkly API removes projects. | critical |
 | `launchdarkly-api-delete-generic` | DELETE request to LaunchDarkly API can remove resources. | high |
 
 ### Allowlist Guidance
@@ -204,14 +204,14 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `split-splits-delete` | split splits delete permanently removes a split definition. This cannot be undone. | high |
+| `split-splits-delete` | split splits delete permanently removes a split definition. This cannot be undone. | critical |
 | `split-splits-kill` | split splits kill terminates a split, stopping all traffic to treatments. | high |
-| `split-environments-delete` | split environments delete removes an environment and all its configurations. | high |
+| `split-environments-delete` | split environments delete removes an environment and all its configurations. | critical |
 | `split-segments-delete` | split segments delete removes a segment and its targeting rules. | high |
-| `split-traffic-types-delete` | split traffic-types delete removes a traffic type. This affects all splits using it. | high |
-| `split-workspaces-delete` | split workspaces delete removes a workspace and all its resources. | high |
-| `split-api-delete-splits` | DELETE request to Split.io API removes split definitions. | high |
-| `split-api-delete-environments` | DELETE request to Split.io API removes environments. | high |
+| `split-traffic-types-delete` | split traffic-types delete removes a traffic type. This affects all splits using it. | critical |
+| `split-workspaces-delete` | split workspaces delete removes a workspace and all its resources. | critical |
+| `split-api-delete-splits` | DELETE request to Split.io API removes split definitions. | critical |
+| `split-api-delete-environments` | DELETE request to Split.io API removes environments. | critical |
 | `split-api-delete-segments` | DELETE request to Split.io API removes segments. | high |
 | `split-api-delete-generic` | DELETE request to Split.io API can remove resources. | high |
 
@@ -277,14 +277,14 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `unleash-features-delete` | unleash features delete permanently removes a feature toggle. This cannot be undone. | high |
+| `unleash-features-delete` | unleash features delete permanently removes a feature toggle. This cannot be undone. | critical |
 | `unleash-features-archive` | unleash features archive soft-deletes a feature toggle. | high |
-| `unleash-projects-delete` | unleash projects delete removes a project and all its feature toggles. | high |
-| `unleash-environments-delete` | unleash environments delete removes an environment. | high |
+| `unleash-projects-delete` | unleash projects delete removes a project and all its feature toggles. | critical |
+| `unleash-environments-delete` | unleash environments delete removes an environment. | critical |
 | `unleash-strategies-delete` | unleash strategies delete removes a custom strategy. | high |
 | `unleash-api-keys-delete` | unleash api-keys delete removes an API key. | high |
-| `unleash-api-delete-features` | DELETE request to Unleash API removes feature toggles. | high |
-| `unleash-api-delete-projects` | DELETE request to Unleash API removes projects. | high |
+| `unleash-api-delete-features` | DELETE request to Unleash API removes feature toggles. | critical |
+| `unleash-api-delete-projects` | DELETE request to Unleash API removes projects. | critical |
 | `unleash-api-delete-generic` | DELETE request to Unleash API can remove resources. | high |
 
 ### Allowlist Guidance

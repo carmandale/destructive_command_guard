@@ -28,9 +28,9 @@ These patterns match safe commands that are always allowed:
 
 | Pattern Name | Pattern |
 |--------------|----------|
-| `rsync-dry-run` | `rsync\b.*\s--dry-run\b` |
-| `rsync-short-dry-run` | `rsync\b.*\s+-[A-Za-z]*n[A-Za-z]*\b` |
-| `rsync-list-only` | `rsync\b.*\s--list-only\b` |
+| `rsync-dry-run` | `rsync\b[^;&\|\n]*\s--dry-run\b` |
+| `rsync-short-dry-run` | `rsync\b[^;&\|\n]*\s+-[A-Za-z]*n[A-Za-z]*\b` |
+| `rsync-list-only` | `rsync\b[^;&\|\n]*\s--list-only\b` |
 
 ### Destructive Patterns (Blocked)
 
@@ -74,6 +74,8 @@ Commands containing these keywords are checked against this pack:
 
 - `ssh`
 - `ssh-keygen`
+- `ssh-add`
+- `ssh-agent`
 - `ssh-keyscan`
 
 ### Safe Patterns (Allowed)
@@ -84,8 +86,8 @@ These patterns match safe commands that are always allowed:
 |--------------|----------|
 | `ssh-version` | `ssh\s+-V\b` |
 | `ssh-version-long` | `ssh\s+--version\b` |
-| `ssh-keygen-list` | `ssh-keygen\s+.*-l\b` |
-| `ssh-keygen-fingerprint` | `ssh-keygen\s+.*-lf?\b` |
+| `ssh-keygen-list` | `ssh-keygen\s+[^;&\|\n]*-l\b` |
+| `ssh-keygen-fingerprint` | `ssh-keygen\s+[^;&\|\n]*-lf?\b` |
 | `ssh-keyscan` | `ssh-keyscan\b` |
 | `ssh-add-list` | `ssh-add\s+-[lL]\b` |
 | `ssh-agent` | `ssh-agent\b` |
@@ -98,12 +100,12 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `ssh-remote-rm-rf` | SSH remote execution contains destructive rm -rf command. | high |
+| `ssh-remote-rm-rf` | SSH remote execution contains destructive rm -rf command. | critical |
 | `ssh-remote-git-reset-hard` | SSH remote execution contains destructive git reset --hard command. | high |
 | `ssh-remote-git-clean` | SSH remote execution contains destructive git clean -f command. | high |
-| `ssh-keygen-remove-host` | ssh-keygen -R removes entries from known_hosts file. | high |
-| `ssh-add-delete-all` | ssh-add -d/-D removes identities from the SSH agent. | high |
-| `ssh-remote-sudo-rm` | SSH remote execution with sudo rm is high-risk. | high |
+| `ssh-keygen-remove-host` | ssh-keygen -R removes entries from known_hosts file. | medium |
+| `ssh-add-delete-all` | ssh-add -d/-D removes identities from the SSH agent. | medium |
+| `ssh-remote-sudo-rm` | SSH remote execution with sudo rm is high-risk. | critical |
 
 ### Allowlist Guidance
 
@@ -144,11 +146,10 @@ These patterns match safe commands that are always allowed:
 
 | Pattern Name | Pattern |
 |--------------|----------|
-| `scp-help` | `scp\b.*\s--?h(elp)?\b` |
-| `scp-download` | `scp\b.*\s(?:\S+@)?\S+:\S+\s+\.\S*\s*$` |
-| `scp-to-home` | `scp\b.*\s(?:(?:\S+@)?\S+:)?~/\S+\s*$` |
-| `scp-to-tmp` | `scp\b.*\s(?:(?:\S+@)?\S+:)?/tmp/\S*\s*$` |
-| `scp-to-var-tmp` | `scp\b.*\s(?:(?:\S+@)?\S+:)?/var/tmp(?:/\S*)?\s*$` |
+| `scp-download` | `scp\b[^;&\|\n]*[^\S\n](?:\S+@)?\S+:\S+[^\S\n]+\.\S*\s*(?:$\|[;&\|\n])` |
+| `scp-to-home` | `scp\b[^;&\|\n]*[^\S\n](?:(?:\S+@)?\S+:)?~/\S+\s*(?:$\|[;&\|\n])` |
+| `scp-to-tmp` | `scp\b[^;&\|\n]*[^\S\n](?:(?:\S+@)?\S+:)?/tmp/\S*\s*(?:$\|[;&\|\n])` |
+| `scp-to-var-tmp` | `scp\b[^;&\|\n]*[^\S\n](?:(?:\S+@)?\S+:)?/var/tmp(?:/\S*)?\s*(?:$\|[;&\|\n])` |
 
 ### Destructive Patterns (Blocked)
 
@@ -156,13 +157,13 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `scp-recursive-root` | scp -r to root (/) is extremely dangerous. | high |
+| `scp-recursive-root` | scp -r to root (/) is extremely dangerous. | critical |
 | `scp-to-etc` | scp to /etc/ can overwrite system configuration. | high |
 | `scp-to-var` | scp to /var/ can overwrite system data. | high |
-| `scp-to-boot` | scp to /boot/ can corrupt boot configuration. | high |
+| `scp-to-boot` | scp to /boot/ can corrupt boot configuration. | critical |
 | `scp-to-usr` | scp to /usr/ can overwrite system binaries. | high |
-| `scp-to-bin` | scp to /bin/ or /sbin/ can overwrite system binaries. | high |
-| `scp-to-lib` | scp to /lib/ can overwrite system libraries. | high |
+| `scp-to-bin` | scp to /bin/ or /sbin/ can overwrite system binaries. | critical |
+| `scp-to-lib` | scp to /lib/ can overwrite system libraries. | critical |
 
 ### Allowlist Guidance
 

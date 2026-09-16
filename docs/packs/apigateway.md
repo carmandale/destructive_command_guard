@@ -64,24 +64,24 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `apigateway-delete-rest-api` | aws apigateway delete-rest-api permanently removes a REST API and all its resources. | high |
+| `apigateway-delete-rest-api` | aws apigateway delete-rest-api permanently removes a REST API and all its resources. | critical |
 | `apigateway-delete-resource` | aws apigateway delete-resource removes an API resource and its methods. | high |
-| `apigateway-delete-method` | aws apigateway delete-method removes an HTTP method from a resource. | high |
+| `apigateway-delete-method` | aws apigateway delete-method removes an HTTP method from a resource. | medium |
 | `apigateway-delete-stage` | aws apigateway delete-stage removes a deployment stage from an API. | high |
-| `apigateway-delete-deployment` | aws apigateway delete-deployment removes a deployment from an API. | high |
+| `apigateway-delete-deployment` | aws apigateway delete-deployment removes a deployment from an API. | medium |
 | `apigateway-delete-api-key` | aws apigateway delete-api-key removes an API key. | high |
 | `apigateway-delete-authorizer` | aws apigateway delete-authorizer removes an authorizer from an API. | high |
-| `apigateway-delete-model` | aws apigateway delete-model removes a model from an API. | high |
+| `apigateway-delete-model` | aws apigateway delete-model removes a model from an API. | medium |
 | `apigateway-delete-domain-name` | aws apigateway delete-domain-name removes a custom domain name. | high |
 | `apigateway-delete-usage-plan` | aws apigateway delete-usage-plan removes a usage plan. | high |
-| `apigatewayv2-delete-api` | aws apigatewayv2 delete-api permanently removes an HTTP API. | high |
+| `apigatewayv2-delete-api` | aws apigatewayv2 delete-api permanently removes an HTTP API. | critical |
 | `apigatewayv2-delete-route` | aws apigatewayv2 delete-route removes a route from an HTTP API. | high |
 | `apigatewayv2-delete-integration` | aws apigatewayv2 delete-integration removes an integration from an HTTP API. | high |
 | `apigatewayv2-delete-stage` | aws apigatewayv2 delete-stage removes a stage from an HTTP API. | high |
 | `apigatewayv2-delete-authorizer` | aws apigatewayv2 delete-authorizer removes an authorizer from an HTTP API. | high |
 | `apigatewayv2-delete-domain-name` | aws apigatewayv2 delete-domain-name removes a custom domain name from an HTTP API. | high |
-| `apigatewayv2-delete-route-response` | aws apigatewayv2 delete-route-response removes a route response from an HTTP API. | high |
-| `apigatewayv2-delete-integration-response` | aws apigatewayv2 delete-integration-response removes an integration response. | high |
+| `apigatewayv2-delete-route-response` | aws apigatewayv2 delete-route-response removes a route response from an HTTP API. | medium |
+| `apigatewayv2-delete-integration-response` | aws apigatewayv2 delete-integration-response removes an integration response. | medium |
 
 ### Allowlist Guidance
 
@@ -145,17 +145,17 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `deck-reset` | deck reset removes ALL Kong configuration. This is extremely dangerous and irreversible. | high |
+| `deck-reset` | deck reset removes ALL Kong configuration. This is extremely dangerous and irreversible. | critical |
 | `deck-sync-destructive` | deck sync with --select-tag can remove entities not matching the tag. | high |
 | `kong-admin-delete-services` | DELETE request to Kong Admin API removes services. | high |
 | `kong-admin-delete-routes` | DELETE request to Kong Admin API removes routes. | high |
-| `kong-admin-delete-plugins` | DELETE request to Kong Admin API removes plugins. | high |
+| `kong-admin-delete-plugins` | DELETE request to Kong Admin API removes plugins. | medium |
 | `kong-admin-delete-consumers` | DELETE request to Kong Admin API removes consumers. | high |
 | `kong-admin-delete-upstreams` | DELETE request to Kong Admin API removes upstreams. | high |
-| `kong-admin-delete-targets` | DELETE request to Kong Admin API removes targets. | high |
+| `kong-admin-delete-targets` | DELETE request to Kong Admin API removes targets. | medium |
 | `kong-admin-delete-certificates` | DELETE request to Kong Admin API removes certificates. | high |
 | `kong-admin-delete-snis` | DELETE request to Kong Admin API removes SNIs. | high |
-| `kong-admin-delete-generic` | DELETE request to Kong Admin API can remove configuration. | high |
+| `kong-admin-delete-generic` | DELETE request to Kong Admin API can remove configuration. | medium |
 
 ### Allowlist Guidance
 
@@ -229,16 +229,16 @@ These patterns match potentially destructive commands:
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
 | `gcloud-apigee-apis-delete` | gcloud apigee apis delete removes an API proxy from Apigee. | high |
-| `gcloud-apigee-environments-delete` | gcloud apigee environments delete removes an Apigee environment. | high |
+| `gcloud-apigee-environments-delete` | gcloud apigee environments delete removes an Apigee environment. | critical |
 | `gcloud-apigee-developers-delete` | gcloud apigee developers delete removes a developer from Apigee. | high |
 | `gcloud-apigee-products-delete` | gcloud apigee products delete removes an API product from Apigee. | high |
-| `gcloud-apigee-organizations-delete` | gcloud apigee organizations delete removes an entire Apigee organization. EXTREMELY DANGEROUS. | high |
-| `gcloud-apigee-deployments-undeploy` | gcloud apigee deployments undeploy removes an API deployment. | high |
+| `gcloud-apigee-organizations-delete` | gcloud apigee organizations delete removes an entire Apigee organization. | critical |
+| `gcloud-apigee-deployments-undeploy` | gcloud apigee deployments undeploy removes an API deployment. | medium |
 | `apigeecli-apis-delete` | apigeecli apis delete removes an API proxy from Apigee. | high |
 | `apigeecli-products-delete` | apigeecli products delete removes an API product from Apigee. | high |
 | `apigeecli-developers-delete` | apigeecli developers delete removes a developer from Apigee. | high |
-| `apigeecli-envs-delete` | apigeecli envs delete removes an Apigee environment. | high |
-| `apigeecli-orgs-delete` | apigeecli orgs delete removes an entire Apigee organization. EXTREMELY DANGEROUS. | high |
+| `apigeecli-envs-delete` | apigeecli envs delete removes an Apigee environment. | critical |
+| `apigeecli-orgs-delete` | apigeecli orgs delete removes an entire Apigee organization. | critical |
 | `apigeecli-apps-delete` | apigeecli apps delete removes a developer app from Apigee. | high |
 | `apigeecli-keyvaluemaps-delete` | apigeecli keyvaluemaps delete removes a key-value map from Apigee. | high |
 | `apigeecli-targetservers-delete` | apigeecli targetservers delete removes a target server from Apigee. | high |

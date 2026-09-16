@@ -21,6 +21,7 @@ Protects against destructive Terraform operations like destroy, taint, and apply
 Commands containing these keywords are checked against this pack:
 
 - `terraform`
+- `tofu`
 - `destroy`
 - `taint`
 - `state`
@@ -49,14 +50,14 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `destroy` | terraform destroy removes ALL managed infrastructure. Use 'terraform plan -destroy' first. | high |
-| `plan-destroy` | terraform plan -destroy shows what would be destroyed. Review carefully before applying. | high |
+| `destroy` | terraform destroy removes ALL managed infrastructure. Use 'terraform plan -destroy' first. | critical |
+| `plan-destroy` | terraform plan -destroy shows what would be destroyed. Review carefully before applying. | medium |
 | `apply-auto-approve` | terraform apply -auto-approve skips confirmation. Remove -auto-approve for safety. | high |
 | `taint` | terraform taint marks a resource to be destroyed and recreated on next apply. | high |
 | `state-rm` | terraform state rm removes resource from state without destroying it. Resource becomes unmanaged. | high |
 | `state-mv` | terraform state mv moves resources in state. Incorrect moves can cause resource recreation. | high |
 | `force-unlock` | terraform force-unlock removes state lock. Only use if lock is stale. | high |
-| `workspace-delete` | terraform workspace delete removes a workspace. Ensure it's not in use. | high |
+| `workspace-delete` | terraform workspace delete removes a workspace. Ensure it's not in use. | medium |
 
 ### Allowlist Guidance
 
@@ -90,6 +91,7 @@ Protects against destructive Ansible operations like dangerous shell commands an
 Commands containing these keywords are checked against this pack:
 
 - `ansible`
+- `ansible-playbook`
 - `playbook`
 
 ### Safe Patterns (Allowed)
@@ -113,10 +115,10 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `shell-rm-rf` | Ansible shell/command with 'rm -rf' is destructive. Review carefully. | high |
+| `shell-rm-rf` | Ansible shell/command with 'rm -rf' is destructive. Review carefully. | critical |
 | `shell-reboot` | Ansible shell/command with reboot/shutdown affects system availability. | high |
 | `playbook-all-hosts` | ansible-playbook without --check or --limit may affect all hosts. Use --check first. | high |
-| `extra-vars-delete` | Ansible extra-vars contains potentially destructive keywords. Review carefully. | high |
+| `extra-vars-delete` | Ansible extra-vars contains potentially destructive keywords. Review carefully. | medium |
 
 ### Allowlist Guidance
 
@@ -175,11 +177,11 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `destroy` | pulumi destroy removes ALL managed infrastructure. Use 'pulumi preview --diff' first. | high |
+| `destroy` | pulumi destroy removes ALL managed infrastructure. Use 'pulumi preview --diff' first. | critical |
 | `up-yes` | pulumi up -y skips confirmation. Remove -y flag for safety. | high |
 | `state-delete` | pulumi state delete removes resource from state without destroying it. | high |
 | `stack-rm` | pulumi stack rm removes the stack. Use --force only if stack is empty. | high |
-| `refresh-yes` | pulumi refresh -y auto-approves state changes. Review changes first. | high |
+| `refresh-yes` | pulumi refresh -y auto-approves state changes. Review changes first. | medium |
 | `cancel` | pulumi cancel terminates an in-progress update, which may leave resources in inconsistent state. | high |
 
 ### Allowlist Guidance

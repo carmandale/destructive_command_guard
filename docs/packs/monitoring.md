@@ -40,8 +40,8 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `splunk-remove-index` | splunk remove index deletes an index and its data permanently. | high |
-| `splunk-clean-eventdata` | splunk clean eventdata permanently deletes indexed data. | high |
+| `splunk-remove-index` | splunk remove index deletes an index and its data permanently. | critical |
+| `splunk-clean-eventdata` | splunk clean eventdata permanently deletes indexed data. | critical |
 | `splunk-delete-user-role` | splunk delete user/role removes access configurations. Verify before deleting. | high |
 | `splunk-api-delete` | Splunk REST DELETE calls can permanently remove objects. Verify the endpoint. | high |
 
@@ -153,12 +153,12 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `pd-service-delete` | pd service delete removes a PagerDuty service, which can break incident routing. | high |
+| `pd-service-delete` | pd service delete removes a PagerDuty service, which can break incident routing. | critical |
 | `pd-schedule-delete` | pd schedule delete removes a PagerDuty schedule. | high |
 | `pd-escalation-policy-delete` | pd escalation-policy delete removes a PagerDuty escalation policy. | high |
 | `pd-user-delete` | pd user delete removes a PagerDuty user. | high |
 | `pd-team-delete` | pd team delete removes a PagerDuty team. | high |
-| `pagerduty-api-delete-service` | PagerDuty API DELETE /services/{id} deletes a PagerDuty service. | high |
+| `pagerduty-api-delete-service` | PagerDuty API DELETE /services/{id} deletes a PagerDuty service. | critical |
 | `pagerduty-api-delete-schedule` | PagerDuty API DELETE /schedules/{id} deletes a PagerDuty schedule. | high |
 
 ### Allowlist Guidance
@@ -281,8 +281,8 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `prometheus-rules-file-delete` | Deleting Prometheus rule/config files can break alerting and monitoring coverage. | high |
-| `prometheus-tsdb-delete-series` | Prometheus TSDB delete_series permanently deletes time series data. | high |
+| `prometheus-rules-file-delete` | Deleting Prometheus rule/config files can break alerting and monitoring coverage. | critical |
+| `prometheus-tsdb-delete-series` | Prometheus TSDB delete_series permanently deletes time series data. | critical |
 | `kubectl-delete-prometheus-operator-resources` | kubectl delete of Prometheus Operator resources (PrometheusRule/ServiceMonitor/PodMonitor) removes alerting/target configuration. | high |
 | `grafana-cli-plugins-uninstall` | grafana-cli plugins uninstall removes a Grafana plugin, potentially breaking dashboards. | high |
 | `grafana-api-delete-dashboard` | Grafana API DELETE /api/dashboards/... deletes dashboards. | high |

@@ -49,11 +49,11 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `s3-rb` | aws s3 rb removes an S3 bucket and is destructive. | high |
+| `s3-rb` | aws s3 rb removes an S3 bucket and is destructive. | critical |
 | `s3-rm` | aws s3 rm deletes S3 objects and is destructive. | high |
 | `s3-sync-delete` | aws s3 sync --delete removes destination objects not in source. | high |
-| `s3api-delete-bucket` | aws s3api delete-bucket permanently deletes a bucket. | high |
-| `s3api-delete-object` | aws s3api delete-object permanently deletes an object. | high |
+| `s3api-delete-bucket` | aws s3api delete-bucket permanently deletes a bucket. | critical |
+| `s3api-delete-object` | aws s3api delete-object permanently deletes an object. | medium |
 | `s3api-delete-objects` | aws s3api delete-objects permanently deletes multiple objects. | high |
 
 ### Allowlist Guidance
@@ -118,10 +118,10 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `gsutil-rb` | gsutil rb removes a GCS bucket. | high |
+| `gsutil-rb` | gsutil rb removes a GCS bucket. | critical |
 | `gsutil-rm` | gsutil rm deletes objects from GCS. | high |
 | `gsutil-rsync-delete` | gsutil rsync -d deletes destination objects not in source. | high |
-| `gcloud-storage-buckets-delete` | gcloud storage buckets delete removes a GCS bucket. | high |
+| `gcloud-storage-buckets-delete` | gcloud storage buckets delete removes a GCS bucket. | critical |
 | `gcloud-storage-objects-delete` | gcloud storage objects delete removes objects from GCS. | high |
 | `gcloud-storage-rm` | gcloud storage rm removes objects from GCS. | high |
 
@@ -185,12 +185,12 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `mc-rb` | mc rb removes a MinIO bucket. | high |
+| `mc-rb` | mc rb removes a MinIO bucket. | critical |
 | `mc-rm` | mc rm deletes objects from MinIO. | high |
-| `mc-admin-bucket-delete` | mc admin bucket delete removes a bucket via admin API. | high |
+| `mc-admin-bucket-delete` | mc admin bucket delete removes a bucket via admin API. | critical |
 | `mc-mirror-remove` | mc mirror --remove deletes destination objects not in source. | high |
 | `mc-admin-user-remove` | mc admin user remove/disable affects user access. | high |
-| `mc-admin-policy-remove` | mc admin policy remove/unset modifies access policies. | high |
+| `mc-admin-policy-remove` | mc admin policy remove/unset modifies access policies. | medium |
 
 ### Allowlist Guidance
 
@@ -258,10 +258,10 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `az-storage-container-delete` | az storage container delete removes an Azure storage container. | high |
+| `az-storage-container-delete` | az storage container delete removes an Azure storage container. | critical |
 | `az-storage-blob-delete-batch` | az storage blob delete-batch removes multiple blobs from Azure storage. | high |
-| `az-storage-blob-delete` | az storage blob delete removes a blob from Azure storage. | high |
-| `az-storage-account-delete` | az storage account delete removes an entire Azure storage account. | high |
+| `az-storage-blob-delete` | az storage blob delete removes a blob from Azure storage. | medium |
+| `az-storage-account-delete` | az storage account delete removes an entire Azure storage account. | critical |
 | `azcopy-remove` | azcopy remove deletes files from Azure storage. | high |
 | `azcopy-sync-delete` | azcopy sync --delete-destination removes destination files not in source. | high |
 

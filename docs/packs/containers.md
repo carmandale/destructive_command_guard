@@ -113,10 +113,10 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `down-volumes` | docker-compose down -v removes volumes and their data permanently. | high |
+| `down-volumes` | docker-compose down -v removes volumes and their data permanently. | critical |
 | `down-rmi-all` | docker-compose down --rmi all removes all images used by services. | high |
 | `rm-volumes` | docker-compose rm -v removes volumes attached to containers. | high |
-| `rm-force` | docker-compose rm -f forcibly removes containers without confirmation. | high |
+| `rm-force` | docker-compose rm -f forcibly removes containers without confirmation. | medium |
 
 ### Allowlist Guidance
 
@@ -174,8 +174,8 @@ These patterns match potentially destructive commands:
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
 | `system-prune` | podman system prune removes ALL unused containers, pods, images. Use 'podman system df' to preview. | high |
-| `volume-prune` | podman volume prune removes ALL unused volumes and their data permanently. | high |
-| `pod-prune` | podman pod prune removes ALL stopped pods. | high |
+| `volume-prune` | podman volume prune removes ALL unused volumes and their data permanently. | critical |
+| `pod-prune` | podman pod prune removes ALL stopped pods. | medium |
 | `image-prune` | podman image prune removes unused images. Use 'podman images' to review first. | medium |
 | `container-prune` | podman container prune removes ALL stopped containers. | medium |
 | `rm-force` | podman rm -f forcibly removes containers, potentially losing data. | high |
@@ -202,3 +202,4 @@ risk_acknowledged = true
 ```
 
 ---
+

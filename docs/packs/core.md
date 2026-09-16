@@ -27,12 +27,12 @@ These patterns match safe commands that are always allowed:
 
 | Pattern Name | Pattern |
 |--------------|----------|
-| `checkout-new-branch` | `git\s+(?:\S+\s+)*checkout\s+-b\s+` |
-| `checkout-orphan` | `git\s+(?:\S+\s+)*checkout\s+--orphan\s+` |
-| `restore-staged-long` | `git\s+(?:\S+\s+)*restore\s+--staged\s+(?!.*--worktree)(?!.*-W\b)` |
-| `restore-staged-short` | `git\s+(?:\S+\s+)*restore\s+-S\s+(?!.*--worktree)(?!.*-W\b)` |
-| `clean-dry-run-short` | `git\s+(?:\S+\s+)*clean\s+-[a-z]*n[a-z]*` |
-| `clean-dry-run-long` | `git\s+(?:\S+\s+)*clean\s+--dry-run` |
+| `checkout-new-branch` | `git[^\S\n]+(?:[^\s;&\|]+[^\S\n]+)*checkout\s+-b\s+` |
+| `checkout-orphan` | `git[^\S\n]+(?:[^\s;&\|]+[^\S\n]+)*checkout\s+--orphan\s+` |
+| `restore-staged-long` | `git[^\S\n]+(?:[^\s;&\|]+[^\S\n]+)*restore\s+--staged\s+(?!.*--worktree)(?!.*-W\b)` |
+| `restore-staged-short` | `git[^\S\n]+(?:[^\s;&\|]+[^\S\n]+)*restore\s+-S\s+(?!.*--worktree)(?!.*-W\b)` |
+| `clean-dry-run-short` | `git[^\S\n]+(?:[^\s;&\|]+[^\S\n]+)*clean\s+-[a-z]*n[a-z]*` |
+| `clean-dry-run-long` | `git[^\S\n]+(?:[^\s;&\|]+[^\S\n]+)*clean\s+--dry-run` |
 
 ### Destructive Patterns (Blocked)
 
@@ -85,6 +85,7 @@ Protects against dangerous rm -rf commands outside temp directories
 Commands containing these keywords are checked against this pack:
 
 - `rm`
+- `/rm`
 
 ### Safe Patterns (Allowed)
 
@@ -98,28 +99,28 @@ These patterns match safe commands that are always allowed:
 | `rm-fr-var-tmp` | `^rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+(?:/var/tmp/(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))\S*(?:\s+\|$))+$` |
 | `rm-rf-tmpdir` | `^rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+(?:\$TMPDIR/(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))\S*(?:\s+\|$))+$` |
 | `rm-fr-tmpdir` | `^rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+(?:\$TMPDIR/(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))\S*(?:\s+\|$))+$` |
-| `rm-rf-tmpdir-brace` | `^rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+(?:\$\{TMPDIR(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))\S*(?:\s+\|$))+$` |
-| `rm-fr-tmpdir-brace` | `^rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+(?:\$\{TMPDIR(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))\S*(?:\s+\|$))+$` |
+| `rm-rf-tmpdir-brace` | `^rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+(?:\$\{TMPDIR\}/(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))\S*(?:\s+\|$))+$` |
+| `rm-fr-tmpdir-brace` | `^rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+(?:\$\{TMPDIR\}/(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))\S*(?:\s+\|$))+$` |
 | `rm-rf-tmpdir-quoted` | `^rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+(?:"\$TMPDIR/(?!(?:[^"]*/)?\.\.(?:/\|"))[^"]*"(?:\s+\|$))+$` |
 | `rm-fr-tmpdir-quoted` | `^rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+(?:"\$TMPDIR/(?!(?:[^"]*/)?\.\.(?:/\|"))[^"]*"(?:\s+\|$))+$` |
-| `rm-rf-tmpdir-brace-quoted` | `^rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+(?:"\$\{TMPDIR(?!(?:[^"]*/)?\.\.(?:/\|"))[^"]*"(?:\s+\|$))+$` |
-| `rm-fr-tmpdir-brace-quoted` | `^rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+(?:"\$\{TMPDIR(?!(?:[^"]*/)?\.\.(?:/\|"))[^"]*"(?:\s+\|$))+$` |
+| `rm-rf-tmpdir-brace-quoted` | `^rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+(?:"\$\{TMPDIR\}/(?!(?:[^"]*/)?\.\.(?:/\|"))[^"]*"(?:\s+\|$))+$` |
+| `rm-fr-tmpdir-brace-quoted` | `^rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+(?:"\$\{TMPDIR\}/(?!(?:[^"]*/)?\.\.(?:/\|"))[^"]*"(?:\s+\|$))+$` |
 | `rm-r-f-tmp` | `^rm\s+(-[a-zA-Z]+\s+)*-[rR]\s+(-[a-zA-Z]+\s+)*-f\s+(?:/tmp/(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))\S*(?:\s+\|$))+$` |
 | `rm-f-r-tmp` | `^rm\s+(-[a-zA-Z]+\s+)*-f\s+(-[a-zA-Z]+\s+)*-[rR]\s+(?:/tmp/(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))\S*(?:\s+\|$))+$` |
 | `rm-r-f-var-tmp` | `^rm\s+(-[a-zA-Z]+\s+)*-[rR]\s+(-[a-zA-Z]+\s+)*-f\s+(?:/var/tmp/(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))\S*(?:\s+\|$))+$` |
 | `rm-f-r-var-tmp` | `^rm\s+(-[a-zA-Z]+\s+)*-f\s+(-[a-zA-Z]+\s+)*-[rR]\s+(?:/var/tmp/(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))\S*(?:\s+\|$))+$` |
 | `rm-r-f-tmpdir` | `^rm\s+(-[a-zA-Z]+\s+)*-[rR]\s+(-[a-zA-Z]+\s+)*-f\s+(?:\$TMPDIR/(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))\S*(?:\s+\|$))+$` |
 | `rm-f-r-tmpdir` | `^rm\s+(-[a-zA-Z]+\s+)*-f\s+(-[a-zA-Z]+\s+)*-[rR]\s+(?:\$TMPDIR/(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))\S*(?:\s+\|$))+$` |
-| `rm-r-f-tmpdir-brace` | `^rm\s+(-[a-zA-Z]+\s+)*-[rR]\s+(-[a-zA-Z]+\s+)*-f\s+(?:\$\{TMPDIR(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))\S*(?:\s+\|$))+$` |
-| `rm-f-r-tmpdir-brace` | `^rm\s+(-[a-zA-Z]+\s+)*-f\s+(-[a-zA-Z]+\s+)*-[rR]\s+(?:\$\{TMPDIR(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))\S*(?:\s+\|$))+$` |
+| `rm-r-f-tmpdir-brace` | `^rm\s+(-[a-zA-Z]+\s+)*-[rR]\s+(-[a-zA-Z]+\s+)*-f\s+(?:\$\{TMPDIR\}/(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))\S*(?:\s+\|$))+$` |
+| `rm-f-r-tmpdir-brace` | `^rm\s+(-[a-zA-Z]+\s+)*-f\s+(-[a-zA-Z]+\s+)*-[rR]\s+(?:\$\{TMPDIR\}/(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))\S*(?:\s+\|$))+$` |
 | `rm-recursive-force-tmp` | `^rm\s+.*--recursive.*--force\s+(?:/tmp/(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))\S*(?:\s+\|$))+$` |
 | `rm-force-recursive-tmp` | `^rm\s+.*--force.*--recursive\s+(?:/tmp/(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))\S*(?:\s+\|$))+$` |
 | `rm-recursive-force-var-tmp` | `^rm\s+.*--recursive.*--force\s+(?:/var/tmp/(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))\S*(?:\s+\|$))+$` |
 | `rm-force-recursive-var-tmp` | `^rm\s+.*--force.*--recursive\s+(?:/var/tmp/(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))\S*(?:\s+\|$))+$` |
 | `rm-recursive-force-tmpdir` | `^rm\s+.*--recursive.*--force\s+(?:\$TMPDIR/(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))\S*(?:\s+\|$))+$` |
 | `rm-force-recursive-tmpdir` | `^rm\s+.*--force.*--recursive\s+(?:\$TMPDIR/(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))\S*(?:\s+\|$))+$` |
-| `rm-recursive-force-tmpdir-brace` | `^rm\s+.*--recursive.*--force\s+(?:\$\{TMPDIR(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))\S*(?:\s+\|$))+$` |
-| `rm-force-recursive-tmpdir-brace` | `^rm\s+.*--force.*--recursive\s+(?:\$\{TMPDIR(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))\S*(?:\s+\|$))+$` |
+| `rm-recursive-force-tmpdir-brace` | `^rm\s+.*--recursive.*--force\s+(?:\$\{TMPDIR\}/(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))\S*(?:\s+\|$))+$` |
+| `rm-force-recursive-tmpdir-brace` | `^rm\s+.*--force.*--recursive\s+(?:\$\{TMPDIR\}/(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))\S*(?:\s+\|$))+$` |
 
 ### Destructive Patterns (Blocked)
 
@@ -152,3 +153,4 @@ risk_acknowledged = true
 ```
 
 ---
+

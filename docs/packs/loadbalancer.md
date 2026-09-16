@@ -110,7 +110,7 @@ These patterns match potentially destructive commands:
 | `nginx-quit` | nginx -s quit gracefully stops nginx and halts traffic handling. | high |
 | `systemctl-stop-nginx` | systemctl stop nginx stops the nginx service and disrupts traffic. | high |
 | `service-stop-nginx` | service nginx stop stops the nginx service and disrupts traffic. | high |
-| `nginx-config-delete` | Removing files from /etc/nginx deletes nginx configuration. | high |
+| `nginx-config-delete` | Removing files from /etc/nginx deletes nginx configuration. | critical |
 
 ### Allowlist Guidance
 
@@ -165,12 +165,12 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `traefik-docker-stop` | Stopping the Traefik container halts all traffic routing. | high |
-| `traefik-docker-rm` | Removing the Traefik container destroys the load balancer. | high |
-| `traefik-compose-down` | docker-compose down on Traefik stops and removes the load balancer. | high |
-| `traefik-kubectl-delete-pod` | Deleting Traefik pods/deployments disrupts traffic routing. | high |
+| `traefik-docker-stop` | Stopping the Traefik container halts all traffic routing. | critical |
+| `traefik-docker-rm` | Removing the Traefik container destroys the load balancer. | critical |
+| `traefik-compose-down` | docker-compose down on Traefik stops and removes the load balancer. | critical |
+| `traefik-kubectl-delete-pod` | Deleting Traefik pods/deployments disrupts traffic routing. | critical |
 | `traefik-kubectl-delete-ingressroute` | Deleting IngressRoute CRDs removes Traefik routing rules. | high |
-| `traefik-config-delete` | Removing Traefik config files disrupts load balancer configuration. | high |
+| `traefik-config-delete` | Removing Traefik config files disrupts load balancer configuration. | critical |
 | `traefik-api-delete` | DELETE operations against Traefik API can remove routing configuration. | high |
 | `traefik-systemctl-stop` | systemctl stop traefik stops the Traefik service. | high |
 | `traefik-service-stop` | service traefik stop stops the Traefik service. | high |

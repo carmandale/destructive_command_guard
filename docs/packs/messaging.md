@@ -22,19 +22,19 @@ Protects against destructive Kafka CLI operations like deleting topics, removing
 Commands containing these keywords are checked against this pack:
 
 - `kafka-topics`
-- `kafka-topics.sh`
 - `kafka-consumer-groups`
-- `kafka-consumer-groups.sh`
 - `kafka-configs`
-- `kafka-configs.sh`
 - `kafka-acls`
-- `kafka-acls.sh`
 - `kafka-delete-records`
+- `rpk`
+- `kafka-topics.sh`
+- `kafka-consumer-groups.sh`
+- `kafka-configs.sh`
+- `kafka-acls.sh`
 - `kafka-delete-records.sh`
 - `kafka-console-consumer`
 - `kafka-console-producer`
 - `kafka-broker-api-versions`
-- `rpk`
 
 ### Safe Patterns (Allowed)
 
@@ -58,13 +58,13 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `kafka-topics-delete` | kafka-topics --delete removes Kafka topics and data. | high |
+| `kafka-topics-delete` | kafka-topics --delete removes Kafka topics and data. | critical |
 | `kafka-consumer-groups-delete` | kafka-consumer-groups --delete removes consumer groups and offsets. | high |
 | `kafka-consumer-groups-reset-offsets` | kafka-consumer-groups --reset-offsets rewinds offsets and can cause reprocessing. | high |
 | `kafka-configs-delete-config` | kafka-configs --alter --delete-config removes broker/topic configs. | high |
 | `kafka-acls-remove` | kafka-acls --remove deletes ACLs and can break access controls. | high |
-| `kafka-delete-records` | kafka-delete-records deletes records up to specified offsets. | high |
-| `rpk-topic-delete` | rpk topic delete removes topics (Kafka-compatible). | high |
+| `kafka-delete-records` | kafka-delete-records deletes records up to specified offsets. | critical |
+| `rpk-topic-delete` | rpk topic delete removes topics (Kafka-compatible). | critical |
 
 ### Allowlist Guidance
 
@@ -119,13 +119,13 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `rabbitmqadmin-delete-queue` | rabbitmqadmin delete queue permanently deletes a queue. | high |
+| `rabbitmqadmin-delete-queue` | rabbitmqadmin delete queue permanently deletes a queue. | critical |
 | `rabbitmqadmin-delete-exchange` | rabbitmqadmin delete exchange removes an exchange and its bindings. | high |
 | `rabbitmqadmin-purge-queue` | rabbitmqadmin purge queue deletes ALL messages in the queue. | high |
-| `rabbitmqctl-delete-vhost` | rabbitmqctl delete_vhost removes a vhost and all its resources. | high |
+| `rabbitmqctl-delete-vhost` | rabbitmqctl delete_vhost removes a vhost and all its resources. | critical |
 | `rabbitmqctl-forget-cluster-node` | rabbitmqctl forget_cluster_node permanently removes a node from the cluster. | high |
-| `rabbitmqctl-reset` | rabbitmqctl reset wipes all configuration, queues, and bindings on the node. | high |
-| `rabbitmqctl-force-reset` | rabbitmqctl force_reset wipes node data and can break cluster state. | high |
+| `rabbitmqctl-reset` | rabbitmqctl reset wipes all configuration, queues, and bindings on the node. | critical |
+| `rabbitmqctl-force-reset` | rabbitmqctl force_reset wipes node data and can break cluster state. | critical |
 
 ### Allowlist Guidance
 
@@ -183,12 +183,12 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `nats-stream-delete` | nats stream delete/rm removes a JetStream stream and all its messages. | high |
+| `nats-stream-delete` | nats stream delete/rm removes a JetStream stream and all its messages. | critical |
 | `nats-stream-purge` | nats stream purge deletes ALL messages from the stream. | high |
 | `nats-consumer-delete` | nats consumer delete/rm removes a JetStream consumer. | high |
 | `nats-kv-delete` | nats kv del/rm deletes key-value entries. | high |
 | `nats-object-delete` | nats object delete removes an object from the store. | high |
-| `nats-account-delete` | nats account delete removes an account and its resources. | high |
+| `nats-account-delete` | nats account delete removes an account and its resources. | critical |
 
 ### Allowlist Guidance
 
@@ -244,11 +244,11 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `aws-sqs-delete-queue` | aws sqs delete-queue permanently deletes an SQS queue. | high |
+| `aws-sqs-delete-queue` | aws sqs delete-queue permanently deletes an SQS queue. | critical |
 | `aws-sqs-purge-queue` | aws sqs purge-queue deletes ALL messages in the queue. | high |
-| `aws-sqs-delete-message-batch` | aws sqs delete-message-batch removes multiple messages from the queue. | high |
-| `aws-sqs-delete-message` | aws sqs delete-message removes a message from the queue. | high |
-| `aws-sns-delete-topic` | aws sns delete-topic removes an SNS topic and its subscriptions. | high |
+| `aws-sqs-delete-message-batch` | aws sqs delete-message-batch removes multiple messages from the queue. | medium |
+| `aws-sqs-delete-message` | aws sqs delete-message removes a message from the queue. | medium |
+| `aws-sns-delete-topic` | aws sns delete-topic removes an SNS topic and its subscriptions. | critical |
 | `aws-sns-unsubscribe` | aws sns unsubscribe removes a subscription and stops message delivery. | high |
 | `aws-sns-remove-permission` | aws sns remove-permission revokes permissions on a topic. | high |
 | `aws-sns-delete-platform-application` | aws sns delete-platform-application removes a platform application. | high |

@@ -152,13 +152,12 @@ fn generate_category_doc(category: &str, packs: &[&Pack]) -> String {
     out
 }
 
-/// Generate all pack documentation files.
-fn generate_all_docs() -> std::io::Result<()> {
+/// Build every `docs/packs/*.md` file as (filename, content), doing no I/O.
+///
+/// The regenerator and the drift check both read this one function, so the
+/// check cannot go green against content the writer would not produce.
+fn generated_docs() -> BTreeMap<String, String> {
     let registry = PackRegistry::new();
-    let docs_packs_dir = repo_root().join("docs/packs");
-
-    // Ensure directory exists
-    fs::create_dir_all(&docs_packs_dir)?;
 
     // Group packs by category
     let mut by_category: BTreeMap<String, Vec<&Pack>> = BTreeMap::new();
@@ -168,13 +167,12 @@ fn generate_all_docs() -> std::io::Result<()> {
         by_category.entry(category).or_default().push(pack);
     }
 
+    let mut docs: BTreeMap<String, String> = BTreeMap::new();
+
     // Generate per-category documentation
     for (category, packs) in &by_category {
         let content = generate_category_doc(category, packs);
-        let filename = category_filename(category);
-        let path = docs_packs_dir.join(&filename);
-        fs::write(&path, &content)?;
-        println!("Generated: docs/packs/{filename}");
+        docs.insert(category_filename(category), content);
     }
 
     // Update index (README.md) with links to category files
@@ -227,8 +225,22 @@ fn generate_all_docs() -> std::io::Result<()> {
     index.push_str("\n---\n\n");
     index.push_str("*This documentation is auto-generated from PackRegistry metadata.*\n");
 
-    fs::write(docs_packs_dir.join("README.md"), &index)?;
-    println!("Generated: docs/packs/README.md");
+    docs.insert("README.md".to_string(), index);
+
+    docs
+}
+
+/// Write every generated doc into `docs/packs/`.
+fn generate_all_docs() -> std::io::Result<()> {
+    let docs_packs_dir = repo_root().join("docs/packs");
+
+    // Ensure directory exists
+    fs::create_dir_all(&docs_packs_dir)?;
+
+    for (filename, content) in generated_docs() {
+        fs::write(docs_packs_dir.join(&filename), &content)?;
+        println!("Generated: docs/packs/{filename}");
+    }
 
     Ok(())
 }
@@ -267,6 +279,80 @@ fn verify_all_packs_have_documentation() -> std::io::Result<()> {
         missing.is_empty(),
         "Documentation coverage issues:\n{}",
         missing.join("\n")
+    );
+
+    Ok(())
+}
+
+/// Describe the first line on which the checked-in doc and the generated one
+/// disagree, so a failure names the drifted rule instead of "files differ".
+fn first_difference(on_disk: &str, generated: &str) -> String {
+    let mut disk_lines = on_disk.lines();
+    let mut gen_lines = generated.lines();
+    let mut lineno = 0usize;
+
+    loop {
+        lineno += 1;
+        match (disk_lines.next(), gen_lines.next()) {
+            (None, None) => return "files differ only in trailing bytes".to_string(),
+            (Some(d), Some(g)) if d == g => {}
+            (d, g) => {
+                return format!(
+                    "line {lineno}:\n      checked in: {}\n      generated:  {}",
+                    d.unwrap_or("<end of file>"),
+                    g.unwrap_or("<end of file>")
+                );
+            }
+        }
+    }
+}
+
+/// The docs are generated, so a pack edit that skips the regenerator must go
+/// red here. Byte equality is what makes that true for rule names AND pattern
+/// strings: `.agent-config-it2wk` narrowed every wildcard in the remote pack
+/// and `docs/packs/remote.md` kept advertising the old regex for a day, past a
+/// coverage test that only compared pack IDs (`.agent-config-phupc`).
+#[test]
+fn pack_docs_match_generated_content() -> std::io::Result<()> {
+    let docs_packs_dir = repo_root().join("docs/packs");
+    let generated = generated_docs();
+    let mut stale: Vec<String> = Vec::new();
+
+    for (filename, expected) in &generated {
+        let path = docs_packs_dir.join(filename);
+        let Ok(actual) = fs::read_to_string(&path) else {
+            stale.push(format!("docs/packs/{filename}: missing"));
+            continue;
+        };
+        if actual != *expected {
+            stale.push(format!(
+                "docs/packs/{filename}: {}",
+                first_difference(&actual, expected)
+            ));
+        }
+    }
+
+    // A doc for a category the registry no longer has is stale in the other
+    // direction: it documents rules that cannot fire.
+    for entry in fs::read_dir(&docs_packs_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let is_markdown = path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if is_markdown && !generated.contains_key(&name) {
+            stale.push(format!(
+                "docs/packs/{name}: no pack category generates this file"
+            ));
+        }
+    }
+
+    assert!(
+        stale.is_empty(),
+        "docs/packs is stale against PackRegistry — regenerate with \
+         `cargo test --test generate_pack_docs -- --ignored`:\n  {}",
+        stale.join("\n  ")
     );
 
     Ok(())

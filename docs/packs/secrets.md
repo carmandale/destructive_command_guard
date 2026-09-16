@@ -47,13 +47,13 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `vault-secrets-disable` | vault secrets disable disables a secrets engine, causing data loss. | high |
-| `vault-kv-destroy` | vault kv destroy permanently deletes secret versions. | high |
-| `vault-kv-metadata-delete` | vault kv metadata delete removes all versions and metadata for a secret. | high |
+| `vault-secrets-disable` | vault secrets disable disables a secrets engine, causing data loss. | critical |
+| `vault-kv-destroy` | vault kv destroy permanently deletes secret versions. | critical |
+| `vault-kv-metadata-delete` | vault kv metadata delete removes all versions and metadata for a secret. | critical |
 | `vault-kv-delete` | vault kv delete removes the latest secret version. | high |
 | `vault-delete` | vault delete removes secrets at a path. | high |
-| `vault-policy-delete` | vault policy delete removes access policies. | high |
-| `vault-auth-disable` | vault auth disable disables an auth method. | high |
+| `vault-policy-delete` | vault policy delete removes access policies. | critical |
+| `vault-auth-disable` | vault auth disable disables an auth method. | critical |
 | `vault-token-revoke` | vault token revoke invalidates tokens and can disrupt access. | high |
 | `vault-lease-revoke` | vault lease revoke invalidates leases and can disrupt access. | high |
 
@@ -114,11 +114,11 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `aws-secretsmanager-delete-secret` | aws secretsmanager delete-secret removes secrets and may cause data loss. | high |
+| `aws-secretsmanager-delete-secret` | aws secretsmanager delete-secret removes secrets and may cause data loss. | critical |
 | `aws-secretsmanager-delete-resource-policy` | aws secretsmanager delete-resource-policy removes access controls. | high |
 | `aws-secretsmanager-remove-regions` | aws secretsmanager remove-regions-from-replication can reduce availability. | high |
-| `aws-secretsmanager-update-secret` | aws secretsmanager update-secret overwrites secret metadata or value. | high |
-| `aws-secretsmanager-put-secret-value` | aws secretsmanager put-secret-value creates a new secret version and can break clients. | high |
+| `aws-secretsmanager-update-secret` | aws secretsmanager update-secret overwrites secret metadata or value. | medium |
+| `aws-secretsmanager-put-secret-value` | aws secretsmanager put-secret-value creates a new secret version and can break clients. | medium |
 | `aws-ssm-delete-parameter` | aws ssm delete-parameter removes a parameter and can break deployments. | high |
 | `aws-ssm-delete-parameters` | aws ssm delete-parameters removes parameters and can break deployments. | high |
 
@@ -180,9 +180,9 @@ These patterns match potentially destructive commands:
 |--------------|--------|----------|
 | `op-item-delete` | op item delete removes secret items (including archive operations). | high |
 | `op-document-delete` | op document delete removes secure documents (including archive operations). | high |
-| `op-vault-delete` | op vault delete removes an entire vault. | high |
+| `op-vault-delete` | op vault delete removes an entire vault. | critical |
 | `op-user-delete` | op user delete removes a user from 1Password. | high |
-| `op-group-delete` | op group delete removes a group. | high |
+| `op-group-delete` | op group delete removes a group. | medium |
 | `op-connect-token-delete` | op connect token delete revokes access tokens. | high |
 
 ### Allowlist Guidance
@@ -240,7 +240,7 @@ These patterns match potentially destructive commands:
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
 | `doppler-secrets-delete` | doppler secrets delete removes secrets. | high |
-| `doppler-projects-delete` | doppler projects delete removes a project. | high |
+| `doppler-projects-delete` | doppler projects delete removes a project. | critical |
 | `doppler-environments-delete` | doppler environments delete removes an environment. | high |
 | `doppler-configs-delete` | doppler configs delete removes a config. | high |
 
