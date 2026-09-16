@@ -63,6 +63,13 @@ fn test_audit_backtracking_requirements() {
                 "gh-actions-api-explicit-get",
             ]),
         ),
+        // `glab-api-explicit-get` gained a negative lookahead in
+        // `.agent-config-nh7t4`: a `GET` safe pattern must not exempt a
+        // DELETE/PUT/PATCH/POST named in the SAME command, and both spans start
+        // at the command word so "the destructive match starts inside the safe
+        // span" was unconditionally true. The lookahead is what moves it onto
+        // the backtracking engine. Its two `gh` twins were already in this set.
+        ("cicd.gitlab_ci", HashSet::from(["glab-api-explicit-get"])),
         (
             "containers.compose",
             HashSet::from(["compose-down-no-volumes"]),

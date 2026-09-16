@@ -866,47 +866,67 @@ fn the_gh_packs_are_actually_reached() {
 }
 
 #[test]
-fn a_command_in_front_does_not_move_a_safe_span_off_the_command_being_judged() {
+fn a_command_in_front_does_not_change_the_verdict_on_the_command_being_judged() {
     // A command in front, and every separator that can put it there. WHICH
     // separator exposed this moved twice while the bead was open, under
     // unrelated repairs to how far a destructive regex reaches and to where a
     // command ends. The first match is not a property of the command being
     // judged, so the pin sweeps the separators rather than naming one.
-    for (packs, alone, in_front) in [
+    //
+    // REVISED by `.agent-config-nh7t4`. This test previously asserted that both
+    // `gh` subjects below were ALLOWED on their own, and used that as its
+    // control. They are bypasses: a `-X GET` anywhere in a `gh api` command
+    // exempted a `-X DELETE` in the SAME command, because both the safe and the
+    // destructive pattern start at `gh` and the exemption rule asks only whether
+    // the destructive match STARTS inside a safe span. nh7t4 closed that, so
+    // these two now deny.
+    //
+    // The order property is what this test is for, and it is unchanged and still
+    // worth pinning -- so the sweep now asserts that the verdict, whatever it is,
+    // is the SAME alone and in company. That is strictly stronger than the old
+    // shape: it pins order-independence in both directions instead of only for
+    // commands that happen to be allowed.
+    //
+    // nh7t4 also refuted this test's former note that "an `&` inside quotes ends
+    // the command it sits in". Measured on the string the packs receive, a quoted
+    // `&` yields ZERO separators; the safe pattern's own `[^;&|\n]*` simply
+    // cannot cross one, so the quoted `&` DEFEATS the over-broad safe match. See
+    // tests/repro_gh_api_method_scope.rs.
+    for (packs, subject, in_front, expect_denied) in [
         (
             GH_PACKS,
-            // The bead's measured command. One safe pattern spells both
-            // `--method GET` and `-X GET`, so the command in front could
-            // consume the only span this one had.
-            //
-            // The bead's prefix was `gh api "/repos/o/r/issues?state=open\
-            // &per_page=100" --method GET`, with a quoted `&`. That spelling
-            // denies for a reason that has nothing to do with order: an `&`
-            // inside quotes ends the command it sits in, so the command loses
-            // its own safe span with no second command on the line at all
-            // (`.agent-config-nh7t4`). The query string is dropped here so this
-            // test measures the order and only the order; nh7t4 owns putting
-            // that spelling back.
             "gh api -X GET /user -X DELETE /repos/o/r/hooks/7",
             "gh api /repos/o/r/issues --method GET",
+            true,
         ),
         (
             GH_PACKS,
             // The same shape on the actions-secret rule.
             "gh api -X GET /repos/o/r/actions/secrets/FOO -X DELETE /repos/o/r/actions/secrets/FOO",
             "gh api --method GET /repos/o/r/actions/secrets",
+            true,
+        ),
+        (
+            GH_PACKS,
+            // The allow direction, so this test still fails if a change starts
+            // denying commands that only read.
+            "gh api \"/repos/o/r/issues?state=open&per_page=100\" --method GET",
+            "gh api /repos/o/r/issues --method GET",
+            false,
         ),
     ] {
-        assert!(
-            !is_denied_with(&packs, alone),
-            "control: this command is allowed on its own, so a denial in \
-             company is the order and nothing else: {alone}"
+        assert_eq!(
+            is_denied_with(&packs, subject),
+            expect_denied,
+            "control: the verdict on this command alone is what the sweep below \
+             compares against, so a wrong control makes every row meaningless: {subject}"
         );
         for sep in ["\n", " && ", " ; ", " | "] {
-            let line = format!("{in_front}{sep}{alone}");
-            assert!(
-                !is_denied_with(&packs, &line),
-                "an unrelated command in front must not deny this one: {line}"
+            let line = format!("{in_front}{sep}{subject}");
+            assert_eq!(
+                is_denied_with(&packs, &line),
+                expect_denied,
+                "a command in front must not change this command's verdict: {line}"
             );
         }
     }

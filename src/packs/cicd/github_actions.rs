@@ -58,9 +58,17 @@ fn create_safe_patterns() -> Vec<SafePattern> {
         // The span stops at the command it covers. `.*` ran to the end of the line, and a match
         // is exempted when it starts inside a safe span, so one harmless GET anywhere on a line
         // exempted a real deletion elsewhere on it (.agent-config-kf3dq cold review look 2).
+        // The lookahead is not decoration: this safe pattern and the destructive
+        // `api ... DELETE` ones all START at the command word, and the exemption
+        // rule asks whether a destructive match starts INSIDE a safe span. Two
+        // spans that both start here satisfy that unconditionally, so before
+        // `.agent-config-nh7t4` a `-X GET` anywhere in the command exempted a
+        // `-X DELETE` in the SAME command -- in either order, and even when the
+        // GET was only text inside a quoted value. A GET pattern may only speak
+        // for a command that names no state-changing method.
         safe_pattern!(
             "gh-actions-api-explicit-get",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret|variable|workflow|run|api)\b)\S+)?)*\s+api\b[^;&|\n]*(?:-X|--method)\s+GET\b"
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret|variable|workflow|run|api)\b)\S+)?)*\s+api\b(?![^;&|\n]*(?:-X|--method)\s+(?:DELETE|PUT|PATCH|POST)\b)[^;&|\n]*(?:-X|--method)\s+GET\b"
         ),
     ]
 }
