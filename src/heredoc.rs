@@ -1809,8 +1809,9 @@ fn tokenize_backwards(s: &str) -> Vec<String> {
 ///   `split --filter=CMD` pipes each chunk to CMD's stdin, so
 ///   `cat <<'EOF' | split --filter=sh -` executes the body. That is `awk`'s
 ///   third spelling exactly: the program sits in ARGV and the BODY is the data
-///   it executes. `sort --compress-program` is the same shape, reachable only
-///   once the input spills to a temp file.
+///   it executes. `sort --compress-program` is the same shape, gated on the
+///   input spilling to a temp file -- a gate measured reachable from a heredoc
+///   on the stock BSD sort, see the `.agent-config-slwtp` reversal below.
 ///
 ///   `split` and `csplit` were therefore REMOVED (`.agent-config-bvt4k`), and
 ///   the reason for removing rather than documenting is a cost, not a new
@@ -1828,16 +1829,53 @@ fn tokenize_backwards(s: &str) -> Vec<String> {
 ///   inconsistency -- removing `sed` WOULD cost real false positives, so its
 ///   trade is a genuine one. `split` had no such price to pay.
 ///
-///   `sort` also stays, and the reason is a JUDGEMENT, not a measurement --
-///   the census gives it 0 receiver / 0 downstream, exactly like `split`, so
-///   the numbers alone would say remove it. Two things the count does not see
-///   argue the other way. Its `--compress-program` reaches a shell only after
+///   `sort` was kept at that time, on a JUDGEMENT rather than a measurement,
+///   and `.agent-config-slwtp` recorded it so it could be reversed. IT HAS
+///   BEEN REVERSED: `sort` IS OUT, and both halves of the judgement measured
+///   false. The bead's own reversal probe is what broke it open.
+///
+///   The judgement was that `--compress-program` "reaches a shell only after
 ///   the input spills to a temp file, so the hazard needs a GNU build AND an
-///   input far larger than a heredoc; and `cat <<'EOF' | sort` is an ordinary
-///   thing to write, so a 0 in a 19,914-row sample is a thinner promise for
-///   `sort` than the same 0 is for `split`, which nobody pipes a heredoc into.
-///   That is the `sed` trade -- a real price for a remote hazard -- rather than
-///   the `split` one. Recorded so it can be reversed: `.agent-config-slwtp`.
+///   input far larger than a heredoc", and that `cat <<'EOF' | sort` is common
+///   enough that a census 0 is a thinner promise for `sort` than for `split`.
+///
+///   NEEDS A GNU BUILD -- FALSE, and this is where `sort` parts company with
+///   `split` in the direction nobody expected. BSD `split` REFUSES the flag
+///   (`illegal option`, exit 64), which is what made its hazard GNU-only and
+///   hypothetical. The BSD sort this fleet ships (`2.3-Apple (199)`, no GNU
+///   sort installed under any name) DOCUMENTS `--compress-program program` in
+///   its own usage string, accepts it at rc 0, and SPAWNS IT: 920 KB of input
+///   under `-S 1024` executed the program ten times. So `sort` never had
+///   `split`'s excuse; it is the weaker footing of the two, not the stronger.
+///
+///   AN INPUT FAR LARGER THAN A HEREDOC -- FALSE, and it was never the
+///   attacker's constraint to begin with, because `-S` sits in ARGV right
+///   beside `--compress-program`. Whoever writes the pipeline picks the spill
+///   threshold. Measured end to end on this laptop, with no GNU anything:
+///
+///     cat <<'EOF' | sort -S 1024 --compress-program=/bin/sh -
+///
+///   with a 1.8 MB body ran that body as shell commands -- `/bin/sh: line 1:
+///   ...: command not found` on the data lines, and the marker command in the
+///   body executed. A 12 KB body did not spill and did not fire, so the size
+///   floor is real; it is just a floor a heredoc clears, not one it cannot
+///   reach.
+///
+///   THE FALSE-POSITIVE PRIOR -- refuted by the census it was citing.
+///   `zbzox-census.py` puts `sort` at 0 RECEIVER / 0 DOWNSTREAM over 19,914
+///   rows, and its own reading section states that the third column,
+///   body/other, "is NOT a membership question" -- it counts rows where the
+///   word appears somewhere else entirely. `sort` appears nowhere in that
+///   run's "rows a removal would newly expose to the matcher" list; only `sed`
+///   and `tee` do. And the intuition that inverted the two is backwards on the
+///   only column it could have come from: `split` sits in 320 body/other rows
+///   to `sort`'s 104. Removal is a pure fail-open closure, same as `split`'s.
+///
+///   The general lesson is the one `.agent-config-zbzox` was filed to fix, and
+///   it repeated here one bead later: "this shape is common, so the zero must
+///   be thin" substitutes a prior for the measurement that was already taken.
+///   The admission test at the top of this comment does not have a frequency
+///   term in it.
 /// * `tee`/`dd` write the body without executing it -- see the veto above.
 ///
 /// TWO LIMITS OF THAT SWEEP, both closed or named by `.agent-config-mt4yo`.
@@ -1919,7 +1957,9 @@ const NON_EXECUTING_HEREDOC_COMMANDS: &[&str] = &[
     "fgrep",
     "sed",
     "cut",
-    "sort",
+    // `sort` was here until `.agent-config-slwtp`. Its `--compress-program`
+    // pipes spilled temp data to the named program's STDIN, and the BSD sort
+    // this fleet ships both documents and executes it. See the doc comment.
     "uniq",
     "tr",
     "wc",
@@ -5438,14 +5478,95 @@ fi"#;
         );
 
         // Control — the instrument can still mask, so a green above is not
-        // green-over-nothing. `sort` is the sharpest control available: it is
-        // still a member ON PURPOSE (`.agent-config-slwtp`), so if someone
-        // removes it without updating this arm, this line says so.
-        let ctrl = format!("cat <<'EOF' | sort\n{rmrf} /important\nEOF");
+        // green-over-nothing. This was `sort` until `.agent-config-slwtp`,
+        // chosen precisely so that removing `sort` without updating this arm
+        // would say so. It did. `tr` replaces it: a pure transform with no
+        // program to hand it, so it is a member on the admission test itself
+        // rather than on a judgement that a later measurement can reverse.
+        let ctrl = format!("cat <<'EOF' | tr a-z A-Z\n{rmrf} /important\nEOF");
         let mc = mask_non_executing_heredocs(&ctrl);
         assert!(
             !mc.contains(&rmrf),
-            "control: `| sort` is still a data sink, so its body must still be \
+            "control: `| tr` is still a data sink, so its body must still be \
+             masked: {mc:?}"
+        );
+    }
+
+    /// `.agent-config-slwtp` — the arm for removing `sort`.
+    ///
+    /// `.agent-config-bvt4k` kept `sort` on a judgement with two halves: that
+    /// `--compress-program` needed a GNU build AND an input far larger than a
+    /// heredoc, and that `cat <<'EOF' | sort` is common enough that the census
+    /// 0 was a thinner promise for it than for `split`. Both halves measured
+    /// false; the doc comment on `NON_EXECUTING_HEREDOC_COMMANDS` carries the
+    /// numbers.
+    ///
+    /// Unlike the `split` and `ack`/`yq` arms, this one IS verified executing
+    /// against a real binary on this fleet, and that is the reversal's core:
+    /// BSD `split` refuses its flag, but the stock BSD sort (`2.3-Apple
+    /// (199)`) documents `--compress-program`, accepts it, and spawns it — ten
+    /// times on 920 KB under `-S 1024`. End to end,
+    /// `cat <<'EOF' | sort -S 1024 --compress-program=/bin/sh -` executed a
+    /// 1.8 MB heredoc body as shell commands. A 12 KB body did not spill, so
+    /// the size floor is real but clearable. Probe and output:
+    /// `specs/333-dcg-heredoc-body-false-positives/probes/` in agent-config.
+    #[test]
+    fn sort_compress_program_executes_its_stdin_so_its_heredoc_body_is_not_masked_slwtp() {
+        let rmrf = format!("{}{}{}", "rm", " -", "rf");
+
+        // 1. Downstream stage: cat is the receiver, sort hands spilled temp
+        //    data to sh's stdin. This is `awk`'s third spelling — program in
+        //    ARGV, body as the data it executes.
+        let c1 = format!("cat <<'EOF' | sort --compress-program=sh -\n{rmrf} /important\nEOF");
+        let m1 = mask_non_executing_heredocs(&c1);
+        assert!(
+            m1.contains(&rmrf),
+            "`| sort --compress-program=sh` executes the piped body; it must \
+             stay visible: {m1:?}"
+        );
+
+        // 2. The measured spelling, with the buffer size that makes the spill
+        //    reachable. `-S` is in ARGV too, so the threshold is the writer's
+        //    to choose — that is why "needs a huge input" was never a barrier.
+        let c2 = format!(
+            "cat <<'EOF' | sort -S 1024 --compress-program=/bin/sh -\n{rmrf} /important\nEOF"
+        );
+        let m2 = mask_non_executing_heredocs(&c2);
+        assert!(
+            m2.contains(&rmrf),
+            "the measured spelling must stay visible: {m2:?}"
+        );
+
+        // 3. Direct receiver: sort reads the heredoc itself.
+        let c3 = format!("sort --compress-program=sh <<'EOF'\n{rmrf} /important\nEOF");
+        let m3 = mask_non_executing_heredocs(&c3);
+        assert!(
+            m3.contains(&rmrf),
+            "`sort --compress-program` as the receiver executes its stdin; \
+             body must stay visible: {m3:?}"
+        );
+
+        // 4. THE PRICE, asserted rather than left to be discovered. Removal is
+        //    unconditional, so a plain `| sort` no longer masks either. The
+        //    census puts that at 0 rows across 19,914 (0 receiver, 0
+        //    downstream), which is why this was an agent's call and not Dale's
+        //    — but if that ever starts costing real false positives, this line
+        //    is where the cost is written down.
+        let c4 = format!("cat <<'EOF' | sort\n{rmrf} /important\nEOF");
+        let m4 = mask_non_executing_heredocs(&c4);
+        assert!(
+            m4.contains(&rmrf),
+            "`sort` is out of the list unconditionally, so even a plain \
+             `| sort` body stays visible: {m4:?}"
+        );
+
+        // Control — the instrument can still mask, so the greens above are not
+        // green-over-nothing.
+        let ctrl = format!("cat <<'EOF' | cut -c1-5\n{rmrf} /important\nEOF");
+        let mc = mask_non_executing_heredocs(&ctrl);
+        assert!(
+            !mc.contains(&rmrf),
+            "control: `| cut` is still a data sink, so its body must still be \
              masked: {mc:?}"
         );
     }
