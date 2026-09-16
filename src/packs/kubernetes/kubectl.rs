@@ -269,7 +269,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // delete deployment/statefulset/daemonset
         destructive_pattern!(
             "delete-workload",
-            r"kubectl\s+delete\s+(?:deployment|statefulset|daemonset|replicaset)\b(?!.*--dry-run)",
+            r"kubectl\s+delete\s+(?:deployment|statefulset|daemonset|replicaset)\b(?![^;&|\n]*--dry-run)",
             "kubectl delete deployment/statefulset/daemonset removes the workload. Use --dry-run first.",
             High,
             "Deleting a workload terminates all its pods:\n\n\
@@ -286,7 +286,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // delete pvc (persistent volume claim)
         destructive_pattern!(
             "delete-pvc",
-            r"kubectl\s+delete\s+(?:pvc|persistentvolumeclaim)\b(?!.*--dry-run)",
+            r"kubectl\s+delete\s+(?:pvc|persistentvolumeclaim)\b(?![^;&|\n]*--dry-run)",
             "kubectl delete pvc may permanently delete data if ReclaimPolicy is Delete.",
             Critical,
             "Deleting a PVC can cause permanent data loss depending on the PV's reclaimPolicy:\n\n\
@@ -304,7 +304,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // delete pv (persistent volume)
         destructive_pattern!(
             "delete-pv",
-            r"kubectl\s+delete\s+(?:pv|persistentvolume)\b(?!.*--dry-run)",
+            r"kubectl\s+delete\s+(?:pv|persistentvolume)\b(?![^;&|\n]*--dry-run)",
             "kubectl delete pv may permanently delete the underlying storage.",
             Critical,
             "Deleting a PersistentVolume can permanently destroy the underlying storage:\n\n\

@@ -1056,6 +1056,7 @@ pub fn eval_snapshot_with_config(command: &str, config: &Config) -> EvalSnapshot
         &compiled_overrides,
         &allowlists,
         &heredoc_settings,
+        config.policy(),
     );
 
     EvalSnapshot::from_result(command, &result)
@@ -1159,6 +1160,7 @@ pub fn verify_corpus_case(case: &CorpusTestCase, category: CorpusCategory) -> Re
         &compiled_overrides,
         &allowlists,
         &heredoc_settings,
+        config.policy(),
     );
     let snapshot = EvalSnapshot::from_result(&case.command, &result);
 
