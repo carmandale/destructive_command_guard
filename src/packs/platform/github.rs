@@ -38,6 +38,15 @@ pub fn create_pack() -> Pack {
 }
 
 fn create_safe_patterns() -> Vec<SafePattern> {
+    // Each subcommand word here has to be a whole token. The skipper's lookahead refuses a flag
+    // value that starts with a subcommand word, so the value was left for the pattern itself to
+    // read as the subcommand: `gh -R status/x repo delete` matched `gh-status` at (0, 12), since
+    // `status\b` is happy with `status/x`, and that span exempted the deletion behind it
+    // (.agent-config-cjqsf). The same reach existed through a word that is not a tail:
+    // `gh -R api/x repo delete o/r -X GET` was read as a safe `gh api ... GET`. Only those two were
+    // reachable with a single value, because every other tail needs two words, but the boundary is
+    // spelled on all of them so it does not depend on that.
+    //
     // Regex logic:
     // Match `gh`
     // Match optional global flags: `--flag` or `--flag value`
@@ -50,39 +59,39 @@ fn create_safe_patterns() -> Vec<SafePattern> {
     vec![
         safe_pattern!(
             "gh-repo-list-view",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+repo\s+(?:list|view)\b"
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+repo\s+(?:list|view)(?!\S)"
         ),
         safe_pattern!(
             "gh-gist-list-view",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+gist\s+(?:list|view)\b"
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+gist\s+(?:list|view)(?!\S)"
         ),
         safe_pattern!(
             "gh-release-list-view",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+release\s+(?:list|view)\b"
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+release\s+(?:list|view)(?!\S)"
         ),
         safe_pattern!(
             "gh-issue-list-view",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+issue\s+(?:list|view)\b"
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+issue\s+(?:list|view)(?!\S)"
         ),
         safe_pattern!(
             "gh-ssh-key-list",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+ssh-key\s+list\b"
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+ssh-key\s+list(?!\S)"
         ),
         safe_pattern!(
             "gh-secret-list",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+secret\s+list\b"
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+secret\s+list(?!\S)"
         ),
         safe_pattern!(
             "gh-variable-list",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+variable\s+list\b"
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+variable\s+list(?!\S)"
         ),
         safe_pattern!(
             "gh-auth-status",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+auth\s+status\b"
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+auth\s+status(?!\S)"
         ),
         safe_pattern!(
             "gh-status",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+status\b"
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+status(?!\S)"
         ),
         // Safe API GETs
         // The span stops at the command it covers. `.*` ran to the end of the line, and a match
@@ -98,7 +107,7 @@ fn create_safe_patterns() -> Vec<SafePattern> {
         // for a command that names no state-changing method.
         safe_pattern!(
             "gh-api-explicit-get",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+api\b(?![^;&|\n]*(?:-X|--method)\s+(?:DELETE|PUT|PATCH|POST)\b)[^;&|\n]*(?:-X|--method)\s+GET\b"
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:repo|gist|release|issue|ssh-key|secret|variable|run|auth|status|api)\b)(?:(?:\x22[^\x22]*\x22)|(?:'[^']*')|\S+))?)*\s+api(?!\S)(?![^;&|\n]*(?:-X|--method)\s+(?:DELETE|PUT|PATCH|POST)\b)[^;&|\n]*(?:-X|--method)\s+GET(?!\S)"
         ),
     ]
 }

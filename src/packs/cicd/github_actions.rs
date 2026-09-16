@@ -37,30 +37,31 @@ pub fn create_pack() -> Pack {
 }
 
 fn create_safe_patterns() -> Vec<SafePattern> {
+    // Every subcommand word a whole token, for the reason in platform/github.rs (.agent-config-cjqsf).
     vec![
         safe_pattern!(
             "gh-actions-secret-list",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret|variable|workflow|run|api)\b)\S+)?)*\s+secret\s+list\b"
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret|variable|workflow|run|api)\b)\S+)?)*\s+secret\s+list(?!\S)"
         ),
         safe_pattern!(
             "gh-actions-variable-list",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret|variable|workflow|run|api)\b)\S+)?)*\s+variable\s+list\b"
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret|variable|workflow|run|api)\b)\S+)?)*\s+variable\s+list(?!\S)"
         ),
         safe_pattern!(
             "gh-actions-workflow-list",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret|variable|workflow|run|api)\b)\S+)?)*\s+workflow\s+list\b"
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret|variable|workflow|run|api)\b)\S+)?)*\s+workflow\s+list(?!\S)"
         ),
         safe_pattern!(
             "gh-actions-workflow-view",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret|variable|workflow|run|api)\b)\S+)?)*\s+workflow\s+view\b"
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret|variable|workflow|run|api)\b)\S+)?)*\s+workflow\s+view(?!\S)"
         ),
         safe_pattern!(
             "gh-actions-run-list",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret|variable|workflow|run|api)\b)\S+)?)*\s+run\s+list\b"
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret|variable|workflow|run|api)\b)\S+)?)*\s+run\s+list(?!\S)"
         ),
         safe_pattern!(
             "gh-actions-run-view",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret|variable|workflow|run|api)\b)\S+)?)*\s+run\s+view\b"
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret|variable|workflow|run|api)\b)\S+)?)*\s+run\s+view(?!\S)"
         ),
         // Safe only when GET is explicit (default method can vary by flags).
         // The span stops at the command it covers. `.*` ran to the end of the line, and a match
@@ -76,7 +77,7 @@ fn create_safe_patterns() -> Vec<SafePattern> {
         // for a command that names no state-changing method.
         safe_pattern!(
             "gh-actions-api-explicit-get",
-            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret|variable|workflow|run|api)\b)\S+)?)*\s+api\b(?![^;&|\n]*(?:-X|--method)\s+(?:DELETE|PUT|PATCH|POST)\b)[^;&|\n]*(?:-X|--method)\s+GET\b"
+            r"gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret|variable|workflow|run|api)\b)\S+)?)*\s+api(?!\S)(?![^;&|\n]*(?:-X|--method)\s+(?:DELETE|PUT|PATCH|POST)\b)[^;&|\n]*(?:-X|--method)\s+GET(?!\S)"
         ),
     ]
 }

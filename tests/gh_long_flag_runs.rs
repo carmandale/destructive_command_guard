@@ -165,6 +165,14 @@ fn hook(packs: &str, command: &str) -> Option<(String, String)> {
         .expect("write hook input");
     let output = child.wait_with_output().expect("wait for dcg");
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    // dcg exits 0 for an allow AND for a deny, so a non-zero status is dcg failing to answer at
+    // all. Without this, a crash reads as empty stdout, which reads as an allow.
+    assert!(
+        output.status.success(),
+        "dcg exited {:?} on {command:?}: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
     if stdout.trim().is_empty() {
         return None;
     }
@@ -269,6 +277,70 @@ fn a_safe_gh_command_does_not_exempt_the_destructive_one_beside_it() {
         match hook(BOTH_PACKS, command) {
             Some((rule, _)) if rule == want => {}
             found => failures.push(format!("{command:?}: {found:?}, want {want}")),
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A flag value is not a subcommand.
+///
+/// The skipper's lookahead refuses a value that starts with a subcommand word, which left the value
+/// for the tail to read as the subcommand: `gh -R status/x repo delete` matched the safe `gh-status`
+/// at (0, 12), because `status\b` is happy with `status/x`, and that span starts where the deletion
+/// starts, so the deletion was exempted and ALLOWED (.agent-config-cjqsf). Every safe pattern's last
+/// word is now a whole token.
+///
+/// Not fixed, and not fixable this way: a value that is EXACTLY a subcommand word
+/// (`gh --hostname status repo delete o/r`) is still exempt, because the skipper may stop before it
+/// and `gh ... status` is then a real `gh status`. Telling those apart needs each flag's arity.
+#[test]
+fn a_flag_value_is_not_read_as_a_safe_subcommand() {
+    let mut failures = Vec::new();
+    for (command, want) in [
+        (
+            "gh -R status/x repo delete",
+            Some("platform.github:gh-repo-delete"),
+        ),
+        (
+            "gh -R status-page/x repo delete",
+            Some("platform.github:gh-repo-delete"),
+        ),
+        (
+            "gh -R status.io/x run cancel 1",
+            Some("platform.github:gh-run-cancel"),
+        ),
+        // The same reach through a subcommand word that is not a tail: `gh-api-explicit-get` read
+        // `-R api/x` as a safe `gh api ... GET`. Both of these were allowed before this change.
+        (
+            "gh -R api/x repo delete o/r -X GET",
+            Some("platform.github:gh-repo-delete"),
+        ),
+        (
+            "gh -R api-team/svc repo delete o/r -X GET",
+            Some("platform.github:gh-repo-delete"),
+        ),
+        // The exemptions that have to survive: a real `gh status`, the list/view commands, and a
+        // GET that covers its own command.
+        ("gh status", None),
+        ("gh repo list", None),
+        ("gh repo view o/r", None),
+        ("gh auth status", None),
+        ("gh secret list --json x", None),
+        ("gh api -X GET /repos/o/r", None),
+        // Allowed, and pinned as it is rather than as it should be. `gh-status` stops matching
+        // `-R status/x` and matches `--hostname status` instead, which exempts the deletion behind
+        // it. Each of these two commands is allowed standing alone as well, so nothing dcg was
+        // protecting is lost. That a safe pattern's ONE recorded match decides which command gets
+        // the exemption is .agent-config-nlid7; a flag value that is exactly a subcommand word is
+        // the residue named above.
+        (
+            "gh -R status/x pr list ; gh --hostname status repo delete o/r",
+            None,
+        ),
+    ] {
+        let found = hook(BOTH_PACKS, command).map(|(rule, _)| rule);
+        if found.as_deref() != want {
+            failures.push(format!("{command:?}: {found:?}, want {want:?}"));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));

@@ -29,13 +29,13 @@ These patterns match safe commands that are always allowed:
 
 | Pattern Name | Pattern |
 |--------------|----------|
-| `gh-actions-secret-list` | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret\|variable\|workflow\|run\|api)\b)\S+)?)*\s+secret\s+list\b` |
-| `gh-actions-variable-list` | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret\|variable\|workflow\|run\|api)\b)\S+)?)*\s+variable\s+list\b` |
-| `gh-actions-workflow-list` | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret\|variable\|workflow\|run\|api)\b)\S+)?)*\s+workflow\s+list\b` |
-| `gh-actions-workflow-view` | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret\|variable\|workflow\|run\|api)\b)\S+)?)*\s+workflow\s+view\b` |
-| `gh-actions-run-list` | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret\|variable\|workflow\|run\|api)\b)\S+)?)*\s+run\s+list\b` |
-| `gh-actions-run-view` | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret\|variable\|workflow\|run\|api)\b)\S+)?)*\s+run\s+view\b` |
-| `gh-actions-api-explicit-get` | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret\|variable\|workflow\|run\|api)\b)\S+)?)*\s+api\b(?![^;&\|\n]*(?:-X\|--method)\s+(?:DELETE\|PUT\|PATCH\|POST)\b)[^;&\|\n]*(?:-X\|--method)\s+GET\b` |
+| `gh-actions-secret-list` | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret\|variable\|workflow\|run\|api)\b)\S+)?)*\s+secret\s+list(?!\S)` |
+| `gh-actions-variable-list` | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret\|variable\|workflow\|run\|api)\b)\S+)?)*\s+variable\s+list(?!\S)` |
+| `gh-actions-workflow-list` | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret\|variable\|workflow\|run\|api)\b)\S+)?)*\s+workflow\s+list(?!\S)` |
+| `gh-actions-workflow-view` | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret\|variable\|workflow\|run\|api)\b)\S+)?)*\s+workflow\s+view(?!\S)` |
+| `gh-actions-run-list` | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret\|variable\|workflow\|run\|api)\b)\S+)?)*\s+run\s+list(?!\S)` |
+| `gh-actions-run-view` | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret\|variable\|workflow\|run\|api)\b)\S+)?)*\s+run\s+view(?!\S)` |
+| `gh-actions-api-explicit-get` | `gh(?:\s+--?[A-Za-z][A-Za-z0-9-]*\b(?:\s+(?!(?:secret\|variable\|workflow\|run\|api)\b)\S+)?)*\s+api(?!\S)(?![^;&\|\n]*(?:-X\|--method)\s+(?:DELETE\|PUT\|PATCH\|POST)\b)[^;&\|\n]*(?:-X\|--method)\s+GET(?!\S)` |
 
 ### Destructive Patterns (Blocked)
 
