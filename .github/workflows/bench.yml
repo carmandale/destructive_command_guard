@@ -17,8 +17,12 @@ on:
       - 'benches/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+  # `master` is deliberately absent. It is a stale duplicate ref (it sat at
+  # f170d642 while main moved on) and listing it fired a second full cold
+  # build for every commit -- 03:42:53 on main and 03:42:54 on master were the
+  # same SHA. See .agent-config-h4qaa.
   push:
-    branches: [master, main]
+    branches: [main]
     paths:
       - 'src/**'
       - 'benches/**'
@@ -42,16 +46,21 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@nightly
 
-      - name: Cache cargo registry and target
+      # `target` is deliberately not cached here, for the reason
+      # .agent-config-wrlqe recorded on the check job: cargo never GCs a target
+      # dir, so a cached one carries every previous generation's artifacts. The
+      # key carries `-registry-` because a restore replays the archive as it was
+      # saved -- leaving the old `-cargo-bench-` key would restore a `target`
+      # no matter what `path` says here.
+      - name: Cache cargo registry
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-bench-registry-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-bench-
+            ${{ runner.os }}-cargo-bench-registry-
 
       - name: Cache benchmark baseline
         uses: actions/cache@v4
@@ -63,8 +72,16 @@ jobs:
             ${{ runner.os }}-criterion-baseline-master
             ${{ runner.os }}-criterion-baseline-
 
-      - name: Build benchmarks
-        run: cargo build --release --benches
+      # There is no separate build step. `cargo build --release --benches` used
+      # to stand here and it is what died at exit 143 ten runs running. It built
+      # both bench targets under the `release` profile while the step below runs
+      # one of them under `bench`, so it was a second compile of the whole graph
+      # that warmed nothing. `cargo bench` builds what it needs.
+      - name: Report runner headroom
+        run: |
+          # The job log recorded only that the runner was told to stop. Print
+          # what it had, so the next death names its own cause.
+          nproc && free -m && df -h /
 
       - name: Run benchmarks
         run: |
@@ -117,7 +134,11 @@ jobs:
           echo "Saving benchmark baseline for future comparisons"
           # The criterion cache will be saved automatically
 
-  # Optional: Compare PR benchmarks against main
+  # This job is pull-request only, so a push to main never reaches it -- that
+  # skip is the `if` below, not a failure. It also does not compare anything:
+  # it downloads the artifact and echoes fixed text. The regression gate that
+  # actually reads the numbers is "Check for regressions" in `benchmark` above.
+  # Recorded under .agent-config-h4qaa so nobody reads this skip as a signal.
   compare:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
