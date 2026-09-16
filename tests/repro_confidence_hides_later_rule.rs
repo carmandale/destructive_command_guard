@@ -167,21 +167,16 @@ fn the_same_pair_in_the_other_order_also_denies() {
     );
 }
 
-/// The bead's own input, pinned as a REGRESSION PIN and nothing more.
+/// The bead's own input.
 ///
-/// Read what this does not prove before trusting it. It passes with the
-/// `decision_blocks` change reverted, so it is not a kill for that change. The
-/// chain, measured by the cold reviewer of `3e2736f2`: `heredoc.python.os_system`
-/// is `Severity::Medium` (`src/ast_matcher.rs`), the heredoc AST loop gates on
-/// `blocks_by_default()`, which is Critical-or-High, so the rule is skipped
-/// before `[policy.rules]` is ever consulted and the `"deny"` line above is
-/// inert. What answers here is the OUTER pack scan finding the Critical wipe.
-///
-/// It is kept because the input is the one the bead names and it must keep
-/// denying. The hole it exposes — a heredoc AST rule asking SEVERITY a question
-/// only the policy can answer, which is `.agent-config-5nyrn` one nesting level
-/// in — is tracked separately; see the follow-up bead in the tk1gu thread.
-/// Do not read a green here as evidence about confidence scoring.
+/// When `3e2736f2` landed, the `"deny"` line above was inert: the heredoc AST
+/// loop skipped `heredoc.python.os_system` (`Severity::Medium`) on severity
+/// before `[policy.rules]` was ever consulted, and the OUTER pack scan found the
+/// Critical wipe. Since `.agent-config-dcg-heredoc-policy-warn-hides-outer-fxck7`
+/// the loop asks the policy first, so the line is live: the policy denies the
+/// rule, confidence downgrades it, and it must be held rather than returned, so
+/// that the wipe behind it still decides. It now pins the heredoc AST loop's
+/// confidence question.
 #[test]
 fn the_beads_named_input_keeps_denying() {
     let config = format!("{CONFIDENCE_ON}\"heredoc.python:os_system\" = \"deny\"\n");
@@ -192,4 +187,46 @@ fn the_beads_named_input_keeps_denying() {
         run_hook_with_config(&config, "core.git", command),
         "core.git:stash-clear",
     );
+}
+
+/// The same pair inside `bash -c`. Each inner command is judged on its own
+/// (Tier 2.5), and a downgradable inner denial returned at once hid the
+/// Critical command after it exactly as above
+/// (.agent-config-dcg-heredoc-policy-warn-hides-outer-fxck7).
+#[test]
+fn a_downgradable_match_inside_bash_does_not_hide_the_critical_rule_behind_it() {
+    let command = "bash -c 'git stash drop; git stash clear'";
+    assert_denied_by(
+        command,
+        run_hook_with_config(CONFIDENCE_ON, "core.git", command),
+        "core.git:stash-clear",
+    );
+}
+
+/// A Medium heredoc rule the policy denies and confidence downgrades is held,
+/// not returned. Before that hold existed it was skipped, and the raw-command
+/// fallback -- run because `1 << 20` / `$((1 << 4))` read as an unterminated
+/// heredoc -- still read its text. It must still read it: the held match's text
+/// is not blanked. `fs.rmSync` is a fallback pattern that no pack and no Python
+/// rule reads, so only the fallback can deny these -- directly in a python
+/// heredoc, and through a bash body's inner `python3 -c`
+/// (.agent-config-dcg-heredoc-policy-warn-hides-outer-fxck7).
+#[test]
+fn a_held_downgradable_heredoc_match_is_still_read_by_the_fallback() {
+    let config = format!("{CONFIDENCE_ON}\"heredoc.python:os_system\" = \"deny\"\n");
+    for command in [
+        "python3 <<'PY'\nimport os\nos.system('node -e fs.rmSync')\nprint(1 << 20)\nPY",
+        "bash <<'EOF'\npython3 -c \"import os; os.system('node -e fs.rmSync')\"\necho $((1 << 4))\nEOF",
+    ] {
+        let (stdout, stderr, exit_code) = run_hook_with_config(&config, "core.git", command);
+        assert_eq!(
+            exit_code, 0,
+            "hook mode exits 0 even on deny\ncommand: {command}\nstderr: {stderr}"
+        );
+        assert!(
+            stdout.contains("\"permissionDecision\":\"deny\"") && stdout.contains("fallback check"),
+            "the fallback must still read the held match's text\n\
+             command: {command}\nstdout: {stdout}\nstderr: {stderr}"
+        );
+    }
 }
