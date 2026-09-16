@@ -69,7 +69,25 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      # Bounded and non-fatal on purpose; see .agent-config-ibvzi.
+      #
+      # This fetches a third-party installer from a moving `main` and pipes it
+      # to bash, so the script itself is stdin and an interactive read inside
+      # it has nowhere to read from. It self-updates on the way through
+      # ("New version available: 5.4.4 (you have 5.4.2) ... Re-running
+      # installer with latest version"), so the bytes that run are not the
+      # bytes that were fetched. On run 35051658039 it wedged for over an
+      # hour against 6m25s on the run before it.
+      #
+      # AGENTS.md calls UBS warning-only and the next step is written to
+      # match -- it wraps `ubs` in an if/else and degrades to a warning when
+      # the binary is absent. Without `continue-on-error` here, though, a
+      # failed install still failed the whole blocking job: the non-blocking
+      # tool's installer was blocking.
+
       - name: Install UBS
+        timeout-minutes: 10
+        continue-on-error: true
         run: |
           curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/main/install.sh" \
             | bash -s -- --easy-mode
