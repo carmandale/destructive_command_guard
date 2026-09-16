@@ -2043,6 +2043,7 @@ fn run_hook_command(config: &Config, cmd: &HookCommand) -> Result<(), Box<dyn st
                         &compiled_overrides,
                         &allowlists,
                         &heredoc_settings,
+                        config.policy(),
                         cmd.continue_on_error,
                     )
                 })
@@ -2071,6 +2072,7 @@ fn run_hook_command(config: &Config, cmd: &HookCommand) -> Result<(), Box<dyn st
                     &compiled_overrides,
                     &allowlists,
                     &heredoc_settings,
+                    config.policy(),
                     cmd.continue_on_error,
                 );
                 let json = serde_json::to_string(&result)?;
@@ -2108,6 +2110,7 @@ fn run_hook_command(config: &Config, cmd: &HookCommand) -> Result<(), Box<dyn st
                 &compiled_overrides,
                 &allowlists,
                 &heredoc_settings,
+                config.policy(),
                 cmd.continue_on_error,
             );
             let json = serde_json::to_string(&result)?;
@@ -2129,6 +2132,7 @@ fn evaluate_batch_line(
     compiled_overrides: &crate::config::CompiledOverrides,
     allowlists: &crate::allowlist::LayeredAllowlist,
     heredoc_settings: &crate::config::HeredocSettings,
+    policy: &crate::config::PolicyConfig,
     continue_on_error: bool,
 ) -> BatchHookOutput {
     // Skip empty lines
@@ -2184,6 +2188,7 @@ fn evaluate_batch_line(
         compiled_overrides,
         allowlists,
         heredoc_settings,
+        policy,
         None,
         None,
         None, // No deadline for batch mode
@@ -3564,6 +3569,7 @@ fn test_command(
         &compiled_overrides,
         &allowlists,
         &heredoc_settings,
+        effective_config.policy(),
         None, // allow_once_audit
         None, // project_path
         None, // deadline
@@ -5295,6 +5301,7 @@ fn handle_explain(
         &compiled_overrides,
         &allowlists,
         &heredoc_settings,
+        effective_config.policy(),
     );
     collector.end_step(
         "full_evaluation",
@@ -5955,6 +5962,7 @@ fn run_single_corpus_test(
         &compiled_overrides,
         &allowlists,
         &heredoc_settings,
+        effective_config.policy(),
     );
     let duration_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
 
@@ -9663,6 +9671,7 @@ fn run_smoke_test() -> bool {
         &compiled_overrides,
         &allowlists,
         &heredoc_settings,
+        config.policy(),
     );
     if !allow_result.is_allowed() {
         return false;
@@ -9677,6 +9686,7 @@ fn run_smoke_test() -> bool {
         &compiled_overrides,
         &allowlists,
         &heredoc_settings,
+        config.policy(),
     );
     !deny_result.is_allowed()
 }
@@ -12083,6 +12093,7 @@ mod tests {
                     &ctx.compiled_overrides,
                     &ctx.allowlists,
                     &ctx.heredoc_settings,
+                    &crate::config::PolicyConfig::default(),
                     true,
                 )
             })

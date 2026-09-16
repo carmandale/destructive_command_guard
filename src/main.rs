@@ -602,6 +602,7 @@ fn main() {
         &compiled_overrides,
         &allowlists,
         &heredoc_settings,
+        config.policy(),
         None, // allow_once_audit
         None, // project_path
         Some(&deadline),

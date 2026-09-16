@@ -832,6 +832,7 @@ where
             &compiled_overrides,
             &allowlists,
             &heredoc_settings,
+            config.policy(),
         );
         aggregator.record(&cmd.command, cmd.line_number, &result);
     }
