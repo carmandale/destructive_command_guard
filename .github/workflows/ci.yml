@@ -451,6 +451,15 @@ jobs:
       - name: Run memory tests
         id: memory_tests
         run: |
+          # `if cargo test ... | tee ...` tests TEE's status, not cargo's, and
+          # tee always succeeds. Until this line existed a run printing
+          # "test result: FAILED. 6 passed; 1 failed" still printed
+          # "=== Memory Tests: ALL PASSED ===" and the job concluded success.
+          # It was invisible while .agent-config-q8lht kept the job from ever
+          # reaching its tests. Every other pipeline in this step is `echo |
+          # tee`, so pipefail cannot fire on them.
+          set -o pipefail
+
           echo "=== DCG Memory Leak Tests ===" | tee memory-output.log
           echo "Timestamp: $(date -Iseconds)" | tee -a memory-output.log
           echo "Runner: ${{ runner.os }}" | tee -a memory-output.log

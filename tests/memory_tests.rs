@@ -396,8 +396,16 @@ fn memory_leak_self_test() {
 
     let result = std::panic::catch_unwind(|| {
         assert_no_leak("intentional_leak", 100, 1024 * 1024, || {
-            let leaked: Vec<u8> = vec![0u8; 1024 * 1024];
-            std::mem::forget(leaked);
+            // `black_box` is load-bearing, not decoration. An allocation that
+            // is never observed may be removed outright, and at opt-level 3
+            // LLVM does exactly that: this leak measured 0 KB growth and the
+            // assert below fired with "Memory leak detection is BROKEN". It
+            // survived only because `[profile.release]` here is opt-level "z".
+            // See .agent-config-q8lht. Without this the suite's ONLY control
+            // is disarmed, and a real leak would go unnoticed.
+            let mut leaked: Vec<u8> = vec![0u8; 1024 * 1024];
+            leaked[0] = 1;
+            std::mem::forget(std::hint::black_box(leaked));
         });
     });
 
