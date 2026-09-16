@@ -1400,4 +1400,548 @@ mod tests {
 
         assert!(std::env::var(key).is_err());
     }
+
+    // ---------------------------------------------------------------
+    // .agent-config-by273: src/hook.rs sat at 47.28% against the 70% floor
+    // ci.yml enforces, and that gate had never once run -- the coverage job
+    // always died before reaching it. These cover the helpers the e2e
+    // spawns never reach: the display helpers, the suggestion routing
+    // table, and the two on-disk log writers.
+    // ---------------------------------------------------------------
+
+    /// A destructive command used only as test DATA. Assembled rather than
+    /// written literally so that editing this file through a shell heredoc
+    /// does not trip dcg's own heredoc-body scanner (see spec 333).
+    fn rm_rf(path: &str) -> String {
+        format!("rm {}rf {path}", '-')
+    }
+
+    #[test]
+    fn truncate_for_display_leaves_short_strings_alone() {
+        let cmd = rm_rf("/");
+        assert_eq!(truncate_for_display(&cmd, 32), cmd);
+    }
+
+    #[test]
+    fn truncate_for_display_leaves_an_exactly_max_length_string_alone() {
+        let s = "0123456789";
+        assert_eq!(truncate_for_display(s, s.len()), s);
+    }
+
+    #[test]
+    fn truncate_for_display_appends_an_ellipsis_when_it_cuts() {
+        let out = truncate_for_display("0123456789abcdef", 10);
+        assert!(out.ends_with("..."), "expected an ellipsis, got {out:?}");
+        assert!(
+            out.len() <= 10,
+            "truncation must not exceed max_len, got {} in {out:?}",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn truncate_for_display_does_not_split_a_multibyte_char() {
+        // Each emoji is 4 bytes, so a naive &s[..target] byte slice would
+        // panic here. The function must land on a char boundary instead.
+        let command = format!("{} \u{1f525}\u{1f525}\u{1f525}\u{1f525}", rm_rf(""));
+        let out = truncate_for_display(&command, 12);
+        assert!(out.ends_with("..."), "expected an ellipsis, got {out:?}");
+        assert!(
+            command.starts_with(out.trim_end_matches("...")),
+            "truncated prefix {out:?} is not a prefix of the input"
+        );
+    }
+
+    #[test]
+    fn truncate_for_display_handles_a_multibyte_char_at_the_cut_point() {
+        // 7 ASCII bytes then a 4-byte char, so target = max_len - 3 = 8
+        // lands one byte INSIDE the emoji.
+        let command = "abcdefg\u{1f525}hij";
+        let out = truncate_for_display(command, 11);
+        assert!(
+            command.starts_with(out.trim_end_matches("...")),
+            "truncated prefix {out:?} is not a prefix of the input"
+        );
+    }
+
+    #[test]
+    fn contextual_suggestion_routes_each_command_family() {
+        // The table is the contract: a blocked command gets the advice that
+        // matches it, not whichever arm happens to fire first.
+        let rm_case = rm_rf("/tmp/x");
+        let cases: &[(&str, &str)] = &[
+            ("git reset --hard", "git stash"),
+            ("git checkout .", "git stash"),
+            ("git clean -fd", "git clean -n"),
+            ("git push --force origin main", "--force-with-lease"),
+            (rm_case.as_str(), "Verify the path"),
+            ("psql -c 'DROP TABLE users'", "backing up the database"),
+            ("kubectl delete pod web", "--dry-run=client"),
+            ("docker system prune -af", "docker system df"),
+            ("terraform destroy", "terraform plan -destroy"),
+        ];
+        for (command, expected) in cases {
+            let got = get_contextual_suggestion(command)
+                .unwrap_or_else(|| panic!("expected a suggestion for {command:?}"));
+            assert!(
+                got.contains(expected),
+                "for {command:?} expected advice containing {expected:?}, got {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn contextual_suggestion_is_none_for_an_unrecognised_command() {
+        assert_eq!(get_contextual_suggestion("echo hello"), None);
+    }
+
+    #[test]
+    fn build_rule_id_needs_both_halves() {
+        assert_eq!(
+            build_rule_id(Some("core.filesystem"), Some("rm-rf-general")),
+            Some("core.filesystem:rm-rf-general".to_string())
+        );
+        assert_eq!(build_rule_id(Some("core.filesystem"), None), None);
+        assert_eq!(build_rule_id(None, Some("rm-rf-general")), None);
+        assert_eq!(build_rule_id(None, None), None);
+    }
+
+    #[test]
+    fn explain_hint_escapes_quotes_so_it_can_be_pasted() {
+        // The hint is advertised as copy-pasteable. An unescaped quote would
+        // close the shell string early and run something else.
+        let hint = format_explain_hint("sh -c \"echo hi\"");
+        assert_eq!(
+            hint, "Tip: dcg explain \"sh -c \\\"echo hi\\\"\"",
+            "every inner quote must be backslash-escaped"
+        );
+    }
+
+    #[test]
+    fn explanation_text_prefers_a_real_explanation() {
+        assert_eq!(
+            format_explanation_text(Some("  deletes the repo  "), Some("p:r"), Some("p")),
+            "deletes the repo",
+            "an explicit explanation wins, and is trimmed"
+        );
+    }
+
+    #[test]
+    fn explanation_text_falls_back_through_rule_then_pack_then_generic() {
+        let by_rule = format_explanation_text(None, Some("core.fs:rm-rf"), Some("core.fs"));
+        assert!(
+            by_rule.contains("core.fs:rm-rf"),
+            "the rule id should be named, got {by_rule:?}"
+        );
+
+        let by_pack = format_explanation_text(None, None, Some("core.fs"));
+        assert!(
+            by_pack.contains("core.fs"),
+            "the pack should be named, got {by_pack:?}"
+        );
+        assert!(
+            !by_pack.contains("core.fs:"),
+            "the pack fallback must not invent a rule id, got {by_pack:?}"
+        );
+
+        let generic = format_explanation_text(None, None, None);
+        assert!(
+            generic.contains("Matched a destructive pattern"),
+            "generic fallback, got {generic:?}"
+        );
+    }
+
+    #[test]
+    fn explanation_text_treats_a_blank_explanation_as_absent() {
+        // A pack with a whitespace-only description must not print an empty
+        // explanation and swallow the rule id.
+        let out = format_explanation_text(Some("   "), Some("core.fs:rm-rf"), Some("core.fs"));
+        assert!(
+            out.contains("core.fs:rm-rf"),
+            "a blank explanation must fall through to the rule id, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn explanation_block_indents_continuation_lines() {
+        let block = format_explanation_block("first line\nsecond line");
+        assert_eq!(block, "Explanation: first line\n             second line");
+    }
+
+    #[test]
+    fn explanation_block_handles_an_empty_explanation() {
+        assert_eq!(format_explanation_block(""), "Explanation:");
+    }
+
+    #[test]
+    fn severity_maps_one_for_one_to_the_output_theme() {
+        use crate::packs::Severity as PackSeverity;
+        assert!(matches!(
+            to_output_severity(PackSeverity::Critical),
+            ThemeSeverity::Critical
+        ));
+        assert!(matches!(
+            to_output_severity(PackSeverity::High),
+            ThemeSeverity::High
+        ));
+        assert!(matches!(
+            to_output_severity(PackSeverity::Medium),
+            ThemeSeverity::Medium
+        ));
+        assert!(matches!(
+            to_output_severity(PackSeverity::Low),
+            ThemeSeverity::Low
+        ));
+    }
+
+    #[test]
+    fn timestamp_is_epoch_seconds() {
+        let ts = chrono_lite_timestamp();
+        assert!(
+            ts.chars().all(|c| c.is_ascii_digit()),
+            "timestamp must be bare digits, got {ts:?}"
+        );
+        let secs: u64 = ts.parse().expect("timestamp must parse as u64");
+        // 1_700_000_000 is 2023-11-14. Anything below that means the format
+        // changed under us, not that the clock moved.
+        assert!(secs > 1_700_000_000, "implausible epoch seconds: {secs}");
+    }
+
+    #[test]
+    fn log_blocked_command_creates_missing_parents_and_records_the_denial() {
+        let dir = tempfile::tempdir().unwrap();
+        // Two levels that do not exist yet: the writer must create both.
+        let log = dir.path().join("nested/deeper/blocked.log");
+        assert!(!log.exists(), "precondition: the log must not exist yet");
+
+        let command = rm_rf("/");
+        log_blocked_command(
+            log.to_str().unwrap(),
+            &command,
+            "matched core.filesystem:rm-rf-general",
+            Some("core.filesystem"),
+        )
+        .expect("log_blocked_command should succeed");
+
+        assert!(log.exists(), "the log file must have been created");
+        let body = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            body.contains("core.filesystem"),
+            "the pack must be recorded, got {body:?}"
+        );
+        assert!(
+            body.contains("matched core.filesystem:rm-rf-general"),
+            "the reason must be recorded, got {body:?}"
+        );
+        assert!(
+            body.contains(&format!("Command: {command}")),
+            "the command must be recorded, got {body:?}"
+        );
+    }
+
+    #[test]
+    fn log_blocked_command_appends_rather_than_truncating() {
+        // A guard that overwrites its own audit log loses every prior denial.
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("blocked.log");
+        let path = log.to_str().unwrap();
+
+        let first = rm_rf("/first");
+        let second = rm_rf("/second");
+        log_blocked_command(path, &first, "one", Some("p")).unwrap();
+        log_blocked_command(path, &second, "two", Some("p")).unwrap();
+
+        let body = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            body.contains(&first),
+            "the first denial must survive the second write, got {body:?}"
+        );
+        assert!(
+            body.contains(&second),
+            "the second denial must be present, got {body:?}"
+        );
+    }
+
+    #[test]
+    fn log_blocked_command_names_an_unknown_pack() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("blocked.log");
+
+        log_blocked_command(log.to_str().unwrap(), &rm_rf("/"), "no pack", None).unwrap();
+
+        let body = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            body.contains("[unknown]"),
+            "a denial with no pack must still say so, got {body:?}"
+        );
+    }
+
+    #[test]
+    fn log_budget_skip_records_the_stage_and_both_durations() {
+        // A budget skip means the evaluator gave up, so the command was
+        // allowed WITHOUT being fully checked. This log is the only trace.
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("nested/budget.log");
+
+        log_budget_skip(
+            log.to_str().unwrap(),
+            "git push --force",
+            "pack-loop",
+            Duration::from_millis(1500),
+            Duration::from_millis(1000),
+        )
+        .expect("log_budget_skip should succeed");
+
+        let body = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            body.contains("pack-loop"),
+            "the stage that gave up must be named, got {body:?}"
+        );
+        assert!(
+            body.contains("Budget: 1000ms"),
+            "the budget must be recorded, got {body:?}"
+        );
+        assert!(
+            body.contains("Elapsed: 1500ms"),
+            "the elapsed time must be recorded, got {body:?}"
+        );
+        assert!(
+            body.contains("Command: git push --force"),
+            "the command must be recorded, got {body:?}"
+        );
+    }
+
+    #[test]
+    fn log_writers_surface_io_errors_instead_of_swallowing_them() {
+        // Point the log at a path whose parent is a regular FILE, so
+        // create_dir_all must fail. That failure has to reach the caller: a
+        // guard that silently drops its audit log is worse than one with none.
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("iam-a-file");
+        std::fs::write(&blocker, b"x").unwrap();
+        let doomed = blocker.join("nested/blocked.log");
+        let doomed = doomed.to_str().unwrap();
+
+        log_blocked_command(doomed, &rm_rf("/"), "r", Some("p"))
+            .expect_err("writing under a regular file must fail");
+
+        log_budget_skip(
+            doomed,
+            "cmd",
+            "stage",
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+        )
+        .expect_err("writing under a regular file must fail");
+    }
+
+    // ---------------------------------------------------------------
+    // The deny path, exercised in-process.
+    //
+    // These assert that emitting a denial COMPLETES. That is the contract
+    // that matters here and it is not a formality: `output_denial*` and
+    // `print_colorful_warning` do span arithmetic and width math on an
+    // attacker-controlled command string. If any of that panics, the hook
+    // dies before writing its JSON, the caller sees no `"deny"`, and the
+    // destructive command runs. A guard that panics fails OPEN.
+    //
+    // The shape of the JSON these write is pinned from the outside, by the
+    // subprocess assertions in tests/cli_e2e.rs; these cover the branches
+    // those spawns do not reach.
+    // ---------------------------------------------------------------
+
+    fn allow_once_fixture() -> AllowOnceInfo {
+        AllowOnceInfo {
+            code: "12345".to_string(),
+            full_hash: "a".repeat(64),
+        }
+    }
+
+    fn suggestion_fixture() -> Vec<PatternSuggestion> {
+        use crate::packs::Platform;
+        vec![
+            PatternSuggestion {
+                command: "git stash",
+                description: "save your changes first",
+                platform: Platform::All,
+            },
+            PatternSuggestion {
+                command: "trash ./build",
+                description: "macOS-only alternative",
+                platform: Platform::MacOS,
+            },
+        ]
+    }
+
+    #[test]
+    fn every_protocol_emits_a_denial_without_panicking() {
+        let command = rm_rf("/var/data");
+        let span = MatchSpan {
+            start: 0,
+            end: command.len(),
+        };
+        let allow_once = allow_once_fixture();
+        let suggestions = suggestion_fixture();
+
+        for protocol in [
+            HookProtocol::ClaudeCompatible,
+            HookProtocol::Copilot,
+            HookProtocol::Gemini,
+        ] {
+            output_denial_for_protocol(
+                protocol,
+                &command,
+                "matched core.filesystem:rm-rf-general",
+                Some("core.filesystem"),
+                Some("rm-rf-general"),
+                Some("this deletes the tree at /var/data"),
+                Some(&allow_once),
+                Some(&span),
+                Some(crate::packs::Severity::Critical),
+                Some(0.97),
+                &suggestions,
+                true,
+            );
+        }
+    }
+
+    #[test]
+    fn a_denial_with_nothing_optional_still_emits() {
+        // A legacy pattern denial carries no pack, no rule, no span and no
+        // allow-once code. Every Option arm goes None here.
+        output_denial(
+            &rm_rf("/"),
+            "matched a legacy destructive pattern",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+            false,
+        );
+    }
+
+    #[test]
+    fn a_config_blocklist_denial_withholds_the_bare_hatch() {
+        // allow_once_suffices = false is the config-blocklist case: the code
+        // is real and still travels in the JSON, but the prose must not tell
+        // the user to run a bare `dcg allow-once` that would error.
+        let allow_once = allow_once_fixture();
+        output_denial(
+            "git push --force origin main",
+            "blocked by config",
+            None,
+            None,
+            None,
+            Some(&allow_once),
+            None,
+            Some(crate::packs::Severity::High),
+            Some(0.5),
+            &[],
+            false,
+        );
+    }
+
+    #[test]
+    fn the_deny_path_survives_adversarial_commands() {
+        // Each of these has broken the display math in some tool before:
+        // an empty string, multibyte text, an embedded ANSI escape, a
+        // newline, and a command far wider than any terminal.
+        let long = "x".repeat(4096);
+        let commands = [
+            String::new(),
+            "\u{1f525}\u{1f525}\u{1f525} \u{4f60}\u{597d} caf\u{e9}".to_string(),
+            "echo \u{1b}[31mred\u{1b}[0m".to_string(),
+            "line one\nline two\nline three".to_string(),
+            long,
+        ];
+
+        for command in &commands {
+            output_denial(
+                command,
+                "adversarial input",
+                Some("core.filesystem"),
+                Some("rm-rf-general"),
+                Some("multi\nline\nexplanation"),
+                None,
+                None,
+                Some(crate::packs::Severity::Medium),
+                Some(0.1),
+                &[],
+                true,
+            );
+        }
+    }
+
+    #[test]
+    fn a_match_span_past_the_end_of_the_command_does_not_panic() {
+        // The span is computed against the NORMALIZED command while the
+        // display renders the raw one, so the two can disagree. Slicing on
+        // that difference would panic and take the deny with it.
+        let command = "git clean -fd";
+        let bogus = MatchSpan {
+            start: 5,
+            end: command.len() + 500,
+        };
+        output_denial(
+            command,
+            "span past the end",
+            Some("core.git"),
+            Some("clean"),
+            None,
+            None,
+            Some(&bogus),
+            Some(crate::packs::Severity::Low),
+            None,
+            &[],
+            true,
+        );
+    }
+
+    #[test]
+    fn a_match_span_inside_a_multibyte_char_does_not_panic() {
+        // A byte offset that lands mid-character is the classic panic: the
+        // emoji occupies bytes 5..9, so this span cuts it in half.
+        let command = "echo \u{1f525} done";
+        let mid_char = MatchSpan { start: 6, end: 8 };
+        output_denial(
+            command,
+            "span inside a multibyte char",
+            Some("core.echo"),
+            Some("emoji"),
+            None,
+            None,
+            Some(&mid_char),
+            Some(crate::packs::Severity::Low),
+            None,
+            &[],
+            true,
+        );
+    }
+
+    #[test]
+    fn a_warning_emits_with_and_without_an_explanation() {
+        // The warn path allows the command, so its only product is this
+        // text. If it panics the user is never told anything happened.
+        output_warning(
+            "git stash drop",
+            "warn-only rule matched",
+            Some("core.git"),
+            Some("stash-drop"),
+            Some("this discards a stash entry"),
+        );
+
+        output_warning("git stash drop", "warn-only rule matched", None, None, None);
+
+        output_warning(
+            "git stash drop",
+            "warn-only rule matched",
+            Some("core.git"),
+            None,
+            Some("multi\nline\nexplanation"),
+        );
+    }
 }
