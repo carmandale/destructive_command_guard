@@ -131,6 +131,27 @@ strip = true        # Remove debug symbols
 [profile.dev]
 opt-level = 1       # Faster compile times during development
 
+# Benchmarks are not a distribution artifact; see .agent-config-h4qaa.
+#
+# `bench` inherits `release` by default, and `release` above is tuned for a
+# lean shipped binary: `opt-level = "z"`, fat `lto`, `codegen-units = 1`. Under
+# that profile a bench build compiles the whole graph -- normal deps plus
+# dev-dependencies (criterion + html_reports, proptest, assert_cmd) -- with
+# every rustc holding whole-crate LLVM IR. It is the only build in this repo
+# that does; `ci` uses the dev and test profiles. On a 4 vCPU / 16 GB
+# `ubuntu-latest` runner that build died ten for ten, always mid-compile and
+# never at the same crate or the same elapsed time (3m42s to 29m08s), which is
+# resource exhaustion rather than a timeout.
+#
+# Size-optimization is also the wrong measurement: `opt-level = "z"` benchmarks
+# a binary nobody ships benchmarks from. `opt-level = 3` with thin LTO is what
+# the numbers in `src/perf.rs` are budgets for.
+[profile.bench]
+inherits = "release"
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+
 [features]
 rayon = ["dep:rayon"]
 rich-output = ["dep:rich_rust"]  # Enable rich_rust for premium terminal output
