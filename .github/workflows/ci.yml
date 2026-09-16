@@ -31,16 +31,37 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
-      - name: Cache cargo registry and target
+      # `target` is deliberately not cached here; see .agent-config-wrlqe.
+      #
+      # cargo never GCs a target dir, so a cached one carries every previous
+      # generation's artifacts plus whatever the run adds. Measured on run
+      # 35049780561, which started from an empty cache: `target` went 1.2G ->
+      # 60G across the test step, free space on the runner went 84G -> 25G,
+      # and Post job then saved a 10.74G entry for the next run to restore.
+      # Two more generations of that and the job is back where
+      # .agent-config-dcg-ci-runner-out-of-disk-3in9f found it.
+      #
+      # It was not buying speed either. That cold run did the whole job in
+      # 21m39s and then spent 3m27s saving the entry, while the previous
+      # warm-cache run took 28m33s and died. What is worth caching is the
+      # registry: crate sources are bounded and re-downloading them is pure
+      # loss. Compilation is not cached, so every run rebuilds from the same
+      # baseline and headroom stays flat by construction rather than by
+      # anyone remembering to prune.
+      #
+      # The key carries `-registry-` because a restore replays the archive as
+      # it was saved: leaving the old key would have restored the 60G
+      # `target` no matter what `path` says here.
+
+      - name: Cache cargo registry
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-check-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-check-registry-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-check-
+            ${{ runner.os }}-cargo-check-registry-
 
       - name: Check formatting
         run: cargo fmt -- --check
