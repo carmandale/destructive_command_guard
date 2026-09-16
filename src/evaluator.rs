@@ -1890,10 +1890,6 @@ fn evaluate_packs_with_allowlists(
             }
         }
 
-        // Every match of every safe pattern, built only once a rule has searched
-        // on past an exemption.
-        let mut every_safe_span: Option<Vec<(usize, usize)>> = None;
-
         'patterns: for pattern in &pack.destructive_patterns {
             if deadline_exceeded(deadline) || remaining_below(deadline, &crate::perf::PATTERN_MATCH)
             {
@@ -1917,25 +1913,29 @@ fn evaluate_packs_with_allowlists(
                     .find_command_word_from(command_for_packs, from)
                 {
                     Ok(Some((start, end))) => {
-                        // Until a match has been exempted, the spans are each safe
-                        // pattern's first match, exactly as before searching on
-                        // existed, so no rule loses a match it used to report. Only
-                        // the rest of a line past an exemption, which used to go
-                        // unread, is judged against every safe match: the second of
-                        // two dry runs needs a span of its own. Every span from the
-                        // start would let a wide safe pattern's later match
+                        // One span list, read the same way on every pass. It used
+                        // to be two: each pattern's FIRST match until a match had
+                        // been exempted, then every match for the rest of the line,
+                        // because the second of two dry runs needs a span of its own
+                        // (`.agent-config-35ysf`). That split made the verdict depend
+                        // on the order of unrelated commands — a pattern that matched
+                        // an earlier harmless command left the command being judged
+                        // with no span at all, and `from == 0` is exactly when a
+                        // destructive match in a LATER command is judged
+                        // (`.agent-config-nlid7`).
+                        //
+                        // 35ysf kept first-match-only because every span from the
+                        // start let a wide safe pattern's later match
                         // (`docker\s+(?:inspect|logs)\s+.*\btraefik\b` reaching past
                         // `; docker kill traefik`) exempt a command the first match
-                        // left denied. A match found past an exemption is held until
-                        // the first search is done (`found_past_exemption`), so it
-                        // cannot pre-empt a rule after it.
-                        let spans = if from == 0 {
-                            safe_spans.as_slice()
-                        } else {
-                            every_safe_span
-                                .get_or_insert_with(|| pack.every_safe_span(command_for_packs))
-                                .as_slice()
-                        };
+                        // left denied. A span can no longer reach past the command it
+                        // starts in (`.agent-config-qte7t`), so a later match exempts
+                        // only its own command and those lines stay denied.
+                        //
+                        // A match found past an exemption is still held until the
+                        // first search is done (`found_past_exemption`), so it cannot
+                        // pre-empt a rule after it.
+                        let spans = safe_spans.as_slice();
                         // A safe pattern covers this match only if the match
                         // STARTS inside it. Containment of the whole span is too
                         // strict: in `rsync --dry-run -a --delete src dst` the safe

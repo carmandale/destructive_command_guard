@@ -828,3 +828,174 @@ fn the_same_tokens_with_the_destructive_command_first_deny_at_once() {
          (denied={denied}, skipped_due_to_budget={skipped}, elapsed={elapsed:?})"
     );
 }
+
+// Which command a safe pattern speaks for must not depend on the order of the
+// unrelated commands around it (`.agent-config-nlid7`).
+//
+// `Pack::safe_spans` kept each safe pattern's FIRST match, so when one pattern
+// covered two commands on a line the later one got no span at all. The
+// evaluator consults those spans while `from == 0`, which is exactly when a
+// destructive match in the LATER command is judged: the command denied there
+// and allowed when it ran alone. Nothing about either command changed — only
+// what ran in front of it.
+//
+// The fix keeps each pattern's first match in EVERY command, so a pattern
+// speaks for each command it covers. It cannot widen an exemption past that
+// command, because a span is matched inside one command to begin with
+// (`.agent-config-qte7t`); the destructive-first controls below are the pins
+// that say so.
+// ---------------------------------------------------------------------------
+
+/// The two gh packs plus `core`. Not in `Config::default()`, so the control
+/// test below has to prove they were reached.
+const GH_PACKS: [&str; 3] = ["core", "cicd.github_actions", "platform.github"];
+
+#[test]
+fn the_gh_packs_are_actually_reached() {
+    for cmd in [
+        "gh api -X DELETE /repos/o/r/hooks/7",
+        "gh api -X DELETE /repos/o/r/actions/secrets/FOO",
+    ] {
+        assert!(
+            is_denied_with(&GH_PACKS, cmd),
+            "the gh packs are not enabled in this harness, so every negative \
+             assertion in the nlid7 block would pass without evaluating \
+             anything: {cmd}"
+        );
+    }
+}
+
+#[test]
+fn a_command_in_front_does_not_move_a_safe_span_off_the_command_being_judged() {
+    // A command in front, and every separator that can put it there. WHICH
+    // separator exposed this moved twice while the bead was open, under
+    // unrelated repairs to how far a destructive regex reaches and to where a
+    // command ends. The first match is not a property of the command being
+    // judged, so the pin sweeps the separators rather than naming one.
+    for (packs, alone, in_front) in [
+        (
+            GH_PACKS,
+            // The bead's measured command. One safe pattern spells both
+            // `--method GET` and `-X GET`, so the command in front could
+            // consume the only span this one had.
+            //
+            // The bead's prefix was `gh api "/repos/o/r/issues?state=open\
+            // &per_page=100" --method GET`, with a quoted `&`. That spelling
+            // denies for a reason that has nothing to do with order: an `&`
+            // inside quotes ends the command it sits in, so the command loses
+            // its own safe span with no second command on the line at all
+            // (`.agent-config-nh7t4`). The query string is dropped here so this
+            // test measures the order and only the order; nh7t4 owns putting
+            // that spelling back.
+            "gh api -X GET /user -X DELETE /repos/o/r/hooks/7",
+            "gh api /repos/o/r/issues --method GET",
+        ),
+        (
+            GH_PACKS,
+            // The same shape on the actions-secret rule.
+            "gh api -X GET /repos/o/r/actions/secrets/FOO -X DELETE /repos/o/r/actions/secrets/FOO",
+            "gh api --method GET /repos/o/r/actions/secrets",
+        ),
+    ] {
+        assert!(
+            !is_denied_with(&packs, alone),
+            "control: this command is allowed on its own, so a denial in \
+             company is the order and nothing else: {alone}"
+        );
+        for sep in ["\n", " && ", " ; ", " | "] {
+            let line = format!("{in_front}{sep}{alone}");
+            assert!(
+                !is_denied_with(&packs, &line),
+                "an unrelated command in front must not deny this one: {line}"
+            );
+        }
+    }
+}
+
+/// The same class on the packs this machine runs, with no gh pack in sight.
+#[test]
+fn an_earlier_dry_run_does_not_cost_a_later_one_its_exemption() {
+    assert!(
+        !is_denied("rsync --dry-run --delete c d"),
+        "control: a dry run is allowed on its own"
+    );
+    for cmd in [
+        "rsync --dry-run a b && rsync --dry-run --delete c d",
+        "rsync --dry-run a b\nrsync --dry-run --delete c d",
+        "rsync --dry-run a b ; rsync --dry-run --delete c d",
+        "rsync --dry-run a b | rsync --dry-run --delete c d",
+        "rsync -n a b ; rsync --dry-run a b ; rsync --dry-run --delete c d",
+    ] {
+        assert!(
+            !is_denied(cmd),
+            "the later dry run needs a span of its own: {cmd}"
+        );
+    }
+}
+
+/// The direction that must NOT move. Consulting every command's safe match is
+/// only safe while a span stays inside its own command; if one ever reaches
+/// past a separator again, these lines are where it shows.
+#[test]
+fn a_safe_command_in_front_still_never_exempts_the_destructive_one() {
+    for cmd in [
+        "rsync --dry-run a b && rsync -a --delete /src/ /dst/",
+        "rsync --dry-run a b\nrsync -a --delete /src/ /dst/",
+        "rsync --dry-run a b ; rsync -a --delete /src/ /dst/ ; rsync --dry-run c d",
+    ] {
+        assert!(
+            is_denied(cmd),
+            "a harmless command must not whitelist the real delete: {cmd}"
+        );
+    }
+    for cmd in [
+        "gh api --method GET /repos/o/r/hooks\ngh api -X DELETE /repos/o/r/hooks/7",
+        "gh api --method GET /repos/o/r/hooks && gh api -X DELETE /repos/o/r/hooks/7",
+    ] {
+        assert!(
+            is_denied_with(&GH_PACKS, cmd),
+            "a safe gh api GET must not whitelist a later delete: {cmd}"
+        );
+    }
+}
+
+/// The reason 35ysf kept first-match-only spans, pinned against this change.
+///
+/// Consulting every command's safe match is the thing that commit measured as
+/// 8 fixture lines going deny -> allow, because a WIDE safe pattern's later
+/// match reached past the separator and exempted the command in front of it.
+/// Per-command haystacks make that safe by construction — a match found inside
+/// command N can only exempt command N — and these are the lines that say so.
+#[test]
+fn consulting_every_command_does_not_reopen_the_wide_pattern_bypass() {
+    for (pack, cmd) in [
+        (
+            "loadbalancer.traefik",
+            "docker logs traefik\ndocker logs traefik ; docker kill traefik",
+        ),
+        // The exact line 35ysf's commit message names, in its own spelling:
+        // `docker\s+(?:inspect|logs)\s+.*\btraefik\b` reaching past the `;`
+        // is what made every-span-from-the-start unsafe then.
+        (
+            "loadbalancer.traefik",
+            "docker inspect traefik ; docker kill traefik",
+        ),
+        (
+            "loadbalancer.traefik",
+            "docker inspect traefik\ndocker inspect traefik ; docker kill traefik",
+        ),
+        (
+            "loadbalancer.traefik",
+            "kubectl describe ingressroute my-route\n\
+             kubectl get ingressroute && kubectl delete ingressroute my-route",
+        ),
+        (
+            "dns.cloudflare",
+            "curl -X GET https://api.cloudflare.com/client/v4/zones\n\
+             curl -X GET https://api.cloudflare.com/client/v4/zones && \
+             curl -X DELETE https://api.cloudflare.com/client/v4/zones/abc",
+        ),
+    ] {
+        assert!(is_denied_with(&[pack], cmd), "must stay denied: {cmd}");
+    }
+}

@@ -505,7 +505,7 @@ impl Pack {
         self.safe_patterns.iter().any(|p| p.regex.is_match(cmd))
     }
 
-    /// Spans of every safe pattern that matches `cmd`.
+    /// Spans of every safe pattern match in `cmd`, each scoped to one command.
     ///
     /// [`Self::matches_safe`] answers "is some safe pattern present anywhere in
     /// this command", which is not the same question as "is THIS destructive
@@ -515,56 +515,34 @@ impl Pack {
     /// (`.agent-config-it2wk`). Callers use these spans to exempt only the
     /// command the safe pattern actually covers.
     ///
-    /// Returns the first match of every safe pattern rather than of the first
-    /// pattern alone: two safe patterns can cover two different commands in one
-    /// line, and dropping either would deny a command the pack considers safe.
-    /// A pattern's later matches are [`Self::every_safe_span`].
+    /// EVERY match of every pattern is a span, not each pattern's first. Keeping
+    /// only the first made a command's exemption depend on the order of the
+    /// unrelated commands around it: one pattern spells both `-X GET` and
+    /// `--method GET`, so a harmless `gh api ... --method GET` in front consumed
+    /// the only span the `gh api -X GET ... -X DELETE ...` after it could have
+    /// had, and that command denied in company while it allowed alone
+    /// (`.agent-config-nlid7`). Which separator showed it moved with unrelated
+    /// repairs, because the first match is not a property of the command being
+    /// judged at all.
     ///
-    /// Each pattern is matched against one command at a time, never the whole
-    /// line; see [`command_segments`].
+    /// `.agent-config-35ysf` measured this same widening as 8 fixture lines
+    /// going deny -> allow and kept first-match-only for it. What changed is
+    /// underneath: a span can no longer reach past the command it starts in
+    /// (`.agent-config-qte7t`), so a later match exempts only its own command.
+    /// A wide `docker\s+(?:inspect|logs)\s+.*\btraefik\b` can no longer swallow
+    /// the `docker kill traefik` after `;`, which is what made every-span-from-
+    /// the-start unsafe then; `tests/repro_safe_pattern_scope.rs` pins those
+    /// exact lines.
+    ///
+    /// A self-contained pattern is matched against one command at a time. One
+    /// carrying `^`, `$` or a lookaround keeps the whole line — narrowing the
+    /// haystack widens a lookaround — and has each match clamped instead; see
+    /// [`needs_whole_line`] and [`clamp_to_command`]. A greedy `.*` in such a
+    /// pattern can still make ONE match span two commands and leave the second
+    /// without a span of its own, but no case measured here needs more than the
+    /// clamp, so it does not get more than the clamp.
     #[must_use]
     pub fn safe_spans(&self, cmd: &str) -> Vec<(usize, usize)> {
-        let segments = command_segments(cmd);
-        self.safe_patterns
-            .iter()
-            .filter_map(|p| {
-                if needs_whole_line(p.regex.as_str()) {
-                    return p
-                        .regex
-                        .find(cmd)
-                        .and_then(|span| clamp_to_command(span, &segments));
-                }
-                segments.iter().find_map(|&(from, to)| {
-                    let segment = cmd.get(from..to)?;
-                    p.regex.find(segment).map(|(s, e)| (s + from, e + from))
-                })
-            })
-            .collect()
-    }
-
-    /// True when a safe pattern matches the line read as one string.
-    ///
-    /// The question [`Self::safe_spans`] deliberately stopped answering, kept for
-    /// one caller: the evaluator has to tell "no command here is safe" from "the
-    /// `RegexSet` and the individual patterns disagree", and only the second is a
-    /// reason to skip a pack wholesale. A safe pattern that matches only by
-    /// reading across two commands answers the first — it speaks for neither of
-    /// them (`.agent-config-qte7t`).
-    #[must_use]
-    pub fn any_safe_pattern_matches_line(&self, cmd: &str) -> bool {
-        self.safe_patterns.iter().any(|p| p.regex.is_match(cmd))
-    }
-
-    /// Spans of every match of every safe pattern, where [`Self::safe_spans`]
-    /// keeps only each pattern's first.
-    ///
-    /// For judging the rest of a line after a safe match has exempted a
-    /// destructive one: the evaluator searches on from there, and the second of
-    /// two dry runs needs its own span (`.agent-config-35ysf`).
-    ///
-    /// Per command, like [`Self::safe_spans`].
-    #[must_use]
-    pub fn every_safe_span(&self, cmd: &str) -> Vec<(usize, usize)> {
         let segments = command_segments(cmd);
         let mut spans = Vec::new();
         for p in &self.safe_patterns {
@@ -590,6 +568,19 @@ impl Pack {
             }
         }
         spans
+    }
+
+    /// True when a safe pattern matches the line read as one string.
+    ///
+    /// The question [`Self::safe_spans`] deliberately stopped answering, kept for
+    /// one caller: the evaluator has to tell "no command here is safe" from "the
+    /// `RegexSet` and the individual patterns disagree", and only the second is a
+    /// reason to skip a pack wholesale. A safe pattern that matches only by
+    /// reading across two commands answers the first — it speaks for neither of
+    /// them (`.agent-config-qte7t`).
+    #[must_use]
+    pub fn any_safe_pattern_matches_line(&self, cmd: &str) -> bool {
+        self.safe_patterns.iter().any(|p| p.regex.is_match(cmd))
     }
 
     /// Check if a command matches any destructive pattern.
