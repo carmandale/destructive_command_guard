@@ -427,16 +427,26 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@nightly
 
-      - name: Cache cargo registry and target
+      # `target` is deliberately NOT cached. cargo never GCs it, so each cache
+      # generation restores the previous tree plus whatever this run added, and
+      # headroom shrinks monotonically -- see .agent-config-wrlqe. The key
+      # carries `-registry-` so actions/cache cannot replay an older archive
+      # that still holds a target tree, no matter what `path` says here.
+      - name: Cache cargo registry
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-memory-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-memory-registry-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-memory-
+            ${{ runner.os }}-cargo-memory-registry-
+
+      - name: Report runner headroom
+        run: |
+          # The job log recorded only that the runner was told to stop. Print
+          # what it had, so the next death names its own cause.
+          nproc && free -m && df -h /
 
       - name: Run memory tests
         id: memory_tests
@@ -453,9 +463,26 @@ jobs:
           echo "" | tee -a memory-output.log
 
           echo "=== Running Memory Tests ===" | tee -a memory-output.log
-          # Memory tests must run sequentially for accurate measurements
-          # Release mode for realistic performance characteristics
-          if cargo test --test memory_tests --release -- --nocapture --test-threads=1 2>&1 | tee -a memory-output.log; then
+          # Memory tests must run sequentially for accurate measurements.
+          #
+          # Optimized, but NOT `--release`. See .agent-config-q8lht.
+          # `[profile.release]` here is tuned for a shipped binary (opt-level
+          # "z", fat lto, codegen-units = 1). Measured with `cargo --unit-graph`:
+          # `cargo test --release --test memory_tests` is 1081 units, 755 of them
+          # at codegen-units = 1, because a test build drags the dev-dependencies
+          # under that profile too. The `cargo build --release` steps in e2e,
+          # scan-regression and perf-regression are 677 units / 359 at cgu = 1 --
+          # and those jobs pass. This one built 2.1x as many rustc processes each
+          # holding whole-crate LLVM IR, and on a 4 vCPU / 16 GB ubuntu-latest
+          # runner the OOM killer took the runner service mid-dependency-compile.
+          # The job then reported a bare exit 143, so an infra shutdown read as a
+          # failing memory test.
+          # `[profile.bench]` is the same graph at opt-level 3 / thin lto /
+          # codegen-units 16 -- 1081 units, ZERO at cgu = 1, already proven to build here
+          # (.agent-config-h4qaa) and what the budgets in src/perf.rs are
+          # written against. These tests assert memory GROWTH against a
+          # runtime baseline, so the profile moves the baseline, not the budget.
+          if cargo test --test memory_tests --profile bench -- --nocapture --test-threads=1 2>&1 | tee -a memory-output.log; then
             echo "" | tee -a memory-output.log
             echo "=== Memory Tests: ALL PASSED ===" | tee -a memory-output.log
             echo "memory_tests_result=passed" >> $GITHUB_OUTPUT
