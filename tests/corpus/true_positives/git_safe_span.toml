@@ -35,3 +35,32 @@ description = "reset --hard is not exempted by a later clean -n"
 command = "git reset --hard && git clean -n"
 expected = "deny"
 rule_id = "core.git:reset-hard"
+
+# The reverse order: a safe git command FIRST must not exempt a destructive git
+# command after it (.agent-config-uyc9l). The destructive patterns keep the
+# separator-crossing skipper, so their leftmost match started at the first `git`,
+# inside the safe command's span.
+
+[[case]]
+description = "force push is not exempted by an earlier checkout -b"
+command = "git checkout -b feat && git push --force origin main"
+expected = "deny"
+rule_id = "core.git:push-force-long"
+
+[[case]]
+description = "reset --hard is not exempted by an earlier checkout -b after a semicolon"
+command = "git checkout -b feat ; git reset --hard"
+expected = "deny"
+rule_id = "core.git:reset-hard"
+
+[[case]]
+description = "clean -fd is not exempted by an earlier clean -n"
+command = "git clean -n && git clean -fd"
+expected = "deny"
+rule_id = "core.git:clean-force"
+
+[[case]]
+description = "restore of the worktree is not exempted by an earlier restore --staged"
+command = "git restore --staged a.txt && git restore b.txt"
+expected = "deny"
+rule_id = "core.git:restore-worktree"

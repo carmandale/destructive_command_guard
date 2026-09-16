@@ -94,6 +94,10 @@ fn safe_git_commands_are_still_allowed_on_their_own() {
         "git clean -nfd",
         "git clean --dry-run",
         "git status && git checkout -b new-feature",
+        // A safe command FIRST, then another safe command (.agent-config-uyc9l).
+        "git checkout -b feat && git status",
+        "git restore --staged a.txt && git restore --staged b.txt",
+        "git clean -n && git checkout -b feat",
     ] {
         let output = run_hook(cmd);
         if output.contains("deny") {
@@ -101,4 +105,72 @@ fn safe_git_commands_are_still_allowed_on_their_own() {
         }
     }
     assert!(denied.is_empty(), "safe git commands denied: {denied:#?}");
+}
+
+/// The rule the hook denied with, or `None` when it allowed (printed nothing).
+fn denied_rule(command: &str) -> Option<String> {
+    let output = run_hook(command);
+    if output.trim().is_empty() {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_str(&output)
+        .unwrap_or_else(|e| panic!("hook output is not JSON ({e}): {output}"));
+    let hook = &json["hookSpecificOutput"];
+    assert_eq!(
+        hook["permissionDecision"], "deny",
+        "for {command}: {output}"
+    );
+    Some(
+        hook["ruleId"]
+            .as_str()
+            .unwrap_or_else(|| panic!("deny without a ruleId for {command}: {output}"))
+            .to_string(),
+    )
+}
+
+/// The reverse order: a safe git command FIRST must not exempt a destructive
+/// git command after it (.agent-config-uyc9l).
+///
+/// A safe span exempts a destructive match that STARTS inside it. The core.git
+/// destructive patterns open with a skipper that crosses `&&` (qv9dy keeps it:
+/// bounding it opened bypasses), so the leftmost destructive match started at
+/// the first `git` on the line, inside the safe `git checkout -b feat` span,
+/// although the command it matched came after it. Narrowing the safe side
+/// (t17jx) cannot reach this: that span is already one command.
+#[test]
+fn safe_git_command_first_does_not_exempt_a_destructive_one_after_it() {
+    let mut wrong = Vec::new();
+    for (cmd, rule) in [
+        (
+            "git checkout -b feat && git push --force origin main",
+            "core.git:push-force-long",
+        ),
+        (
+            "git checkout -b feat ; git reset --hard",
+            "core.git:reset-hard",
+        ),
+        ("git clean -n && git clean -fd", "core.git:clean-force"),
+        (
+            "git restore --staged a.txt && git restore b.txt",
+            "core.git:restore-worktree",
+        ),
+        // .agent-config-qv9dy's review spellings, behind a safe command.
+        (
+            "git checkout -b feat && git -C \"$(cd a && pwd)\" push --force",
+            "core.git:push-force-long",
+        ),
+        (
+            "git checkout -b feat && git -c a.b=x\\;y checkout HEAD -- f",
+            "core.git:checkout-ref-discard",
+        ),
+    ] {
+        let got = denied_rule(cmd);
+        if got.as_deref() != Some(rule) {
+            wrong.push(format!("{cmd:?}: want {rule}, got {got:?}"));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "a safe git command in front exempted a destructive one: {wrong:#?}"
+    );
 }
