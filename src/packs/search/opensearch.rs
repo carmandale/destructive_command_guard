@@ -48,27 +48,27 @@ fn create_safe_patterns() -> Vec<SafePattern> {
     vec![
         safe_pattern!(
             "os-curl-get-search",
-            r#"curl\b.*-X\s*GET\b.*\b(?:https?://)?[^\s'\"]*(?:opensearch|:9200)[^\s'\"]*/(?:[^\s/]+/)?(?:_search|_count|_mapping|_settings)\b"#
+            r#"curl\b.*-X\s*GET\b.*\b(?:https?://)?[^\s'\"]*(?:opensearch[.:/]|:9200)[^\s'\"]*/(?:[^\s/]+/)?(?:_search|_count|_mapping|_settings)\b"#
         ),
         safe_pattern!(
             "os-curl-get-cat",
-            r#"curl\b.*-X\s*GET\b.*\b(?:https?://)?[^\s'\"]*(?:opensearch|:9200)[^\s'\"]*/_cat/\S+"#
+            r#"curl\b.*-X\s*GET\b.*\b(?:https?://)?[^\s'\"]*(?:opensearch[.:/]|:9200)[^\s'\"]*/_cat/\S+"#
         ),
         safe_pattern!(
             "os-curl-get-cluster-health",
-            r#"curl\b.*-X\s*GET\b.*\b(?:https?://)?[^\s'\"]*(?:opensearch|:9200)[^\s'\"]*/_cluster/health\b"#
+            r#"curl\b.*-X\s*GET\b.*\b(?:https?://)?[^\s'\"]*(?:opensearch[.:/]|:9200)[^\s'\"]*/_cluster/health\b"#
         ),
         safe_pattern!(
             "os-http-get-search",
-            r"http\s+GET\s+(?:https?://)?\S*(?:opensearch|:9200)\S*/(?:\S+/)?(?:_search|_count|_mapping|_settings)\b"
+            r"http\s+GET\s+(?:https?://)?\S*(?:opensearch[.:/]|:9200)\S*/(?:\S+/)?(?:_search|_count|_mapping|_settings)\b"
         ),
         safe_pattern!(
             "os-http-get-cat",
-            r"http\s+GET\s+(?:https?://)?\S*(?:opensearch|:9200)\S*/_cat/\S+"
+            r"http\s+GET\s+(?:https?://)?\S*(?:opensearch[.:/]|:9200)\S*/_cat/\S+"
         ),
         safe_pattern!(
             "os-http-get-cluster-health",
-            r"http\s+GET\s+(?:https?://)?\S*(?:opensearch|:9200)\S*/_cluster/health\b"
+            r"http\s+GET\s+(?:https?://)?\S*(?:opensearch[.:/]|:9200)\S*/_cluster/health\b"
         ),
         safe_pattern!(
             "aws-opensearch-describe-domain",
@@ -85,7 +85,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
     vec![
         destructive_pattern!(
             "os-curl-delete-doc",
-            r#"curl\b.*-X\s*DELETE\b.*\b(?:https?://)?[^\s'\"]*?(?:opensearch|:9200)[^\s'\"]*?/[a-z0-9][a-z0-9._-]*/_doc/[^\s/?]+"#,
+            r#"curl\b.*-X\s*DELETE\b.*\b(?:https?://)?[^\s'\"]*?(?:opensearch[.:/]|:9200)[^\s'\"]*?/[a-z0-9][a-z0-9._-]*/_doc/[^\s/?]+"#,
             "curl -X DELETE against /_doc deletes a document from OpenSearch.",
             Medium,
             "Deleting individual documents removes them from search results immediately. \
@@ -98,7 +98,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
         destructive_pattern!(
             "os-curl-delete-by-query",
-            r#"curl\b.*-X\s*POST\b.*\b(?:https?://)?[^\s'\"]*(?:opensearch|:9200)[^\s'\"]*/[a-z0-9][a-z0-9._-]*/_delete_by_query\b"#,
+            r#"curl\b.*-X\s*POST\b.*\b(?:https?://)?[^\s'\"]*(?:opensearch[.:/]|:9200)[^\s'\"]*/[a-z0-9][a-z0-9._-]*/_delete_by_query\b"#,
             "curl -X POST to _delete_by_query deletes documents matching the query.",
             High,
             "The _delete_by_query endpoint can delete large numbers of documents at once. \
@@ -111,7 +111,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
         destructive_pattern!(
             "os-curl-close-index",
-            r#"curl\b.*-X\s*POST\b.*\b(?:https?://)?[^\s'\"]*(?:opensearch|:9200)[^\s'\"]*/(?:_all|\*|[a-z0-9][a-z0-9._-]*)/_close\b"#,
+            r#"curl\b.*-X\s*POST\b.*\b(?:https?://)?[^\s'\"]*(?:opensearch[.:/]|:9200)[^\s'\"]*/(?:_all|\*|[a-z0-9][a-z0-9._-]*)/_close\b"#,
             "curl -X POST to _close closes an index, making it unavailable for reads/writes.",
             High,
             "Closing an index makes it completely unavailable for search and indexing. \
@@ -124,7 +124,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
         destructive_pattern!(
             "os-curl-delete-index",
-            r#"curl\b.*-X\s*DELETE\b.*\b(?:https?://)?[^\s'\"]*(?:opensearch|:9200)[^\s'\"]*/(?:_all|\*|[a-z0-9][a-z0-9._-]*)(?:\b|[/?])"#,
+            r#"curl\b.*-X\s*DELETE\b.*\b(?:https?://)?[^\s'\"]*(?:opensearch[.:/]|:9200)[^\s'\"]*/(?:_all|\*|[a-z0-9][a-z0-9._-]*)(?:\b|[/?])"#,
             "curl -X DELETE against an OpenSearch index (or _all/*) deletes data permanently.",
             Critical,
             "Deleting an OpenSearch index permanently removes all documents, mappings, and \
@@ -137,7 +137,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
         destructive_pattern!(
             "os-http-delete-doc",
-            r"http\s+DELETE\s+(?:https?://)?\S*(?:opensearch|:9200)\S*/[a-z0-9][a-z0-9._-]*/_doc/[^\s/?]+",
+            r"http\s+DELETE\s+(?:https?://)?\S*(?:opensearch[.:/]|:9200)\S*/[a-z0-9][a-z0-9._-]*/_doc/[^\s/?]+",
             "http DELETE against /_doc deletes a document from OpenSearch.",
             Medium,
             "Deleting individual documents removes them from search results immediately. \
@@ -150,7 +150,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
         destructive_pattern!(
             "os-http-delete-by-query",
-            r"http\s+POST\s+(?:https?://)?\S*(?:opensearch|:9200)\S*/[a-z0-9][a-z0-9._-]*/_delete_by_query\b",
+            r"http\s+POST\s+(?:https?://)?\S*(?:opensearch[.:/]|:9200)\S*/[a-z0-9][a-z0-9._-]*/_delete_by_query\b",
             "http POST to _delete_by_query deletes documents matching the query.",
             High,
             "The _delete_by_query endpoint can delete large numbers of documents at once. \
@@ -163,7 +163,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
         destructive_pattern!(
             "os-http-close-index",
-            r"http\s+POST\s+(?:https?://)?\S*(?:opensearch|:9200)\S*/(?:_all|\*|[a-z0-9][a-z0-9._-]*)/_close\b",
+            r"http\s+POST\s+(?:https?://)?\S*(?:opensearch[.:/]|:9200)\S*/(?:_all|\*|[a-z0-9][a-z0-9._-]*)/_close\b",
             "http POST to _close closes an index, making it unavailable for reads/writes.",
             High,
             "Closing an index makes it completely unavailable for search and indexing. \
@@ -176,7 +176,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
         destructive_pattern!(
             "os-http-delete-index",
-            r"http\s+DELETE\s+(?:https?://)?\S*(?:opensearch|:9200)\S*/(?:_all|\*|[a-z0-9][a-z0-9._-]*)(?:[\s?]|$)",
+            r"http\s+DELETE\s+(?:https?://)?\S*(?:opensearch[.:/]|:9200)\S*/(?:_all|\*|[a-z0-9][a-z0-9._-]*)(?:[\s?]|$)",
             "http DELETE against an OpenSearch index (or _all/*) deletes data permanently.",
             Critical,
             "Deleting an OpenSearch index permanently removes all documents, mappings, and \
@@ -244,6 +244,36 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
 
 #[cfg(test)]
 mod tests {
+    /// A host whose label merely STARTS with "opensearch" is another service.
+    ///
+    /// `curl` and `http` are in this pack's gate (`.agent-config-x74pe`), so
+    /// every curl reaches these rules, and the host alternative was the bare
+    /// substring `opensearch` (`.agent-config-w22qy`). A hyphen continues a DNS
+    /// label, so OpenSearch Dashboards and an internal job path both matched.
+    #[test]
+    fn a_host_label_starting_with_opensearch_is_not_opensearch() {
+        let pack = super::create_pack();
+        for cmd in [
+            "curl -X DELETE https://opensearch-dashboards.example.com/api/saved_objects/x",
+            "curl -X DELETE https://api.example.com/v1/opensearch-jobs/7",
+        ] {
+            assert!(
+                pack.check(cmd).is_none(),
+                "not an OpenSearch endpoint, must not be denied: {cmd}"
+            );
+        }
+        // Controls: real OpenSearch endpoints, by host boundary and by port.
+        for cmd in [
+            "curl -X DELETE https://opensearch.local:9200/sample-index",
+            "curl -X DELETE http://localhost:9200/sample-index",
+        ] {
+            assert!(
+                pack.check(cmd).is_some(),
+                "a real OpenSearch index deletion must still be denied: {cmd}"
+            );
+        }
+    }
+
     use super::*;
     use crate::packs::test_helpers::*;
 

@@ -38,12 +38,12 @@ These patterns match safe commands that are always allowed:
 
 | Pattern Name | Pattern |
 |--------------|----------|
-| `es-curl-get-search` | `curl\b.*-X\s*GET\b.*\b(?:https?://)?[^\s'\"]*(?:elastic\|:9200)[^\s'\"]*/(?:[^\s/]+/)?(?:_search\|_count\|_mapping\|_settings)\b` |
-| `es-curl-get-cat` | `curl\b.*-X\s*GET\b.*\b(?:https?://)?[^\s'\"]*(?:elastic\|:9200)[^\s'\"]*/_cat/\S+` |
-| `es-curl-get-cluster-health` | `curl\b.*-X\s*GET\b.*\b(?:https?://)?[^\s'\"]*(?:elastic\|:9200)[^\s'\"]*/_cluster/health\b` |
-| `es-http-get-search` | `http\s+GET\s+(?:https?://)?\S*(?:elastic\|:9200)\S*/(?:\S+/)?(?:_search\|_count\|_mapping\|_settings)\b` |
-| `es-http-get-cat` | `http\s+GET\s+(?:https?://)?\S*(?:elastic\|:9200)\S*/_cat/\S+` |
-| `es-http-get-cluster-health` | `http\s+GET\s+(?:https?://)?\S*(?:elastic\|:9200)\S*/_cluster/health\b` |
+| `es-curl-get-search` | `curl\b.*-X\s*GET\b.*\b(?:https?://)?[^\s'\"]*(?:elasticsearch[.:/]\|:9200)[^\s'\"]*/(?:[^\s/]+/)?(?:_search\|_count\|_mapping\|_settings)\b` |
+| `es-curl-get-cat` | `curl\b.*-X\s*GET\b.*\b(?:https?://)?[^\s'\"]*(?:elasticsearch[.:/]\|:9200)[^\s'\"]*/_cat/\S+` |
+| `es-curl-get-cluster-health` | `curl\b.*-X\s*GET\b.*\b(?:https?://)?[^\s'\"]*(?:elasticsearch[.:/]\|:9200)[^\s'\"]*/_cluster/health\b` |
+| `es-http-get-search` | `http\s+GET\s+(?:https?://)?\S*(?:elasticsearch[.:/]\|:9200)\S*/(?:\S+/)?(?:_search\|_count\|_mapping\|_settings)\b` |
+| `es-http-get-cat` | `http\s+GET\s+(?:https?://)?\S*(?:elasticsearch[.:/]\|:9200)\S*/_cat/\S+` |
+| `es-http-get-cluster-health` | `http\s+GET\s+(?:https?://)?\S*(?:elasticsearch[.:/]\|:9200)\S*/_cluster/health\b` |
 
 ### Destructive Patterns (Blocked)
 
@@ -111,12 +111,12 @@ These patterns match safe commands that are always allowed:
 
 | Pattern Name | Pattern |
 |--------------|----------|
-| `os-curl-get-search` | `curl\b.*-X\s*GET\b.*\b(?:https?://)?[^\s'\"]*(?:opensearch\|:9200)[^\s'\"]*/(?:[^\s/]+/)?(?:_search\|_count\|_mapping\|_settings)\b` |
-| `os-curl-get-cat` | `curl\b.*-X\s*GET\b.*\b(?:https?://)?[^\s'\"]*(?:opensearch\|:9200)[^\s'\"]*/_cat/\S+` |
-| `os-curl-get-cluster-health` | `curl\b.*-X\s*GET\b.*\b(?:https?://)?[^\s'\"]*(?:opensearch\|:9200)[^\s'\"]*/_cluster/health\b` |
-| `os-http-get-search` | `http\s+GET\s+(?:https?://)?\S*(?:opensearch\|:9200)\S*/(?:\S+/)?(?:_search\|_count\|_mapping\|_settings)\b` |
-| `os-http-get-cat` | `http\s+GET\s+(?:https?://)?\S*(?:opensearch\|:9200)\S*/_cat/\S+` |
-| `os-http-get-cluster-health` | `http\s+GET\s+(?:https?://)?\S*(?:opensearch\|:9200)\S*/_cluster/health\b` |
+| `os-curl-get-search` | `curl\b.*-X\s*GET\b.*\b(?:https?://)?[^\s'\"]*(?:opensearch[.:/]\|:9200)[^\s'\"]*/(?:[^\s/]+/)?(?:_search\|_count\|_mapping\|_settings)\b` |
+| `os-curl-get-cat` | `curl\b.*-X\s*GET\b.*\b(?:https?://)?[^\s'\"]*(?:opensearch[.:/]\|:9200)[^\s'\"]*/_cat/\S+` |
+| `os-curl-get-cluster-health` | `curl\b.*-X\s*GET\b.*\b(?:https?://)?[^\s'\"]*(?:opensearch[.:/]\|:9200)[^\s'\"]*/_cluster/health\b` |
+| `os-http-get-search` | `http\s+GET\s+(?:https?://)?\S*(?:opensearch[.:/]\|:9200)\S*/(?:\S+/)?(?:_search\|_count\|_mapping\|_settings)\b` |
+| `os-http-get-cat` | `http\s+GET\s+(?:https?://)?\S*(?:opensearch[.:/]\|:9200)\S*/_cat/\S+` |
+| `os-http-get-cluster-health` | `http\s+GET\s+(?:https?://)?\S*(?:opensearch[.:/]\|:9200)\S*/_cluster/health\b` |
 | `aws-opensearch-describe-domain` | `aws(?:\s+--?\S+(?:\s+\S+)?)*\s+opensearch\s+describe-domain\b` |
 | `aws-opensearch-list-domain-names` | `aws(?:\s+--?\S+(?:\s+\S+)?)*\s+opensearch\s+list-domain-names\b` |
 

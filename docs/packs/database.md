@@ -31,9 +31,6 @@ Commands containing these keywords are checked against this pack:
 - `TRUNCATE`
 - `DELETE`
 - `postgres`
-- `delete`
-- `drop`
-- `truncate`
 
 ### Safe Patterns (Allowed)
 
@@ -98,9 +95,6 @@ Commands containing these keywords are checked against this pack:
 - `mysqladmin`
 - `mariadb`
 - `GRANT`
-- `delete`
-- `drop`
-- `truncate`
 
 ### Safe Patterns (Allowed)
 

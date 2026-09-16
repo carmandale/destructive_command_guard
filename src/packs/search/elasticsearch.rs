@@ -50,27 +50,27 @@ fn create_safe_patterns() -> Vec<SafePattern> {
     vec![
         safe_pattern!(
             "es-curl-get-search",
-            r#"curl\b.*-X\s*GET\b.*\b(?:https?://)?[^\s'\"]*(?:elastic|:9200)[^\s'\"]*/(?:[^\s/]+/)?(?:_search|_count|_mapping|_settings)\b"#
+            r#"curl\b.*-X\s*GET\b.*\b(?:https?://)?[^\s'\"]*(?:elasticsearch[.:/]|:9200)[^\s'\"]*/(?:[^\s/]+/)?(?:_search|_count|_mapping|_settings)\b"#
         ),
         safe_pattern!(
             "es-curl-get-cat",
-            r#"curl\b.*-X\s*GET\b.*\b(?:https?://)?[^\s'\"]*(?:elastic|:9200)[^\s'\"]*/_cat/\S+"#
+            r#"curl\b.*-X\s*GET\b.*\b(?:https?://)?[^\s'\"]*(?:elasticsearch[.:/]|:9200)[^\s'\"]*/_cat/\S+"#
         ),
         safe_pattern!(
             "es-curl-get-cluster-health",
-            r#"curl\b.*-X\s*GET\b.*\b(?:https?://)?[^\s'\"]*(?:elastic|:9200)[^\s'\"]*/_cluster/health\b"#
+            r#"curl\b.*-X\s*GET\b.*\b(?:https?://)?[^\s'\"]*(?:elasticsearch[.:/]|:9200)[^\s'\"]*/_cluster/health\b"#
         ),
         safe_pattern!(
             "es-http-get-search",
-            r"http\s+GET\s+(?:https?://)?\S*(?:elastic|:9200)\S*/(?:\S+/)?(?:_search|_count|_mapping|_settings)\b"
+            r"http\s+GET\s+(?:https?://)?\S*(?:elasticsearch[.:/]|:9200)\S*/(?:\S+/)?(?:_search|_count|_mapping|_settings)\b"
         ),
         safe_pattern!(
             "es-http-get-cat",
-            r"http\s+GET\s+(?:https?://)?\S*(?:elastic|:9200)\S*/_cat/\S+"
+            r"http\s+GET\s+(?:https?://)?\S*(?:elasticsearch[.:/]|:9200)\S*/_cat/\S+"
         ),
         safe_pattern!(
             "es-http-get-cluster-health",
-            r"http\s+GET\s+(?:https?://)?\S*(?:elastic|:9200)\S*/_cluster/health\b"
+            r"http\s+GET\s+(?:https?://)?\S*(?:elasticsearch[.:/]|:9200)\S*/_cluster/health\b"
         ),
     ]
 }
@@ -79,7 +79,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
     vec![
         destructive_pattern!(
             "es-curl-delete-doc",
-            r#"curl\b.*-X\s*DELETE\b.*\b(?:https?://)?[^\s'\"]*(?:elastic|:9200)[^\s'\"]*/[a-z0-9][a-z0-9._-]*/_doc/[^\s/?]+"#,
+            r#"curl\b.*-X\s*DELETE\b.*\b(?:https?://)?[^\s'\"]*(?:elasticsearch[.:/]|:9200)[^\s'\"]*/[a-z0-9][a-z0-9._-]*/_doc/[^\s/?]+"#,
             "curl -X DELETE against /_doc deletes a document from Elasticsearch.",
             Medium,
             "Deleting a document removes it from the index. The document ID becomes \
@@ -92,7 +92,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
         destructive_pattern!(
             "es-curl-delete-by-query",
-            r#"curl\b.*-X\s*POST\b.*\b(?:https?://)?[^\s'\"]*(?:elastic|:9200)[^\s'\"]*/[a-z0-9][a-z0-9._-]*/_delete_by_query\b"#,
+            r#"curl\b.*-X\s*POST\b.*\b(?:https?://)?[^\s'\"]*(?:elasticsearch[.:/]|:9200)[^\s'\"]*/[a-z0-9][a-z0-9._-]*/_delete_by_query\b"#,
             "curl -X POST to _delete_by_query deletes documents matching the query.",
             High,
             "Delete-by-query removes all documents matching the query criteria. A \
@@ -105,7 +105,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
         destructive_pattern!(
             "es-curl-close-index",
-            r#"curl\b.*-X\s*POST\b.*\b(?:https?://)?[^\s'\"]*(?:elastic|:9200)[^\s'\"]*/(?:_all|\*|[a-z0-9][a-z0-9._-]*)/_close\b"#,
+            r#"curl\b.*-X\s*POST\b.*\b(?:https?://)?[^\s'\"]*(?:elasticsearch[.:/]|:9200)[^\s'\"]*/(?:_all|\*|[a-z0-9][a-z0-9._-]*)/_close\b"#,
             "curl -X POST to _close closes an index, making it unavailable for reads/writes.",
             High,
             "Closing an index blocks all read and write operations. Applications will \
@@ -118,7 +118,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
         destructive_pattern!(
             "es-curl-delete-index",
-            r#"curl\b.*-X\s*DELETE\b.*\b(?:https?://)?[^\s'\"]*(?:elastic|:9200)[^\s'\"]*/(?:_all|\*|[a-z0-9][a-z0-9._-]*)(?:[\s?'"]|$)"#,
+            r#"curl\b.*-X\s*DELETE\b.*\b(?:https?://)?[^\s'\"]*(?:elasticsearch[.:/]|:9200)[^\s'\"]*/(?:_all|\*|[a-z0-9][a-z0-9._-]*)(?:[\s?'"]|$)"#,
             "curl -X DELETE against an Elasticsearch index (or _all/*) deletes data permanently.",
             Critical,
             "Deleting an index permanently removes all documents, mappings, and settings. \
@@ -131,7 +131,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
         destructive_pattern!(
             "es-curl-cluster-settings",
-            r#"curl\b.*-X\s*PUT\b.*\b(?:https?://)?[^\s'\"]*(?:elastic|:9200)[^\s'\"]*/_cluster/settings\b"#,
+            r#"curl\b.*-X\s*PUT\b.*\b(?:https?://)?[^\s'\"]*(?:elasticsearch[.:/]|:9200)[^\s'\"]*/_cluster/settings\b"#,
             "curl -X PUT to /_cluster/settings changes cluster settings and can be dangerous.",
             High,
             "Cluster settings affect all nodes and can impact stability, performance, \
@@ -144,7 +144,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
         destructive_pattern!(
             "es-http-delete-doc",
-            r"http\s+DELETE\s+(?:https?://)?\S*(?:elastic|:9200)\S*/[a-z0-9][a-z0-9._-]*/_doc/[^\s/?]+",
+            r"http\s+DELETE\s+(?:https?://)?\S*(?:elasticsearch[.:/]|:9200)\S*/[a-z0-9][a-z0-9._-]*/_doc/[^\s/?]+",
             "http DELETE against /_doc deletes a document from Elasticsearch.",
             Medium,
             "Deleting a document removes it from the index. The document ID becomes \
@@ -157,7 +157,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
         destructive_pattern!(
             "es-http-delete-by-query",
-            r"http\s+POST\s+(?:https?://)?\S*(?:elastic|:9200)\S*/[a-z0-9][a-z0-9._-]*/_delete_by_query\b",
+            r"http\s+POST\s+(?:https?://)?\S*(?:elasticsearch[.:/]|:9200)\S*/[a-z0-9][a-z0-9._-]*/_delete_by_query\b",
             "http POST to _delete_by_query deletes documents matching the query.",
             High,
             "Delete-by-query removes all documents matching the query criteria. A \
@@ -170,7 +170,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
         destructive_pattern!(
             "es-http-close-index",
-            r"http\s+POST\s+(?:https?://)?\S*(?:elastic|:9200)\S*/(?:_all|\*|[a-z0-9][a-z0-9._-]*)/_close\b",
+            r"http\s+POST\s+(?:https?://)?\S*(?:elasticsearch[.:/]|:9200)\S*/(?:_all|\*|[a-z0-9][a-z0-9._-]*)/_close\b",
             "http POST to _close closes an index, making it unavailable for reads/writes.",
             High,
             "Closing an index blocks all read and write operations. Applications will \
@@ -183,7 +183,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
         destructive_pattern!(
             "es-http-delete-index",
-            r"http\s+DELETE\s+(?:https?://)?\S*(?:elastic|:9200)\S*/(?:_all|\*|[a-z0-9][a-z0-9._-]*)(?:[\s?]|$)",
+            r"http\s+DELETE\s+(?:https?://)?\S*(?:elasticsearch[.:/]|:9200)\S*/(?:_all|\*|[a-z0-9][a-z0-9._-]*)(?:[\s?]|$)",
             "http DELETE against an Elasticsearch index (or _all/*) deletes data permanently.",
             Critical,
             "Deleting an index permanently removes all documents, mappings, and settings. \
@@ -196,7 +196,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
         destructive_pattern!(
             "es-http-cluster-settings",
-            r"http\s+PUT\s+(?:https?://)?\S*(?:elastic|:9200)\S*/_cluster/settings\b",
+            r"http\s+PUT\s+(?:https?://)?\S*(?:elasticsearch[.:/]|:9200)\S*/_cluster/settings\b",
             "http PUT to /_cluster/settings changes cluster settings and can be dangerous.",
             High,
             "Cluster settings affect all nodes and can impact stability, performance, \
@@ -212,6 +212,44 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
 
 #[cfg(test)]
 mod tests {
+    /// Hosts that merely CONTAIN "elastic" are not Elasticsearch.
+    ///
+    /// `curl` and `http` are in this pack's gate (`.agent-config-x74pe`), so
+    /// every curl reaches these rules. While the host alternative was the bare
+    /// substring `elastic`, four ordinary REST calls measured newly DENY
+    /// (`.agent-config-w22qy`). The alternative is now the service name.
+    #[test]
+    fn a_host_that_merely_contains_elastic_is_not_elasticsearch() {
+        let pack = super::create_pack();
+        for cmd in [
+            "curl -X DELETE https://elasticache.us-east-1.amazonaws.com/v1/clusters/dev",
+            "curl -X DELETE https://elasticbeanstalk.example.com/apps/web",
+            "curl -X DELETE https://api.example.com/v1/elastic-jobs/7",
+            "curl -X DELETE https://docs.elastic.co/feedback/12",
+            // The service name is not a host boundary either: a hyphen
+            // continues the label, so these are other services too.
+            "curl -X DELETE https://api.example.com/v1/elasticsearch-jobs/7",
+            "curl -X DELETE https://elasticsearch-dashboards.example.com/apps/web",
+        ] {
+            assert!(
+                pack.check(cmd).is_none(),
+                "not an Elasticsearch endpoint, must not be denied: {cmd}"
+            );
+        }
+        // Controls: the rules still fire on real Elasticsearch endpoints, by
+        // port and by service name. Without these the test above passes for a
+        // pack whose rules were simply deleted.
+        for cmd in [
+            "curl -X DELETE http://localhost:9200/my-index",
+            "curl -X DELETE http://elasticsearch.prod.internal/_all",
+        ] {
+            assert!(
+                pack.check(cmd).is_some(),
+                "a real Elasticsearch index deletion must still be denied: {cmd}"
+            );
+        }
+    }
+
     use super::*;
     use crate::packs::test_helpers::*;
 

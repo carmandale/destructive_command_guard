@@ -220,6 +220,9 @@ Commands containing these keywords are checked against this pack:
 - `systemctl`
 - `service`
 - `upstart`
+- `shutdown`
+- `reboot`
+- `init`
 
 ### Safe Patterns (Allowed)
 

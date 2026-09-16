@@ -144,9 +144,6 @@ pub const KEYWORDS: &[&str] = &[
     "TRUNCATE",
     "DELETE",
     "postgres",
-    "delete",
-    "drop",
-    "truncate",
 ];
 
 /// Create the `PostgreSQL` pack.
@@ -317,6 +314,42 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
 
 #[cfg(test)]
 mod tests {
+    /// Pack selection must not key on ordinary English words.
+    ///
+    /// The gate carried lowercase `drop`/`delete`/`truncate`
+    /// (`.agent-config-x74pe`), and byte-exact keyword matching then handed any
+    /// prose containing those words to these `(?i)` rules: eight ordinary
+    /// developer commands measured newly DENY (`.agent-config-w22qy`). A
+    /// lowercase SQL statement a shell actually runs always arrives with its
+    /// client, and every client word is still in the gate — which is what the
+    /// controls below assert.
+    #[test]
+    fn the_gate_does_not_select_this_pack_on_prose() {
+        let pack = super::create_pack();
+        for cmd in [
+            r#"python3 -c "print('drop table foo')""#,
+            r#"node -e "const q='delete from sessions;'; console.log(q)""#,
+            r#"ruby -e "puts 'truncate table logs'""#,
+            r#"bash -c 'echo "drop table students"'"#,
+            r"go test -run 'TestDropTable/truncate table'",
+            r#"br create "the action audit log will truncate table rows older than 90 days""#,
+        ] {
+            assert!(
+                !pack.might_match(cmd),
+                "no PostgreSQL client here — the gate must not select this pack: {cmd}"
+            );
+        }
+        // Controls: with a client on the line the gate still selects the pack
+        // and the rules still fire, including on lowercase SQL. Without these,
+        // emptying KEYWORDS would pass the assertions above.
+        for cmd in [r"psql -c 'truncate table users'", r"dropdb appdb"] {
+            assert!(
+                pack.check(cmd).is_some(),
+                "a real PostgreSQL destructive command must still be denied: {cmd}"
+            );
+        }
+    }
+
     use super::*;
     use crate::packs::test_helpers::*;
 
@@ -331,7 +364,14 @@ mod tests {
             "DELETE FROM \"Public\".\"Users\";",
             "DELETE without WHERE",
         );
-        assert_blocks(&pack, "delete from users", "DELETE without WHERE");
+        // A lowercase SQL statement only reaches a shell with its client:
+        // the gate no longer carries bare `drop`/`delete`/`truncate`, because
+        // those words select this pack on ordinary prose (.agent-config-w22qy).
+        assert_blocks(
+            &pack,
+            "psql -c 'delete from users;'",
+            "DELETE without WHERE",
+        );
 
         // Should NOT block if WHERE clause is present
         assert_allows(&pack, "DELETE FROM users WHERE id = 1;");

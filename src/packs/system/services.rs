@@ -14,13 +14,28 @@ use crate::{destructive_pattern, safe_pattern};
 /// lists, and 26 of 80 packs had drifted: the pack claimed a keyword the
 /// registry gate did not carry, so rules for those words could never run
 /// (`.agent-config-x74pe`).
-/// `shutdown`, `reboot` and `init` are deliberately NOT here. Their rules are
-/// bare words (`\bshutdown\b`), and over 18,723 real recorded commands turning
-/// them on denied six lines that only MENTIONED a reboot — a bead description,
-/// an incident note written through a heredoc — against two that were reboots.
+/// `shutdown`, `reboot` and `init` are here again. They were parked because
+/// their rules were bare words (`\bshutdown\b`), and over 18,723 real recorded
+/// commands turning them on denied six lines that only MENTIONED a reboot — a
+/// bead description, an incident note written through a heredoc — against two
+/// that were reboots. `.agent-config-w22qy` anchored the three rules to a
+/// command position, which is what a keyword can be trusted to gate again.
+///
+/// The `ssh` arm of that anchor is not decoration. The two REAL reboots in
+/// that population are `ssh -o ConnectTimeout=10 <host> 'sudo -n shutdown -r
+/// now'` -- the command word sits inside a quoted remote script, after flags
+/// that take their own argument. An anchor without it denies nothing that
+/// population actually contains.
 /// They need a command-position anchor and heredoc-body masking first:
 /// `.agent-config-w22qy` holds that, with the measurement.
-pub const KEYWORDS: &[&str] = &["systemctl", "service", "upstart"];
+pub const KEYWORDS: &[&str] = &[
+    "systemctl",
+    "service",
+    "upstart",
+    "shutdown",
+    "reboot",
+    "init",
+];
 
 /// Create the Services pack.
 #[must_use]
@@ -140,7 +155,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // shutdown command
         destructive_pattern!(
             "shutdown",
-            r"\bshutdown\b",
+            r#"(?:^|[\n;&|])[ \t]*(?:(?:sudo|doas)[ \t]+(?:-\S+[ \t]+)*)?(?:ssh[ \t]+(?:(?:[^'\"\s]+[ \t]+){1,12}?['\"]|(?:-[a-zA-Z](?:[ \t]+\S+)?[ \t]+)*\S+[ \t]+)(?:(?:sudo|doas)[ \t]+(?:-\S+[ \t]+)*)?)?(?:-\S+[ \t]+)*shutdown\b"#,
             "shutdown will power off or restart the system.",
             Critical,
             "The shutdown command powers off or restarts the machine. All running \
@@ -154,7 +169,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // reboot command
         destructive_pattern!(
             "reboot",
-            r"\breboot\b",
+            r#"(?:^|[\n;&|])[ \t]*(?:(?:sudo|doas)[ \t]+(?:-\S+[ \t]+)*)?(?:ssh[ \t]+(?:(?:[^'\"\s]+[ \t]+){1,12}?['\"]|(?:-[a-zA-Z](?:[ \t]+\S+)?[ \t]+)*\S+[ \t]+)(?:(?:sudo|doas)[ \t]+(?:-\S+[ \t]+)*)?)?(?:-\S+[ \t]+)*reboot\b"#,
             "reboot will restart the system.",
             Critical,
             "Reboot restarts the machine immediately. All processes are terminated, \
@@ -168,7 +183,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // init 0/6 (shutdown/reboot)
         destructive_pattern!(
             "init-level",
-            r"\binit\s+[06]\b",
+            r#"(?:^|[\n;&|])[ \t]*(?:(?:sudo|doas)[ \t]+(?:-\S+[ \t]+)*)?(?:ssh[ \t]+(?:(?:[^'\"\s]+[ \t]+){1,12}?['\"]|(?:-[a-zA-Z](?:[ \t]+\S+)?[ \t]+)*\S+[ \t]+)(?:(?:sudo|doas)[ \t]+(?:-\S+[ \t]+)*)?)?(?:-\S+[ \t]+)*init\s+[06]\b"#,
             "init 0 shuts down, init 6 reboots the system.",
             Critical,
             "Changing the init level to 0 halts the system and to 6 reboots it. This \
@@ -187,38 +202,74 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
 mod tests {
     use super::*;
 
-    /// PARKED, not reachable: `shutdown` is not in this pack's KEYWORDS.
+    /// The three power rules fire on a COMMAND and not on a mention of one.
     ///
-    /// The rule is a bare word, and over 18,723 real recorded commands enabling
-    /// it denied lines that only MENTIONED a reboot — a bead description, an
-    /// incident note written through a heredoc — more often than real ones.
-    /// `.agent-config-w22qy` carries the anchoring and heredoc-masking work that
-    /// has to land before this flips back. Asserting reachability here would
-    /// assert the defect.
+    /// They were parked (`.agent-config-w22qy`) because the rules were bare
+    /// words: over 18,723 real recorded commands, turning them on denied six
+    /// lines that only MENTIONED a reboot against two that were reboots. The
+    /// rules are now anchored to a command position, so the keyword is safe to
+    /// carry again. Each pair below is one of those measured shapes.
     #[test]
-    fn shutdown_is_parked_until_it_stops_matching_prose() {
+    fn power_rules_match_a_command_and_not_a_mention() {
         let pack = create_pack();
-        assert!(
-            !pack.keywords.contains(&"shutdown"),
-            "`shutdown` is back in the gate — see .agent-config-w22qy before enabling it"
-        );
+        for cmd in [
+            "shutdown -h now",
+            "reboot",
+            "sudo reboot",
+            "sudo -i shutdown -r now",
+            "init 0",
+            "ssh mini-ts reboot",
+            "systemctl stop nginx && reboot",
+            // The two real reboots in the spec-333 population: the command word
+            // is inside a quoted remote script, behind flags that take an
+            // argument of their own.
+            "ssh -o ConnectTimeout=10 mini-ts 'sudo -n shutdown -r now'",
+            "ssh -p 22 host sudo shutdown -h now",
+        ] {
+            assert!(
+                pack.check(cmd).is_some(),
+                "a real power command must still be denied: {cmd}"
+            );
+        }
+        for cmd in [
+            // The measured false positives: prose that names a reboot.
+            r#"echo "reboot issued (rc=$?)""#,
+            r#"br create "the mini needs a reboot after the upgrade""#,
+            r#"git commit -m "shutdown the legacy worker""#,
+            "rg -n 'init 0' docs/",
+            // `ssh` must not license a power word anywhere later on the line:
+            // these name a reboot inside the REMOTE command, and run nothing.
+            r#"ssh mini-ts 'echo "the reboot worked"'"#,
+            r#"ssh mini-ts "did the reboot survive""#,
+            "ssh host echo the reboot worked",
+            // Measured in the population: prose in a quoted argument, and a
+            // Python tuple. `(` is a command position in shell, not in Python.
+            r#"br close x --reason="remote reboot (sudo shutdown -r): fixed""#,
+            r#"for word in ("shutdown", "exit"):"#,
+            // `init` is a very common word; only runlevel 0 and 6 are the rule.
+            "terraform init",
+            "npm init -y",
+        ] {
+            assert!(
+                pack.check(cmd).is_none(),
+                "a mention of a power command must not be denied: {cmd}"
+            );
+        }
     }
 
-    /// PARKED, not reachable: `reboot` is not in this pack's KEYWORDS.
+    /// The keyword gate carries the three words the rules above match on.
     ///
-    /// The rule is a bare word, and over 18,723 real recorded commands enabling
-    /// it denied lines that only MENTIONED a reboot — a bead description, an
-    /// incident note written through a heredoc — more often than real ones.
-    /// `.agent-config-w22qy` carries the anchoring and heredoc-masking work that
-    /// has to land before this flips back. Asserting reachability here would
-    /// assert the defect.
+    /// A rule whose command word the gate lacks can never run
+    /// (`.agent-config-x74pe`); this is the half of that invariant this pack
+    /// owns.
     #[test]
-    fn reboot_is_parked_until_it_stops_matching_prose() {
-        let pack = create_pack();
-        assert!(
-            !pack.keywords.contains(&"reboot"),
-            "`reboot` is back in the gate — see .agent-config-w22qy before enabling it"
-        );
+    fn power_command_words_are_in_the_gate() {
+        for word in ["shutdown", "reboot", "init"] {
+            assert!(
+                KEYWORDS.contains(&word),
+                "`{word}` must be in the gate or its rule cannot fire"
+            );
+        }
     }
 
     #[test]

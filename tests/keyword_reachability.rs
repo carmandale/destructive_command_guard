@@ -160,27 +160,50 @@ fn the_registry_and_the_pack_carry_the_same_keywords() {
     );
 }
 
-/// Two rule families are deliberately still unreachable, and this pins that.
+/// The rules that used to fire on prose now fire on a COMMAND and not a mention.
 ///
-/// `system.services`' `shutdown`/`reboot`/`init` are bare words. Measured over
+/// `system.services`' `shutdown`/`reboot`/`init` were bare words. Measured over
 /// 18,723 real recorded commands with every pack enabled, turning them on denied
-/// six lines that only MENTIONED a reboot — a bead description, an incident note
-/// written through a heredoc — against two that were reboots. They need a
-/// command-position anchor and heredoc-body masking first; `.agent-config-w22qy`
-/// holds that work with the measurement, and this test fails if somebody puts
-/// them back in the gate without it.
+/// eight lines and only two were reboots; the rest merely MENTIONED one — a bead
+/// description, an incident note written through a heredoc, an echo. They were
+/// parked until `.agent-config-w22qy` anchored them to a command position.
 ///
-/// `database.mysql`/`postgresql`'s lowercase `drop`/`delete`/`truncate` are NOT
-/// parked — they are in the gate, and they do deny some prose (same bead).
-/// Taking them out would stop a lowercase SQL statement reaching those rules at
-/// all, which is the worse trade. That is a judgement, not an invariant, so it
-/// is not asserted here.
+/// `database.mysql`/`postgresql` carried lowercase `drop`/`delete`/`truncate` in
+/// the gate, so byte-exact keyword matching handed those `(?i)` rules any prose
+/// containing the words. The same bead removed them; a lowercase SQL statement a
+/// shell actually runs arrives with its client, and the client words are still
+/// in the gate — the controls below are what assert that.
+///
+/// This is an end-to-end test: it runs the built binary through a real
+/// PreToolUse envelope, so it answers for the evaluator and not for one pack.
 #[test]
-fn the_rules_that_fire_on_prose_are_still_parked() {
+fn the_power_and_sql_rules_match_commands_and_not_mentions() {
     let mut fired = Vec::new();
     for (packs, command) in [
-        (["core", "system"], "shutdown -h now"),
-        (["core", "system"], "reboot"),
+        // Prose that names a power command.
+        (["core", "system"], "echo \"reboot issued (rc=$?)\""),
+        (
+            ["core", "system"],
+            "br create \"the mini needs a reboot after the upgrade\"",
+        ),
+        (
+            ["core", "system"],
+            "git commit -m \"shutdown the legacy worker\"",
+        ),
+        // A heredoc body written into a FILE is data, not a command.
+        (
+            ["core", "system"],
+            "cat >> notes.md <<'EOF'\nshutdown -h now\nEOF",
+        ),
+        // SQL text inside an interpreter that is not a database client.
+        (
+            ["core", "database"],
+            "python3 -c \"print('drop table foo')\"",
+        ),
+        (
+            ["core", "database"],
+            "bash -c 'echo \"drop table students\"'",
+        ),
         (
             ["core", "database"],
             "br create \"the log holds 396 entries, truncate it\"",
@@ -192,16 +215,25 @@ fn the_rules_that_fire_on_prose_are_still_parked() {
     }
     assert!(
         fired.is_empty(),
-        "these are parked in .agent-config-w22qy because they also fire on prose; \
-         enabling them needs that work, and this test updated with it:\n{}",
+        "these only MENTION a destructive command and must not be denied \
+         (.agent-config-w22qy):\n{}",
         fired.join("\n")
     );
 
-    // The control: the same packs still deny the commands they were always able
-    // to reach, so "parked" is not "the pack stopped working".
+    // The controls. Each is the discriminating twin of a line above: same words,
+    // real command position. Without these the assertion above would pass for a
+    // pack whose rules had simply been deleted.
     for (packs, command) in [
+        (["core", "system"], "shutdown -h now"),
+        (["core", "system"], "reboot"),
+        (["core", "system"], "sudo reboot"),
+        (["core", "system"], "init 0"),
+        (["core", "system"], "ssh mini-ts reboot"),
+        // The same heredoc body, handed to an interpreter instead of a file.
+        (["core", "system"], "bash <<'EOF'\nshutdown -h now\nEOF"),
         (["core", "system"], "systemctl stop nginx"),
         (["core", "database"], "psql -c 'TRUNCATE TABLE users'"),
+        (["core", "database"], "psql -c 'truncate table users'"),
         (["core", "database"], "mysql -e 'drop table users'"),
     ] {
         assert!(
