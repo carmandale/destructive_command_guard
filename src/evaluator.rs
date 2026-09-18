@@ -2785,7 +2785,21 @@ fn evaluate_heredoc(
                             "Embedded shell command blocked: {} (line {} of heredoc)",
                             info.reason, inner.line_number
                         );
-                        info.source = MatchSource::HeredocAst; // Mark as heredoc source
+                        // Mark as heredoc source — but never for an explicit
+                        // block. A ConfigOverride or LegacyPattern denial
+                        // carries no pack_id, pattern_name or severity, so
+                        // relabelling it HeredocAst sends main.rs into
+                        // `resolve_mode(None, None, None)`, which returns
+                        // `[policy] default_mode`. Under `default_mode =
+                        // "warn"` that turned `bash -c 'terraform destroy'`
+                        // into a warning while the unwrapped command denied
+                        // (.agent-config-dcg-tier25-relabels-config-denials-4mnqi).
+                        if !matches!(
+                            info.source,
+                            MatchSource::ConfigOverride | MatchSource::LegacyPattern
+                        ) {
+                            info.source = MatchSource::HeredocAst;
+                        }
                         if let Some(span) = info.matched_span {
                             if let Some(mapped_inner) =
                                 map_heredoc_span(command, content, inner.start, inner.end)

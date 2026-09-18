@@ -599,3 +599,119 @@ fn test_policy_warned_rules_alone_still_only_warn() {
         assert_denied_by(command, run_hook_mode_with_warned_rules(command), rule);
     }
 }
+
+/// Run the hook under an explicit `[overrides] block` and a warning
+/// `default_mode` — the shape that let a wrapper downgrade an explicit block.
+fn run_hook_mode_with_blocked_override(command: &str) -> (String, String, i32) {
+    let sandbox = spawn::sandbox();
+    let config_path = sandbox.root().join("override-policy.toml");
+    std::fs::write(
+        &config_path,
+        "[policy]\n\
+         default_mode = \"warn\"\n\
+         \n\
+         [policy.rules]\n\
+         \"core.git:reset-hard\" = \"warn\"\n\
+         \n\
+         [overrides]\n\
+         block = [{ pattern = \"^terraform destroy\", \
+         reason = \"terraform destroy is forbidden here\" }]\n",
+    )
+    .expect("write override policy config");
+    let mut cmd = spawn::dcg_in(&sandbox);
+    cmd.env("DCG_CONFIG", &config_path)
+        .env("DCG_PACKS", "core.git,core.filesystem");
+    run_hook(cmd, &sandbox, command)
+}
+
+/// Assert the hook denied `command` and that the denial names `reason`.
+///
+/// A config override carries no `pack_id` or `pattern_name`, so there is no
+/// `ruleId` to assert on and the reason text is the only thing that proves
+/// WHICH rule denied. `permissionDecisionReason` is read as a string before it
+/// is searched, so a renamed or missing field fails instead of passing.
+fn assert_denied_naming(
+    command: &str,
+    (stdout, stderr, exit_code): (String, String, i32),
+    reason: &str,
+) {
+    assert_eq!(
+        exit_code, 0,
+        "hook mode should exit 0 even on deny\ncommand: {command}\nstderr: {stderr}"
+    );
+    assert!(
+        !stdout.is_empty(),
+        "an explicit config block must produce hook JSON, not a bare stderr \
+         warning\ncommand: {command}\nstderr: {stderr}"
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("hook output should be valid JSON");
+    let hook_output = &json["hookSpecificOutput"];
+    assert_eq!(
+        hook_output["permissionDecision"], "deny",
+        "command: {command}\nstdout: {stdout}"
+    );
+    let denial_reason = hook_output["permissionDecisionReason"]
+        .as_str()
+        .expect("permissionDecisionReason must be present and a string");
+    assert!(
+        denial_reason.contains(reason),
+        "the denial must name the config block that produced it\n\
+         command: {command}\nwanted: {reason}\ngot: {denial_reason}"
+    );
+}
+
+/// An `[overrides] block` is not a pack rule: it carries no pack id, pattern
+/// name or severity, so `resolve_mode(None, None, None)` returns `[policy]
+/// default_mode`. Tier 2.5 relabelled every inner denial
+/// `MatchSource::HeredocAst`, which sent an explicit block down exactly that
+/// path — and main.rs promises never to downgrade one. Under `default_mode =
+/// "warn"`, `bash -c 'terraform destroy'` warned and ran while the unwrapped
+/// command denied (.agent-config-dcg-tier25-relabels-config-denials-4mnqi).
+#[test]
+fn test_config_block_inside_a_shell_wrapper_is_not_downgraded_to_default_mode() {
+    const REASON: &str = "terraform destroy is forbidden here";
+
+    // Control: unwrapped, the block denies. Without this, a green subject
+    // could equally mean the config never loaded.
+    assert_denied_naming(
+        "terraform destroy",
+        run_hook_mode_with_blocked_override("terraform destroy"),
+        REASON,
+    );
+
+    // Subject: the same block reached through the shell wrapper that Tier 2.5
+    // evaluates recursively.
+    let command = "bash -c 'terraform destroy'";
+    assert_denied_naming(
+        command,
+        run_hook_mode_with_blocked_override(command),
+        REASON,
+    );
+}
+
+/// The opposite control, so the fix above cannot be "deny everything inside a
+/// wrapper". The same config carries `"core.git:reset-hard" = "warn"`, and a
+/// pack rule the policy warns on must still warn when it is wrapped exactly as
+/// the subject above is. A pack match inside a wrapper stays policy resolved;
+/// only the explicit block is exempt.
+#[test]
+fn test_pack_rule_inside_a_shell_wrapper_is_still_downgraded_by_the_policy() {
+    let command = "bash -c 'git reset --hard'";
+    let (stdout, stderr, exit_code) = run_hook_mode_with_blocked_override(command);
+
+    assert_eq!(
+        exit_code, 0,
+        "hook mode should exit 0\ncommand: {command}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "a pack rule the policy sets to warn must warn, not deny\n\
+         command: {command}\nstdout: {stdout}"
+    );
+    assert!(
+        stderr.contains("reset"),
+        "the warning names the rule it matched, which proves the wrapper was \
+         evaluated at all\ncommand: {command}\nstderr: {stderr}"
+    );
+}
