@@ -5,7 +5,7 @@
 
 use crate::config::Config;
 use crate::evaluator::{
-    EvaluationDecision, evaluate_command_consulting_allow_once, resolve_decision_mode,
+    EvaluationDecision, evaluate_command_with_pack_order_deadline_at_path, resolve_decision_mode,
 };
 use crate::packs::REGISTRY;
 use crate::scan::{
@@ -186,15 +186,27 @@ impl DcgMcpServer {
     }
 
     fn check_command(&self, command: &str) -> CheckCommandResponse {
-        // The MCP server is an interactive surface, so it keeps the allow-once
-        // escape hatch it has always had. Spelled out rather than inherited
-        // (.agent-config-pwv0p).
-        let result = evaluate_command_consulting_allow_once(
+        // The hook's entry point over the hook's pack set, built once at
+        // startup. It consults the ambient allow-once store, the escape hatch
+        // this interactive surface has always had (.agent-config-pwv0p). The
+        // config-level entry this used rebuilt the pack order per call from
+        // `enabled_pack_ids()` alone, without the `custom_paths` packs the
+        // hook enforces, so it allowed what the hook denied
+        // (.agent-config-1j0l5).
+        let ctx = &self.scan_ctx;
+        let result = evaluate_command_with_pack_order_deadline_at_path(
             command,
-            &self.config,
-            &self.scan_ctx.enabled_keywords,
-            &self.scan_ctx.compiled_overrides,
-            &self.scan_ctx.allowlists,
+            &ctx.enabled_keywords,
+            &ctx.ordered_packs,
+            ctx.keyword_index.as_ref(),
+            &ctx.compiled_overrides,
+            &ctx.allowlists,
+            &ctx.heredoc_settings,
+            self.config.policy(),
+            &self.config.confidence,
+            None, // allow_once_audit
+            None, // project_path
+            None, // deadline
         );
 
         // The mode the hook applies, from the resolver the hook calls: policy,

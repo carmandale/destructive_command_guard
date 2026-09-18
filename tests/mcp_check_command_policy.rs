@@ -10,6 +10,11 @@
 //! back `allowed: false` too, because the allowlist result carries a `Deny`
 //! `effective_mode`.
 //!
+//! It also evaluates against the hook's pack set (`.agent-config-1j0l5`). MCP
+//! built its packs from `config.enabled_pack_ids()` alone and never loaded the
+//! `[packs] custom_paths` packs the hook loads and enables, so a command the
+//! hook blocks by an external pack rule came back `allowed: true`.
+//!
 //! Every test here drives the real `dcg mcp-server` over stdio, and each policy
 //! assertion carries its no-policy control: the control is what proves the
 //! answer came from the policy, since without it a test on a rule whose
@@ -241,6 +246,52 @@ fn an_allowlisted_rule_answers_allowed() {
     // Control: without the allowlist the same Critical rule is denied.
     let without = &mcp_check(NO_POLICY, None, &[command])[0];
     assert_answer(without, false, "deny", "core.git:stash-clear", "critical");
+}
+
+/// An external pack whose one rule is Critical, so severity alone denies it.
+const CUSTOM_PACK: &str = r"
+schema_version: 1
+id: custom.deploy
+name: Custom Deploy Rules
+version: 1.0.0
+keywords:
+  - deploy
+destructive_patterns:
+  - name: prod-deploy
+    pattern: deploy\s+--env\s*=?\s*prod
+    severity: critical
+    description: Direct production deployment blocked
+";
+const CUSTOM_COMMAND: &str = "deploy --env prod";
+
+/// A rule from a `custom_paths` pack is denied by the hook, and the MCP answer
+/// must deny it too.
+#[test]
+fn a_custom_paths_pack_rule_answers_not_allowed() {
+    let packs = tempfile::tempdir().expect("create pack dir");
+    let pack_path = packs.path().join("custom.yaml");
+    std::fs::write(&pack_path, CUSTOM_PACK).expect("write custom pack");
+    let config = format!(
+        "[packs]\ncustom_paths = [\"{}\"]\n",
+        pack_path.to_string_lossy().replace('\\', "/")
+    );
+
+    assert!(
+        hook_denies(&config, None, CUSTOM_COMMAND),
+        "precondition: the hook denies by the custom pack's rule"
+    );
+    let body = &mcp_check(&config, None, &[CUSTOM_COMMAND])[0];
+    assert_answer(body, false, "deny", "custom.deploy:prod-deploy", "critical");
+
+    // Control: no built-in pack matches, so without the custom pack both
+    // surfaces allow, and a pass above came from the pack.
+    assert!(
+        !hook_denies(NO_POLICY, None, CUSTOM_COMMAND),
+        "control: the hook allows without the pack"
+    );
+    let without = &mcp_check(NO_POLICY, None, &[CUSTOM_COMMAND])[0];
+    assert_eq!(without["allowed"], true, "{without}");
+    assert!(without["rule_id"].is_null(), "no rule matches: {without}");
 }
 
 /// The property the bead exists for: for the same config, the MCP answer is

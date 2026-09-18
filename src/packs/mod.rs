@@ -1888,6 +1888,66 @@ pub fn get_external_packs() -> Option<&'static ExternalPackStore> {
     EXTERNAL_PACKS.get()
 }
 
+/// The packs a config turns on, in evaluation order, with its `custom_paths`
+/// packs loaded and enabled.
+///
+/// The hook, `dcg test`, and `ScanEvalContext` (`dcg scan` and the MCP server)
+/// build their pack set here. This was a block pasted into the hook and
+/// `dcg test`, and the MCP server never got it, so it allowed commands the
+/// hook denied by an external pack rule (.agent-config-1j0l5). Other surfaces
+/// still build their own pack set without external packs
+/// (.agent-config-zpo5q).
+pub struct EnabledPacks {
+    /// Keywords for quick rejection, external pack keywords included.
+    pub keywords: Vec<&'static str>,
+    /// Pack ids in evaluation order; external packs follow the built-in ones.
+    pub ordered: Vec<String>,
+    /// `None` when external packs are loaded: the index covers built-in packs
+    /// only, and the non-indexed path handles both.
+    pub keyword_index: Option<EnabledKeywordIndex>,
+    /// The external pack store, for its load warnings.
+    pub external: &'static ExternalPackStore,
+}
+
+impl EnabledPacks {
+    /// Build the pack set from the enabled ids and the expanded `custom_paths`.
+    ///
+    /// Packs loaded from `custom_paths` are enabled without being listed:
+    /// adding a path means you want the pack active.
+    ///
+    /// The external packs come from [`load_external_packs`], so the first call
+    /// in a process decides them: a later call with other paths gets the
+    /// first call's packs.
+    #[must_use]
+    pub fn load(mut enabled: HashSet<String>, external_paths: &[String]) -> Self {
+        let mut keywords = REGISTRY.collect_enabled_keywords(&enabled);
+        let external = load_external_packs(external_paths);
+        for id in external.pack_ids() {
+            enabled.insert(id.clone());
+        }
+        keywords.extend(external.keywords().iter().copied());
+
+        let mut ordered = REGISTRY.expand_enabled_ordered(&enabled);
+        for id in external.pack_ids() {
+            if !ordered.contains(id) {
+                ordered.push(id.clone());
+            }
+        }
+        let keyword_index = if external.pack_ids().next().is_some() {
+            None
+        } else {
+            REGISTRY.build_enabled_keyword_index(&ordered)
+        };
+
+        Self {
+            keywords,
+            ordered,
+            keyword_index,
+            external,
+        }
+    }
+}
+
 /// Pre-compiled finders for core quick rejection (git/rm).
 #[allow(dead_code)]
 static GIT_FINDER: LazyLock<memmem::Finder<'static>> = LazyLock::new(|| memmem::Finder::new("git"));

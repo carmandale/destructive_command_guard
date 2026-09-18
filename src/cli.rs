@@ -26,8 +26,8 @@ use crate::interactive::{
 };
 use crate::load_default_allowlists;
 use crate::packs::{
-    DecisionMode, ExternalPackStore, REGISTRY, Severity as PackSeverity, get_external_packs,
-    load_external_packs,
+    DecisionMode, EnabledPacks, ExternalPackStore, REGISTRY, Severity as PackSeverity,
+    get_external_packs, load_external_packs,
 };
 use crate::pending_exceptions::{
     AllowOnceEntry, AllowOnceScopeKind, AllowOnceStore, PendingExceptionRecord,
@@ -3382,9 +3382,17 @@ fn test_command(
         effective_config.heredoc.languages = Some(langs);
     }
 
-    // Get enabled packs and collect keywords for quick rejection
-    let mut enabled_packs = effective_config.enabled_pack_ids();
-    let mut enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
+    // The hook's pack set: enabled packs plus the custom_paths packs, loaded
+    // and enabled.
+    let EnabledPacks {
+        keywords: enabled_keywords,
+        ordered: ordered_packs,
+        keyword_index,
+        ..
+    } = EnabledPacks::load(
+        effective_config.enabled_pack_ids(),
+        &effective_config.packs.expand_custom_paths(),
+    );
     let heredoc_settings = effective_config.heredoc_settings();
 
     // Compile overrides once (not per-command)
@@ -3393,30 +3401,6 @@ fn test_command(
     // Load allowlists (project/user/system) for parity with hook mode.
     // This is a small file read and only affects decisions when a rule matches.
     let allowlists = load_default_allowlists();
-
-    // Load external packs from custom_paths (glob + tilde expansion).
-    let external_paths = effective_config.packs.expand_custom_paths();
-    let external_store = load_external_packs(&external_paths);
-
-    // Auto-enable external packs and merge their keywords.
-    for id in external_store.pack_ids() {
-        enabled_packs.insert(id.clone());
-    }
-    enabled_keywords.extend(external_store.keywords().iter().copied());
-
-    // Build ordered pack list AFTER external packs are loaded so they're included.
-    let mut ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
-    for id in external_store.pack_ids() {
-        if !ordered_packs.contains(id) {
-            ordered_packs.push(id.clone());
-        }
-    }
-    // Disable keyword index when external packs are present (not covered by index).
-    let keyword_index = if external_store.pack_ids().next().is_some() {
-        None
-    } else {
-        REGISTRY.build_enabled_keyword_index(&ordered_packs)
-    };
 
     // Detect the current AI coding agent for agent-specific profiles
     let detection = detect_agent_with_details();

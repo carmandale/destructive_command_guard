@@ -31,7 +31,7 @@ use crate::config::{Config, HeredocSettings};
 use crate::evaluator::{
     EvaluationDecision, MatchSource, PatternMatch, evaluate_command_with_pack_order_at_path,
 };
-use crate::packs::{DecisionMode, REGISTRY, Severity};
+use crate::packs::{DecisionMode, EnabledPacks, Severity};
 use crate::suggestions::{SuggestionKind, get_suggestion_by_kind};
 use clap::ValueEnum;
 use memchr::memmem;
@@ -299,10 +299,15 @@ pub struct ScanEvalContext {
 impl ScanEvalContext {
     #[must_use]
     pub fn from_config(config: &Config) -> Self {
-        let enabled_packs: HashSet<String> = config.enabled_pack_ids();
-        let enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
-        let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
-        let keyword_index = REGISTRY.build_enabled_keyword_index(&ordered_packs);
+        let EnabledPacks {
+            keywords: enabled_keywords,
+            ordered: ordered_packs,
+            keyword_index,
+            ..
+        } = EnabledPacks::load(
+            config.enabled_pack_ids(),
+            &config.packs.expand_custom_paths(),
+        );
         let compiled_overrides = config.overrides.compile();
         let allowlists = crate::load_default_allowlists();
         let heredoc_settings = config.heredoc_settings();

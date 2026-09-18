@@ -1383,9 +1383,12 @@ pub fn evaluate_command_with_deadline(
 
 /// [`evaluate_command`], but the ambient allow-once store IS consulted.
 ///
-/// This is the interactive surface's spelling: a user who ran `dcg allow-once`
-/// expects the next matching command to pass. Named separately so that reaching
-/// disk is something a call site asks for rather than something it inherits.
+/// A user who ran `dcg allow-once` expects the next matching command to pass.
+/// Named separately so that reaching disk is something a call site asks for
+/// rather than something it inherits. Its pack set is `enabled_pack_ids()`
+/// alone, without `custom_paths` packs, which is why the MCP server calls
+/// [`evaluate_command_with_pack_order_deadline_at_path`] instead
+/// (.agent-config-1j0l5, .agent-config-zpo5q).
 #[must_use]
 pub fn evaluate_command_consulting_allow_once(
     command: &str,
@@ -1558,7 +1561,7 @@ pub fn evaluate_command_with_pack_order_deadline(
 
 /// Evaluate a command with deadline support and an optional project path.
 ///
-/// This is the hook and CLI entry point, so it consults the ambient allow-once
+/// This is the hook, CLI, and MCP entry point, so it consults the ambient allow-once
 /// store. Callers that want the verdict to be a function of their arguments alone
 /// want [`evaluate_command`].
 #[must_use]
