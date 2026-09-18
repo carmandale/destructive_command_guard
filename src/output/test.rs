@@ -7,20 +7,12 @@
 //!
 //! Uses the same theme system as denial.rs for consistent visual presentation.
 
-#[cfg(not(feature = "rich-output"))]
 use super::terminal_width;
-#[cfg(not(feature = "rich-output"))]
 use super::theme::BorderStyle;
 use super::theme::Theme;
 use crate::evaluator::{EvaluationDecision, EvaluationResult, PatternMatch};
-#[cfg(feature = "rich-output")]
-use crate::output::rich_theme::RichThemeExt;
 use crate::packs::Severity;
-#[cfg(not(feature = "rich-output"))]
 use ratatui::style::Color;
-#[cfg(feature = "rich-output")]
-#[allow(unused_imports)]
-use rich_rust::prelude::*;
 use std::fmt::Write;
 
 /// A test result box to display for `dcg test` output.
@@ -177,11 +169,6 @@ impl TestResultBox {
     /// Render the test result box with the given theme.
     #[must_use]
     pub fn render(&self, theme: &Theme) -> String {
-        #[cfg(feature = "rich-output")]
-        {
-            self.render_rich(theme)
-        }
-        #[cfg(not(feature = "rich-output"))]
         match theme.border_style {
             BorderStyle::Unicode => {
                 let output = self.render_unicode(theme);
@@ -201,108 +188,6 @@ impl TestResultBox {
                 }
             }
         }
-    }
-
-    /// Render with rich_rust (Premium UI).
-    #[cfg(feature = "rich-output")]
-    fn render_rich(&self, theme: &Theme) -> String {
-        use rich_rust::r#box::{DOUBLE, HEAVY, ROUNDED};
-        use rich_rust::prelude::*;
-
-        let (title, border_style, header_color): (
-            &str,
-            &'static rich_rust::r#box::BoxChars,
-            String,
-        ) = match &self.result {
-            TestOutcome::Blocked { severity, .. } => {
-                let box_style = match severity {
-                    Some(Severity::Critical) => &DOUBLE,
-                    Some(Severity::High) => &HEAVY,
-                    _ => &ROUNDED,
-                };
-                // Determine color for the title based on theme
-                let color_str = theme.error_markup();
-                (" WOULD BE BLOCKED ", box_style, color_str)
-            }
-            TestOutcome::Allowed { .. } => (" WOULD BE ALLOWED ", &ROUNDED, theme.success_markup()),
-        };
-
-        // Build content as a Vec of lines
-        let mut lines = Vec::new();
-
-        // Command line
-        lines.push(format!(
-            "[dim]Command:[/]     [bold]{cmd}[/]",
-            cmd = self.command
-        ));
-
-        // Result-specific content
-        match &self.result {
-            TestOutcome::Blocked {
-                pattern_id,
-                pack_id,
-                severity,
-                reason,
-                confidence,
-                explanation,
-            } => {
-                if let Some(pattern) = pattern_id {
-                    lines.push(format!("[dim]Pattern:[/]     [magenta]{pattern}[/]"));
-                }
-                if let Some(pack) = pack_id {
-                    let sev = severity
-                        .map(|s| format!(" ({})", severity_label(s)))
-                        .unwrap_or_default();
-                    lines.push(format!("[dim]Pack:[/]        [cyan]{pack}[/][dim]{sev}[/]"));
-                }
-                if let Some(conf) = confidence {
-                    let bar = render_confidence_bar(*conf);
-                    lines.push(format!(
-                        "[dim]Confidence:[/]  {bar} {conf:.0}%",
-                        conf = conf * 100.0
-                    ));
-                }
-                lines.push(format!("[dim]Reason:[/]      {reason}"));
-                if let Some(text) = explanation {
-                    lines.push(format!("[dim]Explanation:[/] {text}"));
-                }
-            }
-            TestOutcome::Allowed { reason } => {
-                let reason_text = match reason {
-                    AllowedReason::NoPatternMatch => "No pattern matches".to_string(),
-                    AllowedReason::AllowlistMatch { entry, layer } => {
-                        format!("Allowlist: [italic]\"{entry}\"[/] ({layer})")
-                    }
-                    AllowedReason::BudgetExhausted => {
-                        "[yellow]Budget exhausted (fail-open)[/]".to_string()
-                    }
-                };
-                lines.push(format!("[dim]Reason:[/]      {reason_text}"));
-            }
-        }
-
-        let content_str = lines.join("\n");
-
-        // Parse header color to use for border
-        // rich_rust Style::parse expects simple color names or hex, not "bold red"
-        // So we strip modifiers for the border color
-        let border_color_str = if header_color.contains("red") {
-            "red"
-        } else if header_color.contains("green") {
-            "green"
-        } else if header_color.contains("yellow") {
-            "yellow"
-        } else {
-            "white"
-        };
-
-        let width = super::terminal_width() as usize;
-        Panel::from_text(&content_str)
-            .title(format!("[{header_color}]{title}[/]"))
-            .box_style(border_style)
-            .border_style(Style::parse(border_color_str).unwrap_or_default())
-            .padding((1, 2))
-            .render_plain(width)
     }
 
     /// Render a plain text version for non-TTY contexts.
@@ -365,7 +250,6 @@ impl TestResultBox {
     }
 
     /// Render with Unicode box-drawing characters.
-    #[cfg(not(feature = "rich-output"))]
     #[allow(clippy::too_many_lines)]
     fn render_unicode(&self, theme: &Theme) -> String {
         let width = terminal_width().saturating_sub(4).max(40) as usize;
@@ -499,7 +383,6 @@ impl TestResultBox {
     }
 
     /// Helper to render a labeled row in Unicode box style.
-    #[cfg(not(feature = "rich-output"))]
     fn render_unicode_row(
         &self,
         output: &mut String,
@@ -521,7 +404,6 @@ impl TestResultBox {
     }
 
     /// Render with ASCII box-drawing characters.
-    #[cfg(not(feature = "rich-output"))]
     fn render_ascii(&self, _theme: &Theme) -> String {
         let width = terminal_width().saturating_sub(4).max(40) as usize;
         let mut output = String::new();
@@ -615,7 +497,6 @@ impl TestResultBox {
     }
 
     /// Helper to render a labeled row in ASCII box style.
-    #[cfg(not(feature = "rich-output"))]
     fn render_ascii_row(&self, output: &mut String, label: &str, value: &str, width: usize) {
         let label_width = 12; // Fixed label column width
         let content = format!("{label:<label_width$}{value}");
@@ -626,7 +507,6 @@ impl TestResultBox {
     }
 
     /// Render with no borders (minimal style).
-    #[cfg(not(feature = "rich-output"))]
     fn render_minimal(&self, theme: &Theme) -> String {
         let mut output = String::new();
 
@@ -694,7 +574,6 @@ impl TestResultBox {
 }
 
 /// Convert a ratatui color to an ANSI foreground color code sequence.
-#[cfg(not(feature = "rich-output"))]
 fn ansi_color_code(color: Color) -> String {
     match color {
         Color::Reset => "0".to_string(),
@@ -740,7 +619,6 @@ fn confidence_from_severity(pattern: &PatternMatch) -> Option<f64> {
 }
 
 /// Strip ANSI escape codes from a string.
-#[cfg(not(feature = "rich-output"))]
 fn strip_ansi_codes(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut in_escape = false;
@@ -760,27 +638,6 @@ fn strip_ansi_codes(s: &str) -> String {
     }
 
     result
-}
-
-/// Render a visual confidence bar using Unicode blocks
-#[cfg(feature = "rich-output")]
-fn render_confidence_bar(confidence: f64) -> String {
-    let filled = (confidence * 10.0).round() as usize;
-    let empty = 10usize.saturating_sub(filled);
-
-    let color = if confidence >= 0.8 {
-        "red"
-    } else if confidence >= 0.5 {
-        "yellow"
-    } else {
-        "green"
-    };
-
-    format!(
-        "[{color}]{}[/][dim]{}[/]",
-        "█".repeat(filled),
-        "░".repeat(empty)
-    )
 }
 
 #[cfg(test)]
@@ -846,7 +703,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "rich-output"))]
     fn test_unicode_render_blocked() {
         let theme = Theme::default();
         let result = TestResultBox::blocked(
@@ -868,7 +724,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "rich-output"))]
     fn test_unicode_render_allowed() {
         let theme = Theme::default();
         let result = TestResultBox::allowed_no_match("cargo build");
@@ -881,7 +736,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "rich-output"))]
     fn test_ascii_render() {
         let theme = Theme {
             border_style: BorderStyle::Ascii,
@@ -906,7 +760,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "rich-output"))]
     fn test_no_color_render() {
         let theme = Theme::no_color();
         let result = TestResultBox::blocked(
@@ -928,7 +781,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "rich-output"))]
     fn test_minimal_render() {
         let theme = Theme {
             border_style: BorderStyle::None,
@@ -1000,7 +852,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "rich-output"))]
     fn test_strip_ansi_codes() {
         let with_codes = "\x1b[31mRed text\x1b[0m and \x1b[32mgreen\x1b[0m";
         let stripped = strip_ansi_codes(with_codes);

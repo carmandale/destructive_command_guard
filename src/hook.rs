@@ -7,15 +7,10 @@
 use crate::evaluator::MatchSpan;
 use crate::highlight::HighlightSpan;
 use crate::output::auto_theme;
-#[cfg(feature = "rich-output")]
-use crate::output::console::console;
 use crate::output::denial::DenialBox;
 use crate::output::theme::Severity as ThemeSeverity;
 use crate::packs::PatternSuggestion;
 use colored::Colorize;
-#[cfg(feature = "rich-output")]
-#[allow(unused_imports)]
-use rich_rust::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::io::{self, IsTerminal, Read, Write};
@@ -598,8 +593,6 @@ pub fn print_colorful_warning(
     pattern_suggestions: &[PatternSuggestion],
     severity: Option<crate::packs::Severity>,
 ) {
-    #[cfg(feature = "rich-output")]
-    let console_instance = console();
     let theme = auto_theme();
 
     // Prepare content for DenialBox
@@ -657,12 +650,6 @@ pub fn print_colorful_warning(
     eprintln!("{}", denial.render(&theme));
 
     // Secondary info (Legacy: printed after box; Rich: could use panels)
-    #[cfg(feature = "rich-output")]
-    if !console_instance.is_plain() {
-        // In rich mode, we might want additional panels or info
-        // For now, let's keep it simple as DenialBox handles most things
-        // But we might want to print the "Learn more" links
-    }
 
     // "Learn more" section (common to both modes, usually printed after the main warning)
     let escaped_cmd = command.replace('"', "\\\"");
@@ -687,38 +674,6 @@ pub fn print_colorful_warning(
         "{footer_style}https://github.com/Dicklesworthstone/destructive_command_guard/issues/new?template=false_positive.yml{reset}"
     );
     eprintln!();
-}
-
-#[cfg(feature = "rich-output")]
-#[allow(dead_code)] // TODO: Integrate into rich output path
-fn render_suggestions_panel(suggestions: &[PatternSuggestion]) -> String {
-    use rich_rust::r#box::ROUNDED;
-    use rich_rust::prelude::*;
-
-    // Build content as a Vec of lines, then join
-    let mut lines = Vec::new();
-    if !crate::output::suggestions_enabled() {
-        return String::new();
-    }
-
-    let filtered: Vec<&PatternSuggestion> = suggestions
-        .iter()
-        .filter(|s| s.platform.matches_current())
-        .take(MAX_SUGGESTIONS)
-        .collect();
-
-    for (i, s) in filtered.iter().enumerate() {
-        lines.push(format!("[bold cyan]{}.[/] {}", i + 1, s.description));
-        lines.push(format!("   [green]$[/] [cyan]{}[/]", s.command));
-    }
-    let content_str = lines.join("\n");
-
-    let width = crate::output::terminal_width() as usize;
-    Panel::from_text(&content_str)
-        .title("[yellow bold] 💡 Suggestions [/]")
-        .box_style(&ROUNDED)
-        .border_style(Style::new().color(Color::parse("yellow").unwrap_or_default()))
-        .render_plain(width)
 }
 
 /// Truncate a string for display, appending "..." if truncated.

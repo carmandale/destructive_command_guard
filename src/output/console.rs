@@ -19,7 +19,6 @@
 //! ```
 
 use std::io;
-#[cfg(not(feature = "rich-output"))]
 use std::io::Write;
 use std::sync::OnceLock;
 
@@ -28,11 +27,8 @@ static USE_RICH: OnceLock<bool> = OnceLock::new();
 
 /// dcg-specific console wrapper.
 ///
-/// Wraps rich_rust's Console (when the feature is enabled) with dcg-specific
-/// defaults like stderr output and environment variable handling.
-///
-/// Note: This struct creates a new Console on each operation to avoid
-/// thread-safety issues with the underlying rich_rust Console.
+/// Provides dcg-specific defaults like stderr output and environment
+/// variable handling.
 #[derive(Debug, Clone, Copy)]
 pub struct DcgConsole {
     force_plain: bool,
@@ -51,47 +47,14 @@ impl DcgConsole {
         Self { force_plain: true }
     }
 
-    /// Print styled text using markup syntax.
-    ///
-    /// When rich-output is enabled, parses markup like `[bold red]text[/]`.
-    /// Otherwise, strips markup and prints plain text.
-    #[cfg(feature = "rich-output")]
-    pub fn print(&self, text: &str) {
-        let console = self.create_inner_console();
-        if self.force_plain {
-            console.print_plain(text);
-        } else {
-            console.print(text);
-        }
-    }
-
-    /// Print text without rich-output feature (plain text to stderr).
-    #[cfg(not(feature = "rich-output"))]
+    /// Print text to stderr, stripping any markup-like patterns.
     pub fn print(&self, text: &str) {
         // Strip markup-like patterns for plain output
         let plain_text = strip_markup(text);
         let _ = writeln!(io::stderr(), "{plain_text}");
     }
 
-    /// Print a renderable (Panel, Table, etc.).
-    #[cfg(feature = "rich-output")]
-    pub fn print_renderable<R>(&self, renderable: &R)
-    where
-        R: rich_rust::renderables::Renderable,
-    {
-        let console = self.create_inner_console();
-        console.print_renderable(renderable);
-    }
-
     /// Print a horizontal rule.
-    #[cfg(feature = "rich-output")]
-    pub fn rule(&self, title: Option<&str>) {
-        let console = self.create_inner_console();
-        console.rule(title);
-    }
-
-    /// Print a horizontal rule without rich-output feature.
-    #[cfg(not(feature = "rich-output"))]
     pub fn rule(&self, title: Option<&str>) {
         let width = self.width();
         let line = if let Some(t) = title {
@@ -104,15 +67,6 @@ impl DcgConsole {
     }
 
     /// Get terminal width.
-    #[cfg(feature = "rich-output")]
-    #[must_use]
-    pub fn width(&self) -> usize {
-        let console = self.create_inner_console();
-        console.width()
-    }
-
-    /// Get terminal width without rich-output feature.
-    #[cfg(not(feature = "rich-output"))]
     #[must_use]
     pub fn width(&self) -> usize {
         crate::output::terminal_width() as usize
@@ -122,18 +76,6 @@ impl DcgConsole {
     #[must_use]
     pub const fn is_plain(&self) -> bool {
         self.force_plain
-    }
-
-    /// Create the underlying rich_rust Console instance.
-    #[cfg(feature = "rich-output")]
-    fn create_inner_console(&self) -> rich_rust::console::Console {
-        let mut builder = rich_rust::console::Console::builder().file(Box::new(io::stderr())); // CRITICAL: all output to stderr
-
-        if self.force_plain {
-            builder = builder.no_color();
-        }
-
-        builder.build()
     }
 }
 
@@ -179,7 +121,6 @@ pub fn init_console(force_plain: bool) {
 /// Strip markup tags from text for plain output.
 ///
 /// Removes patterns like `[bold red]` and `[/]` from the text.
-#[cfg(not(feature = "rich-output"))]
 fn strip_markup(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut in_bracket = false;
@@ -274,7 +215,6 @@ mod tests {
         assert!(c.width() > 0);
     }
 
-    #[cfg(not(feature = "rich-output"))]
     #[test]
     fn test_strip_markup() {
         assert_eq!(strip_markup("[bold]hello[/]"), "hello");
@@ -283,20 +223,17 @@ mod tests {
         assert_eq!(strip_markup("[a][b][c]"), "");
     }
 
-    #[cfg(not(feature = "rich-output"))]
     #[test]
     fn test_strip_markup_nested() {
         // Nested brackets: first ] closes bracket state, second ] is literal
         assert_eq!(strip_markup("[bold [red]]text[/]"), "]text");
     }
 
-    #[cfg(not(feature = "rich-output"))]
     #[test]
     fn test_strip_markup_empty() {
         assert_eq!(strip_markup(""), "");
     }
 
-    #[cfg(not(feature = "rich-output"))]
     #[test]
     fn test_strip_markup_no_close() {
         // Unclosed bracket - rest of string is consumed

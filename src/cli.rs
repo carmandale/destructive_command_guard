@@ -2303,13 +2303,8 @@ fn list_packs(
     }
 
     // Rich output when feature enabled
-    #[cfg(feature = "rich-output")]
-    {
-        list_packs_rich(config, enabled_only, verbose);
-    }
 
     // Pretty output (default, non-rich fallback)
-    #[cfg(not(feature = "rich-output"))]
     {
         println!("Available packs:");
         println!();
@@ -2350,89 +2345,6 @@ fn list_packs(
         println!();
         println!("Enable packs in ~/.config/dcg/config.toml");
     }
-}
-
-/// Rich terminal packs output using DcgConsole and markup.
-#[cfg(feature = "rich-output")]
-fn list_packs_rich(config: &Config, enabled_only: bool, verbose: bool) {
-    use crate::output::console::console;
-
-    let con = console();
-    let enabled_packs = config.enabled_pack_ids();
-    let infos = REGISTRY.list_packs(&enabled_packs);
-
-    // Header
-    con.rule(Some("[bold cyan] Available Packs [/]"));
-    con.print("");
-
-    // Group built-in packs by category
-    let mut by_category: std::collections::BTreeMap<&str, Vec<_>> =
-        std::collections::BTreeMap::new();
-    for info in &infos {
-        let category = info.id.split('.').next().unwrap_or(&info.id);
-        by_category.entry(category).or_default().push(info);
-    }
-
-    for (category, packs) in &by_category {
-        con.print(&format!("[bold]{category}[/]:"));
-        for info in packs {
-            if enabled_only && !info.enabled {
-                continue;
-            }
-
-            let (status, color) = if info.enabled {
-                ("●", "green")
-            } else {
-                ("○", "dim")
-            };
-
-            if verbose {
-                con.print(&format!(
-                    "  [{color}]{status}[/] [bold]{id}[/] - {desc} [dim]({safe} safe, {destr} destructive)[/]",
-                    id = info.id,
-                    desc = info.description,
-                    safe = info.safe_pattern_count,
-                    destr = info.destructive_pattern_count
-                ));
-            } else {
-                con.print(&format!(
-                    "  [{color}]{status}[/] [bold]{id}[/] - {name}",
-                    id = info.id,
-                    name = info.name
-                ));
-            }
-        }
-        con.print("");
-    }
-
-    // Display external packs from custom_paths
-    if let Some(external_store) = get_external_packs() {
-        let external_packs: Vec<_> = external_store.iter_packs().collect();
-        if !external_packs.is_empty() {
-            con.print("[bold magenta]custom[/]:");
-            for (id, pack) in &external_packs {
-                // External packs loaded via custom_paths are always enabled
-                let (status, color) = ("●", "green");
-                if verbose {
-                    con.print(&format!(
-                        "  [{color}]{status}[/] [bold]{id}[/] - {desc} [dim]({safe} safe, {destr} destructive)[/]",
-                        desc = pack.description,
-                        safe = pack.safe_patterns.len(),
-                        destr = pack.destructive_patterns.len()
-                    ));
-                } else {
-                    con.print(&format!(
-                        "  [{color}]{status}[/] [bold]{id}[/] - {name}",
-                        name = pack.name
-                    ));
-                }
-            }
-            con.print("");
-        }
-    }
-
-    con.print("[dim]Legend: [green]●[/] = enabled, ○ = disabled[/]");
-    con.print("[dim]Enable packs in ~/.config/dcg/config.toml[/]");
 }
 
 /// Show detailed information about a pack
@@ -4833,7 +4745,6 @@ fn parse_git_name_status_z(stdout: &[u8]) -> Vec<std::path::PathBuf> {
 }
 
 /// Print scan report in pretty format.
-#[cfg(not(feature = "rich-output"))]
 fn print_scan_pretty(report: &crate::scan::ScanReport, verbose: bool, top: usize) {
     use crate::output::{ScanResultRow, ScanResultsTable, TableStyle, auto_theme};
     use colored::Colorize;
@@ -4932,113 +4843,6 @@ fn print_scan_pretty(report: &crate::scan::ScanReport, verbose: bool, top: usize
             "{}",
             "Note: max findings limit reached, scan stopped early".yellow()
         );
-    }
-
-    if verbose {
-        // Additional verbose info could go here
-    }
-}
-
-/// Print scan report in pretty format with rich output.
-#[cfg(feature = "rich-output")]
-fn print_scan_pretty(report: &crate::scan::ScanReport, verbose: bool, top: usize) {
-    use crate::output::console::console;
-    use crate::output::{ScanResultRow, ScanResultsTable, auto_theme};
-
-    let con = console();
-
-    if report.findings.is_empty() {
-        con.print("[green]No findings.[/]");
-    } else {
-        let total = report.findings.len();
-        let shown = if top == 0 { total } else { total.min(top) };
-
-        con.rule(Some("[bold] Scan Findings [/]"));
-        con.print(&format!("[yellow bold]{total}[/] finding(s)"));
-        con.print("");
-
-        // Render findings as a table using rich_rust
-        let rows: Vec<ScanResultRow> = report
-            .findings
-            .iter()
-            .take(shown)
-            .map(ScanResultRow::from_scan_finding)
-            .collect();
-
-        let theme = auto_theme();
-        let table = ScanResultsTable::new(rows)
-            .with_theme(&theme)
-            .with_command_preview();
-
-        con.print(&table.render());
-
-        // Show detailed info for findings with reasons/suggestions
-        let findings_with_details: Vec<_> = report
-            .findings
-            .iter()
-            .take(shown)
-            .filter(|f| f.reason.is_some() || f.suggestion.is_some())
-            .collect();
-
-        if !findings_with_details.is_empty() && verbose {
-            con.print("");
-            con.print("[bold]Details:[/]");
-            for finding in findings_with_details {
-                let location = finding.col.map_or_else(
-                    || format!("{}:{}", finding.file, finding.line),
-                    |col| format!("{}:{}:{col}", finding.file, finding.line),
-                );
-                con.print(&format!("  [dim]{location}[/]"));
-                if let Some(ref reason) = finding.reason {
-                    con.print(&format!("    [cyan]Reason:[/] {reason}"));
-                }
-                if let Some(ref suggestion) = finding.suggestion {
-                    con.print(&format!("    [green]Suggestion:[/] {suggestion}"));
-                }
-            }
-        }
-
-        if shown < total {
-            con.print("");
-            con.print(&format!(
-                "[dim]… {} more finding(s) not shown (use --top 0 to show all)[/]",
-                total - shown
-            ));
-        }
-    }
-
-    // Summary
-    con.print("");
-    con.print("[dim]───[/]");
-    let considered = report.summary.files_scanned + report.summary.files_skipped;
-    con.print(&format!(
-        "[cyan]Files:[/] {considered} considered, {} scanned, {} skipped",
-        report.summary.files_scanned, report.summary.files_skipped
-    ));
-    con.print(&format!(
-        "[cyan]Commands extracted:[/] {}",
-        report.summary.commands_extracted
-    ));
-    con.print(&format!(
-        "[cyan]Findings:[/] {} ([green]allow={}[/], [yellow]warn={}[/], [red]deny={}[/])",
-        report.summary.findings_total,
-        report.summary.decisions.allow,
-        report.summary.decisions.warn,
-        report.summary.decisions.deny
-    ));
-    con.print(&format!(
-        "[cyan]Severities:[/] [red]error={}[/], [yellow]warning={}[/], [blue]info={}[/]",
-        report.summary.severities.error,
-        report.summary.severities.warning,
-        report.summary.severities.info
-    ));
-
-    if let Some(elapsed_ms) = report.summary.elapsed_ms {
-        con.print(&format!("[cyan]Elapsed:[/] {elapsed_ms} ms"));
-    }
-
-    if report.summary.max_findings_reached {
-        con.print("[yellow]Note: max findings limit reached, scan stopped early[/]");
     }
 
     if verbose {
@@ -5305,16 +5109,8 @@ fn handle_explain(
     // Format and print based on selected format
     match format {
         ExplainFormat::Pretty => {
-            #[cfg(feature = "rich-output")]
-            {
-                explain_rich(&trace);
-            }
-            #[cfg(not(feature = "rich-output"))]
-            {
-                let output =
-                    trace.format_pretty(colored::control::SHOULD_COLORIZE.should_colorize());
-                println!("{output}");
-            }
+            let output = trace.format_pretty(colored::control::SHOULD_COLORIZE.should_colorize());
+            println!("{output}");
         }
         ExplainFormat::Compact => {
             println!("{}", trace.format_compact(None));
@@ -5324,278 +5120,6 @@ fn handle_explain(
             let json = serde_json::to_string_pretty(&json_output)
                 .unwrap_or_else(|e| format!("{{\"error\": \"JSON serialization failed: {e}\"}}"));
             println!("{json}");
-        }
-    }
-}
-
-/// Rich output for explain command with tree visualization.
-#[cfg(feature = "rich-output")]
-fn explain_rich(trace: &crate::trace::ExplainTrace) {
-    use crate::evaluator::EvaluationDecision;
-    use crate::output::console::console;
-    use crate::trace::TraceDetails;
-
-    let con = console();
-
-    // Header
-    con.rule(Some("[bold] DCG EXPLAIN [/]"));
-    con.print("");
-
-    // Decision with color
-    let (decision_icon, decision_color, decision_text) = match trace.decision {
-        EvaluationDecision::Allow => ("✓", "green", "ALLOW"),
-        EvaluationDecision::Deny => ("✗", "red", "DENY"),
-    };
-    con.print(&format!(
-        "[bold]Decision:[/] [{decision_color} bold]{decision_icon} {decision_text}[/]"
-    ));
-    con.print(&format!(
-        "[bold]Latency:[/]  [dim]{:.2}ms[/]",
-        trace.total_duration_us as f64 / 1000.0
-    ));
-    con.print("");
-
-    // Command tree
-    con.print("[bold cyan]Command[/]");
-    let has_normalized = trace
-        .normalized_command
-        .as_ref()
-        .is_some_and(|n| n != &trace.command);
-    let has_sanitized = trace
-        .sanitized_command
-        .as_ref()
-        .is_some_and(|s| s != &trace.command && Some(s) != trace.normalized_command.as_ref());
-
-    if has_normalized || has_sanitized {
-        con.print(&format!("├─ [cyan]Input:[/]      {}", trace.command));
-        if has_normalized {
-            let branch = if has_sanitized { "├─" } else { "└─" };
-            con.print(&format!(
-                "{branch} [cyan]Normalized:[/] {}",
-                trace.normalized_command.as_ref().unwrap()
-            ));
-        }
-        if has_sanitized {
-            con.print(&format!(
-                "└─ [cyan]Sanitized:[/]  {}",
-                trace.sanitized_command.as_ref().unwrap()
-            ));
-        }
-    } else {
-        con.print(&format!("└─ [cyan]Input:[/] {}", trace.command));
-    }
-    con.print("");
-
-    // Match tree (for denials or when there's match info)
-    if let Some(ref info) = trace.match_info {
-        con.print("[bold yellow]Match[/]");
-
-        let has_explanation = info.explanation.is_some();
-        let mut items: Vec<(&str, String)> = vec![];
-
-        if let Some(ref rule_id) = info.rule_id {
-            items.push(("Rule ID", format!("[yellow]{rule_id}[/]")));
-        }
-        if let Some(ref pack_id) = info.pack_id {
-            items.push(("Pack", pack_id.clone()));
-        }
-        if let Some(ref pattern) = info.pattern_name {
-            items.push(("Pattern", pattern.clone()));
-        }
-        items.push(("Reason", info.reason.clone()));
-
-        if let (Some(start), Some(end)) = (info.match_start, info.match_end) {
-            items.push(("Span", format!("bytes {start}..{end}")));
-        }
-        if let Some(ref preview) = info.matched_text_preview {
-            items.push(("Matched", format!("[red]{preview}[/]")));
-        }
-
-        for (i, (label, value)) in items.iter().enumerate() {
-            let branch = if i == items.len() - 1 && !has_explanation {
-                "└─"
-            } else {
-                "├─"
-            };
-            con.print(&format!("{branch} [cyan]{label}:[/] {value}"));
-        }
-
-        if let Some(ref explanation) = info.explanation {
-            con.print("└─ [cyan]Explanation:[/]");
-            for line in explanation.lines() {
-                con.print(&format!("   [dim]{line}[/]"));
-            }
-        }
-        con.print("");
-    }
-
-    // Allowlist override
-    if let Some(ref al_info) = trace.allowlist_info {
-        con.print("[bold green]Allowlist Override[/]");
-        con.print(&format!("├─ [cyan]Layer:[/]  {:?}", al_info.layer));
-        con.print(&format!("├─ [cyan]Reason:[/] {}", al_info.entry_reason));
-        con.print(&format!(
-            "└─ [dim]Overrode: {} - {}[/]",
-            al_info
-                .original_match
-                .rule_id
-                .as_deref()
-                .unwrap_or("unknown"),
-            al_info.original_match.reason
-        ));
-        con.print("");
-    }
-
-    // Pack summary tree
-    if let Some(ref summary) = trace.pack_summary {
-        con.print("[bold magenta]Packs[/]");
-        con.print(&format!(
-            "├─ [cyan]Enabled:[/] {} packs",
-            summary.enabled_count
-        ));
-
-        if !summary.evaluated.is_empty() {
-            let branch = if summary.skipped.is_empty() {
-                "└─"
-            } else {
-                "├─"
-            };
-            con.print(&format!(
-                "{branch} [cyan]Evaluated:[/] {}",
-                summary.evaluated.join(", ")
-            ));
-        }
-
-        if !summary.skipped.is_empty() {
-            con.print(&format!(
-                "└─ [dim]Skipped (keyword gating): {}[/]",
-                summary.skipped.join(", ")
-            ));
-        }
-        con.print("");
-    }
-
-    // Pipeline trace tree
-    if !trace.steps.is_empty() {
-        con.print("[bold blue]Pipeline Trace[/]");
-        let step_count = trace.steps.len();
-
-        for (i, step) in trace.steps.iter().enumerate() {
-            let branch = if i == step_count - 1 {
-                "└─"
-            } else {
-                "├─"
-            };
-            let duration_ms = step.duration_us as f64 / 1000.0;
-
-            // Format details summary
-            let details_summary = match &step.details {
-                TraceDetails::KeywordGating {
-                    quick_rejected,
-                    first_match,
-                    ..
-                } => {
-                    if *quick_rejected {
-                        "[green]quick pass[/]".to_string()
-                    } else if let Some(kw) = first_match {
-                        format!("matched: {kw}")
-                    } else {
-                        "no match".to_string()
-                    }
-                }
-                TraceDetails::Normalization { was_modified, .. } => if *was_modified {
-                    "modified"
-                } else {
-                    "unchanged"
-                }
-                .to_string(),
-                TraceDetails::Sanitization {
-                    was_modified,
-                    spans_masked,
-                    ..
-                } => {
-                    if *was_modified {
-                        format!("{spans_masked} spans masked")
-                    } else {
-                        "unchanged".to_string()
-                    }
-                }
-                TraceDetails::HeredocDetection {
-                    triggered,
-                    scripts_extracted,
-                    ..
-                } => {
-                    if *triggered {
-                        format!("{scripts_extracted} scripts")
-                    } else {
-                        "none".to_string()
-                    }
-                }
-                TraceDetails::AllowlistCheck {
-                    matched,
-                    matched_layer,
-                    ..
-                } => {
-                    if *matched {
-                        format!("matched: {:?}", matched_layer.as_ref().unwrap())
-                    } else {
-                        "no match".to_string()
-                    }
-                }
-                TraceDetails::PackEvaluation {
-                    matched_pack,
-                    packs_evaluated,
-                    ..
-                } => {
-                    if let Some(pack) = matched_pack {
-                        format!("matched in {pack}")
-                    } else {
-                        format!("{} packs checked", packs_evaluated.len())
-                    }
-                }
-                TraceDetails::PolicyDecision { decision, .. } => match decision {
-                    EvaluationDecision::Allow => "[green]allow[/]".to_string(),
-                    EvaluationDecision::Deny => "[red]deny[/]".to_string(),
-                },
-                _ => String::new(),
-            };
-
-            con.print(&format!(
-                "{branch} [cyan]{:<18}[/] [dim]({:>6.2}ms)[/] {}",
-                step.name, duration_ms, details_summary
-            ));
-        }
-        con.print("");
-    }
-
-    // Suggestions
-    if let Some(ref info) = trace.match_info {
-        if let Some(rule_id) = info.rule_id.as_deref() {
-            if let Some(suggestions) = crate::suggestions::get_suggestions(rule_id) {
-                if !suggestions.is_empty() && crate::output::suggestions_enabled() {
-                    con.print("[bold yellow]Suggestions[/]");
-                    let suggestion_count = suggestions.len();
-
-                    for (i, s) in suggestions.iter().enumerate() {
-                        let branch = if i == suggestion_count - 1 {
-                            "└─"
-                        } else {
-                            "├─"
-                        };
-                        con.print(&format!(
-                            "{branch} [yellow]{}[/]: {}",
-                            s.kind.label(),
-                            s.text
-                        ));
-                        if let Some(ref cmd) = s.command {
-                            con.print(&format!("   [dim]$[/] [green]{cmd}[/]"));
-                        }
-                        if let Some(ref url) = s.url {
-                            con.print(&format!("   [dim]→ {url}[/]"));
-                        }
-                    }
-                }
-            }
         }
     }
 }
@@ -6122,14 +5646,7 @@ fn handle_stats_command(
     // Format and print output
     match cmd.format {
         StatsFormat::Pretty => {
-            #[cfg(feature = "rich-output")]
-            {
-                format_stats_pack_rich(&aggregated, cmd.days);
-            }
-            #[cfg(not(feature = "rich-output"))]
-            {
-                print!("{}", stats::format_stats_pretty(&aggregated, cmd.days));
-            }
+            print!("{}", stats::format_stats_pretty(&aggregated, cmd.days));
         }
         StatsFormat::Json => {
             print!("{}", stats::format_stats_json(&aggregated));
@@ -6195,14 +5712,7 @@ fn handle_stats_rules(
     // Format and print output
     match cmd.format {
         StatsFormat::Pretty => {
-            #[cfg(feature = "rich-output")]
-            {
-                format_rule_metrics_rich(&metrics, cmd.days);
-            }
-            #[cfg(not(feature = "rich-output"))]
-            {
-                print!("{}", format_rule_metrics_pretty(&metrics, cmd.days));
-            }
+            print!("{}", format_rule_metrics_pretty(&metrics, cmd.days));
         }
         StatsFormat::Json => {
             print!("{}", format_rule_metrics_json(&metrics, cmd.days)?);
@@ -6213,7 +5723,6 @@ fn handle_stats_rules(
 }
 
 /// Format rule metrics as a pretty table.
-#[cfg(not(feature = "rich-output"))]
 #[allow(clippy::too_many_lines)]
 fn format_rule_metrics_pretty(metrics: &[crate::history::RuleMetrics], period_days: u64) -> String {
     use std::fmt::Write;
@@ -6329,136 +5838,6 @@ fn format_rule_metrics_pretty(metrics: &[crate::history::RuleMetrics], period_da
     );
 
     output
-}
-
-/// Rich output for pack statistics.
-#[cfg(feature = "rich-output")]
-fn format_stats_pack_rich(stats: &crate::stats::AggregatedStats, period_days: u64) {
-    use crate::output::console::console;
-
-    let con = console();
-
-    con.rule(Some(&format!(
-        "[bold] Pack Statistics ({period_days} days) [/]"
-    )));
-    con.print("");
-
-    if stats.by_pack.is_empty() {
-        con.print("[dim]No events recorded in this period.[/]");
-        return;
-    }
-
-    // Header
-    con.print("[bold cyan]Pack                      Blocks   Allows  Bypasses   Warns[/]");
-    con.print("[dim]─────────────────────────────────────────────────────────────[/]");
-
-    // Pack rows
-    for pack in &stats.by_pack {
-        let blocks_color = if pack.blocks > 0 { "red" } else { "dim" };
-        let allows_color = if pack.allows > 0 { "green" } else { "dim" };
-        let bypasses_color = if pack.bypasses > 0 { "yellow" } else { "dim" };
-        let warns_color = if pack.warns > 0 { "yellow" } else { "dim" };
-
-        con.print(&format!(
-            "{:<24}  [{blocks_color}]{:>7}[/]  [{allows_color}]{:>7}[/]  [{bypasses_color}]{:>8}[/]  [{warns_color}]{:>6}[/]",
-            pack.pack_id, pack.blocks, pack.allows, pack.bypasses, pack.warns
-        ));
-    }
-
-    // Total row
-    con.print("[dim]─────────────────────────────────────────────────────────────[/]");
-    con.print(&format!(
-        "[bold]{:<24}  {:>7}  {:>7}  {:>8}  {:>6}[/]",
-        "Total", stats.total_blocks, stats.total_allows, stats.total_bypasses, stats.total_warns
-    ));
-}
-
-/// Rich output for rule metrics.
-#[cfg(feature = "rich-output")]
-fn format_rule_metrics_rich(metrics: &[crate::history::RuleMetrics], period_days: u64) {
-    use crate::output::console::console;
-
-    let con = console();
-
-    con.rule(Some(&format!(
-        "[bold] Rule Metrics ({period_days} days) [/]"
-    )));
-    con.print("");
-
-    // Header
-    con.print("[bold cyan]Rule ID                            Hits  Overrides    Rate  Trend  Change    Noisy[/]");
-    con.print("[dim]─────────────────────────────────────────────────────────────────────────────────────[/]");
-
-    // Rule rows
-    for m in metrics {
-        let rule_display = if m.rule_id.len() > 32 {
-            format!("{}...", &m.rule_id[..29])
-        } else {
-            m.rule_id.clone()
-        };
-
-        let trend_display = match m.trend {
-            crate::history::RuleTrend::Increasing => "[red]↑[/]",
-            crate::history::RuleTrend::Stable => "[dim]→[/]",
-            crate::history::RuleTrend::Decreasing => "[green]↓[/]",
-        };
-
-        let change_display = if m.change_percentage.abs() < 0.01 {
-            "[dim]-[/]".to_string()
-        } else if m.is_anomaly {
-            format!("[red bold]{:+.0}%![/]", m.change_percentage)
-        } else if m.change_percentage > 0.0 {
-            format!("[yellow]{:+.0}%[/]", m.change_percentage)
-        } else {
-            format!("[green]{:+.0}%[/]", m.change_percentage)
-        };
-
-        let noisy_display = if m.is_noisy {
-            "[yellow]yes[/]"
-        } else {
-            "[dim]-[/]"
-        };
-
-        let rate_color = if m.override_rate > 50.0 {
-            "yellow"
-        } else if m.override_rate > 20.0 {
-            "white"
-        } else {
-            "dim"
-        };
-
-        con.print(&format!(
-            "{:<32}  {:>6}  {:>9}  [{rate_color}]{:>5.1}%[/]  {:>5}  {:>8}  {:>8}",
-            rule_display,
-            m.total_hits,
-            m.allowlist_overrides,
-            m.override_rate,
-            trend_display,
-            change_display,
-            noisy_display
-        ));
-    }
-
-    // Totals
-    let total_hits: u64 = metrics.iter().map(|m| m.total_hits).sum();
-    let total_overrides: u64 = metrics.iter().map(|m| m.allowlist_overrides).sum();
-    #[allow(clippy::cast_precision_loss)]
-    let avg_rate = if total_hits > 0 {
-        (total_overrides as f64 / total_hits as f64) * 100.0
-    } else {
-        0.0
-    };
-
-    con.print("[dim]─────────────────────────────────────────────────────────────────────────────────────[/]");
-    con.print(&format!(
-        "[bold]{:<32}  {:>6}  {:>9}  {:>5.1}%[/]",
-        "Total", total_hits, total_overrides, avg_rate
-    ));
-    con.print("");
-    con.print(&format!(
-        "[dim]{} rules shown (use -n to change limit)[/]",
-        metrics.len()
-    ));
 }
 
 /// JSON output structure for rule metrics.
@@ -7877,21 +7256,13 @@ fn format_corpus_pretty(output: &CorpusOutput) -> String {
 fn doctor(fix: bool, format: DoctorFormat) {
     match format {
         DoctorFormat::Pretty => {
-            #[cfg(feature = "rich-output")]
-            {
-                doctor_rich(fix);
-            }
-            #[cfg(not(feature = "rich-output"))]
-            {
-                doctor_pretty(fix);
-            }
+            doctor_pretty(fix);
         }
         DoctorFormat::Json => doctor_json(fix),
     }
 }
 
 /// Human-readable doctor output (colored crate, non-rich fallback).
-#[cfg(not(feature = "rich-output"))]
 #[allow(clippy::too_many_lines, clippy::unnecessary_unwrap)]
 fn doctor_pretty(fix: bool) {
     use colored::Colorize;
@@ -8189,64 +7560,6 @@ fn doctor_json(fix: bool) {
     let report = collect_doctor_report(fix);
     let json = serde_json::to_string_pretty(&report).expect("serialize doctor report");
     println!("{json}");
-}
-
-/// Rich terminal doctor output using DcgConsole and markup.
-#[cfg(feature = "rich-output")]
-fn doctor_rich(fix: bool) {
-    use crate::output::console::console;
-
-    let report = collect_doctor_report(fix);
-    let con = console();
-
-    // Header
-    con.rule(Some("[bold green] dcg doctor [/]"));
-    con.print("");
-
-    // Render each check
-    for check in &report.checks {
-        let (icon, color) = match check.status {
-            DoctorCheckStatus::Ok => ("✓", "green"),
-            DoctorCheckStatus::Warning => ("⚠", "yellow"),
-            DoctorCheckStatus::Error => ("✗", "red"),
-            DoctorCheckStatus::Skipped => ("○", "dim"),
-        };
-
-        // Status line with icon
-        con.print(&format!(
-            "[{color}]{icon}[/] [bold]{name}[/]: [{color}]{msg}[/]",
-            name = check.name,
-            msg = check.message
-        ));
-
-        // Remediation hint (indented)
-        if let Some(ref rem) = check.remediation {
-            con.print(&format!("  [dim]→ {rem}[/]"));
-        }
-
-        // Fixed indicator
-        if check.fixed {
-            con.print("  [green bold]Fixed![/]");
-        }
-    }
-
-    // Summary
-    con.print("");
-    if report.ok {
-        con.print("[green bold]All checks passed![/]");
-    } else if report.fixed > 0 && report.fixed == report.issues {
-        con.print("[green bold]All issues fixed![/]");
-    } else {
-        con.print(&format!(
-            "[red bold]{issues}[/] issue(s) found{fixed}",
-            issues = report.issues,
-            fixed = if report.fixed > 0 {
-                format!(", [green]{} fixed[/]", report.fixed)
-            } else {
-                String::new()
-            }
-        ));
-    }
 }
 
 #[allow(clippy::too_many_lines, clippy::option_if_let_else)]

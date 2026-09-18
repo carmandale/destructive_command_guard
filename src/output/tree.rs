@@ -2,16 +2,6 @@
 //!
 //! Provides tree visualization for hierarchical data like pack structures,
 //! decision traces, and command transformation pipelines.
-//!
-//! # Feature Flags
-//!
-//! When the `rich-output` feature is enabled, trees are rendered using `rich_rust`
-//! for premium terminal output. Otherwise, a fallback ASCII tree renderer is used.
-
-#[cfg(feature = "rich-output")]
-use rich_rust::renderables::tree::{Tree as RichTree, TreeGuides, TreeNode as RichTreeNode};
-#[cfg(feature = "rich-output")]
-use rich_rust::style::Style;
 
 use super::theme::{BorderStyle, Theme};
 
@@ -141,28 +131,6 @@ impl TreeNode {
     pub fn has_children(&self) -> bool {
         !self.children.is_empty()
     }
-
-    /// Convert to rich_rust TreeNode (when feature enabled).
-    #[cfg(feature = "rich-output")]
-    fn to_rich_node(&self) -> RichTreeNode {
-        let label = if let Some(ref style) = self.style {
-            format!("{style}{}{style_end}", self.label, style_end = "[/]")
-        } else {
-            self.label.clone()
-        };
-
-        let mut node = if let Some(ref icon) = self.icon {
-            RichTreeNode::with_icon(icon.clone(), label)
-        } else {
-            RichTreeNode::new(label)
-        };
-
-        for child in &self.children {
-            node = node.child(child.to_rich_node());
-        }
-
-        node
-    }
 }
 
 /// A tree structure for rendering hierarchical data.
@@ -244,34 +212,6 @@ impl DcgTree {
         self
     }
 
-    /// Render the tree using rich_rust (when feature enabled).
-    #[cfg(feature = "rich-output")]
-    pub fn render_rich(&self) {
-        use super::console::console;
-
-        let con = console();
-
-        // Print title if set
-        if let Some(ref title) = self.title {
-            con.print(title);
-        }
-
-        // Convert to rich_rust tree
-        let rich_guides = match self.guides {
-            DcgTreeGuides::Ascii => TreeGuides::Ascii,
-            DcgTreeGuides::Unicode => TreeGuides::Unicode,
-            DcgTreeGuides::Bold => TreeGuides::Bold,
-            DcgTreeGuides::Rounded => TreeGuides::Rounded,
-        };
-
-        let tree = RichTree::new(self.root.to_rich_node())
-            .guides(rich_guides)
-            .guide_style(Style::new().color_str("bright_black").unwrap_or_default())
-            .show_root(self.show_root);
-
-        con.print_renderable(&tree);
-    }
-
     /// Render the tree as plain text lines.
     #[must_use]
     pub fn render_plain(&self) -> Vec<String> {
@@ -345,14 +285,6 @@ impl DcgTree {
 
     /// Render the tree to the console (uses rich output if available).
     pub fn render(&self) {
-        #[cfg(feature = "rich-output")]
-        {
-            if super::should_use_rich_output() {
-                self.render_rich();
-                return;
-            }
-        }
-
         // Fallback to plain text
         for line in self.render_plain() {
             eprintln!("{line}");

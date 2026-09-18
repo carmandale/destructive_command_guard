@@ -101,8 +101,6 @@ strip = true        # Remove debug symbols
 ```toml
 [features]
 rayon = ["dep:rayon"]           # Rayon data parallelism (optional)
-rich-output = ["dep:rich_rust"] # Enable rich_rust for premium terminal output
-legacy-output = []              # Keep old rendering (placeholder for gradual migration)
 ```
 
 ---

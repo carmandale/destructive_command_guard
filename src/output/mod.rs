@@ -7,9 +7,8 @@
 //! - `theme` - Color schemes and border style definitions
 //! - `denial` - Denial message box renderer
 //! - `test` - Test result box renderer
-//! - `progress` - Progress indicators using indicatif (with rich_rust support)
+//! - `progress` - Progress indicators using indicatif
 //! - `console` - Console abstraction for stderr output
-//! - `rich_theme` - rich_rust theme integration
 //! - `tree` - Tree visualization for hierarchical data
 //!
 //! # TTY Detection
@@ -23,7 +22,6 @@
 pub mod console;
 pub mod denial;
 pub mod progress;
-pub mod rich_theme;
 pub mod tables;
 pub mod test;
 pub mod theme;
@@ -35,9 +33,6 @@ pub use progress::{
     MaybeProgress, NoopProgress, SCAN_PROGRESS_THRESHOLD, ScanProgress, ScanProgressStyle, spinner,
     spinner_if_tty,
 };
-#[cfg(feature = "rich-output")]
-pub use progress::{RichProgressStyle, render_progress_bar_rich};
-pub use rich_theme::{RichThemeExt, color_to_markup, severity_badge_markup, severity_panel_title};
 pub use tables::{ScanResultRow, ScanResultsTable, TableStyle};
 pub use test::{AllowedReason, TestOutcome, TestResultBox};
 pub use theme::{BorderStyle, Severity, SeverityColors, Theme, ThemePalette};

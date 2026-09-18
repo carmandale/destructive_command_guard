@@ -74,13 +74,13 @@ echo ""
 
 # Run tests with coverage
 echo -e "${CYAN}Running tests with coverage instrumentation...${NC}"
-cargo llvm-cov --all-features \
+cargo llvm-cov \
     --ignore-filename-regex='(tests/|benches/|\.cargo/)' \
     --no-report
 
 # Generate text summary
 echo -e "${CYAN}Generating coverage summary...${NC}"
-cargo llvm-cov report --all-features \
+cargo llvm-cov report \
     --ignore-filename-regex='(tests/|benches/|\.cargo/)' \
     --text > coverage-summary.txt
 
@@ -97,7 +97,7 @@ if [[ $QUICK_MODE -eq 0 ]]; then
     # Generate HTML report
     echo ""
     echo -e "${CYAN}Generating HTML report...${NC}"
-    cargo llvm-cov report --all-features \
+    cargo llvm-cov report \
         --ignore-filename-regex='(tests/|benches/|\.cargo/)' \
         --html
 
@@ -119,7 +119,7 @@ fi
 if [[ $GENERATE_LCOV -eq 1 ]]; then
     echo ""
     echo -e "${CYAN}Generating LCOV report...${NC}"
-    cargo llvm-cov report --all-features \
+    cargo llvm-cov report \
         --ignore-filename-regex='(tests/|benches/|\.cargo/)' \
         --lcov --output-path lcov.info
     echo -e "${GREEN}LCOV report: lcov.info${NC}"

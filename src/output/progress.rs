@@ -10,13 +10,6 @@
 //! - **Non-blocking**: Progress updates are designed to be fast
 //! - **Clean finish**: No visual artifacts left after completion
 //!
-//! # Rich Output
-//!
-//! When the `rich-output` feature is enabled, additional rendering methods using
-//! `rich_rust` are available:
-//! - `ScanProgress::render_static_rich()` - Render a snapshot as a styled string
-//! - `render_progress_bar_rich()` - Render a standalone progress bar
-//!
 //! # Thresholds
 //!
 //! - File scanning: Show progress bar when scanning >20 files
@@ -47,10 +40,6 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 // Rich output imports
-#[cfg(feature = "rich-output")]
-use rich_rust::renderables::{BarStyle as RichBarStyle, ProgressBar as RichProgressBar};
-#[cfg(feature = "rich-output")]
-use rich_rust::style::Style as RichStyle;
 
 /// Minimum file count before showing a progress bar.
 pub const SCAN_PROGRESS_THRESHOLD: u64 = 20;
@@ -175,41 +164,6 @@ impl ScanProgress {
             (pos as f64) / (len as f64)
         }
     }
-
-    /// Render a static snapshot of the progress bar using rich_rust.
-    ///
-    /// This is useful for logging or reporting progress state without animation.
-    /// The result is a styled string that can be printed once.
-    #[cfg(feature = "rich-output")]
-    #[must_use]
-    pub fn render_static_rich(&self, current_file: Option<&str>) -> String {
-        let pos = self.bar.position();
-        let len = self.bar.length().unwrap_or(0);
-
-        let mut pb = RichProgressBar::with_total(len)
-            .width(40)
-            .bar_style(RichBarStyle::Block)
-            .completed_style(RichStyle::new().color_str("cyan").unwrap_or_default())
-            .remaining_style(
-                RichStyle::new()
-                    .color_str("bright_black")
-                    .unwrap_or_default(),
-            )
-            .show_percentage(true)
-            .show_eta(false);
-
-        pb.update(pos);
-
-        // Use render_plain for terminal-width-aware plain text rendering
-        let bar_str = pb.render_plain(80);
-
-        if let Some(file) = current_file {
-            let display_path = truncate_path(file, 30);
-            format!("{bar_str}  {display_path}")
-        } else {
-            bar_str
-        }
-    }
 }
 
 /// Style configuration for scan progress bars.
@@ -262,41 +216,6 @@ impl ScanProgressStyle {
             .expect("valid progress template")
             .progress_chars(&self.progress_chars)
     }
-
-    /// Converts to a rich_rust progress style.
-    ///
-    /// Note: Not all indicatif features have rich_rust equivalents.
-    /// This provides a reasonable mapping for common use cases.
-    #[cfg(feature = "rich-output")]
-    #[must_use]
-    pub fn to_rich_style(&self) -> RichProgressStyle {
-        // Determine bar style from progress_chars
-        let bar_style = if self.progress_chars.contains('#') {
-            RichBarStyle::Ascii
-        } else if self.progress_chars.contains('█') {
-            RichBarStyle::Block
-        } else {
-            RichBarStyle::default()
-        };
-
-        // Determine color from template (simplified heuristic)
-        let completed_color = if self.template.contains(".cyan") {
-            "cyan"
-        } else if self.template.contains(".green") {
-            "green"
-        } else {
-            "cyan"
-        };
-
-        RichProgressStyle {
-            width: 40, // Extract from template if needed
-            bar_style,
-            completed_color,
-            remaining_color: "bright_black",
-            show_percentage: true,
-            show_eta: self.template.contains("{eta}"),
-        }
-    }
 }
 
 /// Creates a spinner for indeterminate-duration operations.
@@ -336,160 +255,6 @@ pub fn spinner_if_tty(message: &str) -> Option<ProgressBar> {
         Some(spinner(message))
     } else {
         None
-    }
-}
-
-/// Render a static progress bar using rich_rust.
-///
-/// This function creates a one-time rendered progress bar suitable for
-/// logging, reports, or non-animated display contexts.
-///
-/// # Arguments
-///
-/// * `current` - Current progress value
-/// * `total` - Total value (100% completion)
-/// * `width` - Bar width in characters (default 40)
-/// * `description` - Optional description shown after the bar
-///
-/// # Example
-///
-/// ```ignore
-/// let bar = render_progress_bar_rich(50, 100, 40, Some("Processing files..."));
-/// println!("{}", bar);
-/// ```
-#[cfg(feature = "rich-output")]
-#[must_use]
-pub fn render_progress_bar_rich(
-    current: u64,
-    total: u64,
-    width: usize,
-    description: Option<&str>,
-) -> String {
-    let mut pb = RichProgressBar::with_total(total)
-        .width(width)
-        .bar_style(RichBarStyle::Block)
-        .completed_style(RichStyle::new().color_str("cyan").unwrap_or_default())
-        .remaining_style(
-            RichStyle::new()
-                .color_str("bright_black")
-                .unwrap_or_default(),
-        )
-        .show_percentage(true);
-
-    pb.update(current);
-
-    // Use render_plain for terminal-width-aware plain text rendering
-    let bar_str = pb.render_plain(80);
-
-    if let Some(desc) = description {
-        format!("{bar_str}  {desc}")
-    } else {
-        bar_str
-    }
-}
-
-/// Configuration for rich_rust progress bar styling.
-#[cfg(feature = "rich-output")]
-#[derive(Debug, Clone)]
-pub struct RichProgressStyle {
-    /// Bar width in characters.
-    pub width: usize,
-    /// Bar style variant.
-    pub bar_style: RichBarStyle,
-    /// Color for completed portion.
-    pub completed_color: &'static str,
-    /// Color for remaining portion.
-    pub remaining_color: &'static str,
-    /// Whether to show percentage.
-    pub show_percentage: bool,
-    /// Whether to show ETA (requires time tracking).
-    pub show_eta: bool,
-}
-
-#[cfg(feature = "rich-output")]
-impl Default for RichProgressStyle {
-    fn default() -> Self {
-        Self {
-            width: 40,
-            bar_style: RichBarStyle::Block,
-            completed_color: "cyan",
-            remaining_color: "bright_black",
-            show_percentage: true,
-            show_eta: false,
-        }
-    }
-}
-
-#[cfg(feature = "rich-output")]
-impl RichProgressStyle {
-    /// Create a minimal style (no percentage, simple bar).
-    #[must_use]
-    pub fn minimal() -> Self {
-        Self {
-            width: 30,
-            bar_style: RichBarStyle::Ascii,
-            completed_color: "green",
-            remaining_color: "dim",
-            show_percentage: false,
-            show_eta: false,
-        }
-    }
-
-    /// Create a verbose style with percentage and ETA.
-    #[must_use]
-    pub fn verbose() -> Self {
-        Self {
-            width: 40,
-            bar_style: RichBarStyle::Block,
-            completed_color: "cyan",
-            remaining_color: "bright_black",
-            show_percentage: true,
-            show_eta: true,
-        }
-    }
-
-    /// Create a gradient style for visual appeal.
-    #[must_use]
-    pub fn gradient() -> Self {
-        Self {
-            width: 40,
-            bar_style: RichBarStyle::Gradient,
-            completed_color: "green",
-            remaining_color: "bright_black",
-            show_percentage: true,
-            show_eta: false,
-        }
-    }
-
-    /// Render a progress bar with this style.
-    #[must_use]
-    pub fn render(&self, current: u64, total: u64, description: Option<&str>) -> String {
-        let mut pb = RichProgressBar::with_total(total)
-            .width(self.width)
-            .bar_style(self.bar_style)
-            .completed_style(
-                RichStyle::new()
-                    .color_str(self.completed_color)
-                    .unwrap_or_default(),
-            )
-            .remaining_style(
-                RichStyle::new()
-                    .color_str(self.remaining_color)
-                    .unwrap_or_default(),
-            )
-            .show_percentage(self.show_percentage)
-            .show_eta(self.show_eta);
-
-        pb.update(current);
-
-        // Use render_plain for terminal-width-aware plain text rendering
-        let bar_str = pb.render_plain(80);
-
-        if let Some(desc) = description {
-            format!("{bar_str}  {desc}")
-        } else {
-            bar_str
-        }
     }
 }
 
@@ -582,18 +347,6 @@ impl MaybeProgress {
             Self::Noop(_) => 0.0,
         }
     }
-
-    /// Render a static snapshot using rich_rust.
-    ///
-    /// Returns `None` for no-op progress trackers.
-    #[cfg(feature = "rich-output")]
-    #[must_use]
-    pub fn render_static_rich(&self, current_file: Option<&str>) -> Option<String> {
-        match self {
-            Self::Real(p) => Some(p.render_static_rich(current_file)),
-            Self::Noop(_) => None,
-        }
-    }
 }
 
 /// Truncates a file path to fit within `max_len` characters.
@@ -622,114 +375,6 @@ fn truncate_path(path: &str, max_len: usize) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ============================================================
-    // rich_rust integration tests
-    // ============================================================
-
-    #[cfg(feature = "rich-output")]
-    mod rich_tests {
-        use super::*;
-
-        #[test]
-        fn test_render_progress_bar_rich_basic() {
-            let result = render_progress_bar_rich(50, 100, 40, None);
-            // Should contain progress bar characters and percentage
-            assert!(!result.is_empty());
-            // The result should contain some form of progress indication
-            assert!(result.contains('%') || result.contains('█') || result.contains('#'));
-        }
-
-        #[test]
-        fn test_render_progress_bar_rich_with_description() {
-            let result = render_progress_bar_rich(25, 100, 30, Some("Processing..."));
-            assert!(result.contains("Processing..."));
-        }
-
-        #[test]
-        fn test_render_progress_bar_rich_complete() {
-            let result = render_progress_bar_rich(100, 100, 40, None);
-            // 100% complete should be reflected
-            assert!(!result.is_empty());
-        }
-
-        #[test]
-        fn test_render_progress_bar_rich_zero() {
-            let result = render_progress_bar_rich(0, 100, 40, None);
-            assert!(!result.is_empty());
-        }
-
-        #[test]
-        fn test_rich_progress_style_default() {
-            let style = RichProgressStyle::default();
-            assert_eq!(style.width, 40);
-            assert!(style.show_percentage);
-            assert!(!style.show_eta);
-        }
-
-        #[test]
-        fn test_rich_progress_style_minimal() {
-            let style = RichProgressStyle::minimal();
-            assert_eq!(style.width, 30);
-            assert!(!style.show_percentage);
-            assert_eq!(style.bar_style, RichBarStyle::Ascii);
-        }
-
-        #[test]
-        fn test_rich_progress_style_verbose() {
-            let style = RichProgressStyle::verbose();
-            assert!(style.show_percentage);
-            assert!(style.show_eta);
-        }
-
-        #[test]
-        fn test_rich_progress_style_gradient() {
-            let style = RichProgressStyle::gradient();
-            assert_eq!(style.bar_style, RichBarStyle::Gradient);
-        }
-
-        #[test]
-        fn test_rich_progress_style_render() {
-            let style = RichProgressStyle::default();
-            let result = style.render(50, 100, Some("Testing"));
-            assert!(result.contains("Testing"));
-        }
-
-        #[test]
-        fn test_scan_progress_style_to_rich_default() {
-            let scan_style = ScanProgressStyle::default();
-            let rich_style = scan_style.to_rich_style();
-            assert_eq!(rich_style.bar_style, RichBarStyle::Block);
-            assert_eq!(rich_style.completed_color, "cyan");
-        }
-
-        #[test]
-        fn test_scan_progress_style_to_rich_minimal() {
-            let scan_style = ScanProgressStyle::minimal();
-            let rich_style = scan_style.to_rich_style();
-            assert_eq!(rich_style.bar_style, RichBarStyle::Ascii);
-        }
-
-        #[test]
-        fn test_scan_progress_render_static_rich() {
-            let progress = ScanProgress::new(100);
-            let result = progress.render_static_rich(None);
-            assert!(!result.is_empty());
-        }
-
-        #[test]
-        fn test_scan_progress_render_static_rich_with_file() {
-            let progress = ScanProgress::new(100);
-            let result = progress.render_static_rich(Some("src/main.rs"));
-            assert!(result.contains("src/main.rs") || result.contains("[dim]"));
-        }
-
-        #[test]
-        fn test_maybe_progress_render_static_rich_noop() {
-            let progress = MaybeProgress::Noop(NoopProgress::new());
-            assert!(progress.render_static_rich(None).is_none());
-        }
-    }
 
     // ============================================================
     // Original tests

@@ -1,5 +1,16 @@
 # rich_rust Integration Plan for dcg
 
+<!-- REVISED: 2026-09-18 (.agent-config-swwbz) — SUPERSEDED, NOT IMPLEMENTED.
+     This plan is kept for the record only. The `rich-output` feature it describes was
+     removed from the codebase on 2026-09-18 as an abandoned migration: nothing shipped
+     it (`dist.yml` builds default features, and Cargo.toml declared no `default`), after
+     .agent-config-u8eec nothing in CI compiled it, its companion `legacy-output = []`
+     was an inert empty feature with zero cfg sites, and the renderer had rotted --
+     `dcg doctor` emitted literal `[bold green]` / `[/]` markup because the rich `rule()`
+     ignored `force_plain`, and the rich path wrote command results to stderr where the
+     plain path writes stdout. 24 cli_e2e tests pinned the plain renderer; none pinned
+     this one. Do not implement from this document without re-deciding that. -->
+
 ## Executive Summary
 
 This document outlines a comprehensive plan to integrate [`rich_rust`](https://github.com/Dicklesworthstone/rich_rust) into the dcg (Destructive Command Guard) codebase to achieve premium, stylish terminal output for human observers while maintaining full compatibility with AI coding agents.

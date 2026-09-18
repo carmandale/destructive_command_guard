@@ -11,14 +11,8 @@
 
 use super::theme::{BorderStyle, Severity, Theme};
 use crate::highlight::{HighlightSpan, format_highlighted_command};
-#[cfg(feature = "rich-output")]
-use crate::output::rich_theme::{RichThemeExt, color_to_markup};
 use crate::output::terminal_width;
-#[cfg(not(feature = "rich-output"))]
 use ratatui::style::Color;
-#[cfg(feature = "rich-output")]
-#[allow(unused_imports)]
-use rich_rust::prelude::*;
 use std::fmt::Write;
 
 /// A denial message box to display when a command is blocked.
@@ -90,17 +84,8 @@ impl DenialBox {
     }
 
     /// Render the denial box with the given theme.
-    ///
-    /// Uses rich_rust when the feature is enabled, otherwise falls back to
-    /// manual rendering.
     #[must_use]
     pub fn render(&self, theme: &Theme) -> String {
-        #[cfg(feature = "rich-output")]
-        {
-            // If using rich output, delegate to render_rich
-            self.render_rich(theme)
-        }
-        #[cfg(not(feature = "rich-output"))]
         match theme.border_style {
             BorderStyle::Unicode => {
                 let output = self.render_unicode(theme);
@@ -120,85 +105,6 @@ impl DenialBox {
                 }
             }
         }
-    }
-
-    /// Render with rich_rust (Premium UI).
-    #[cfg(feature = "rich-output")]
-    fn render_rich(&self, theme: &Theme) -> String {
-        use rich_rust::r#box::{ASCII, DOUBLE, HEAVY, MINIMAL, ROUNDED};
-        use rich_rust::prelude::*;
-
-        let pattern_lines =
-            format_pattern_lines(&self.pattern_id, theme.severity_label(self.severity));
-        let width = terminal_width().saturating_sub(8).max(40) as usize;
-
-        // Build content as a Vec of lines
-        let mut lines = Vec::new();
-
-        // 1. Header is handled by Panel title, but we add inner padding text
-        let severity_markup = theme.severity_markup(self.severity);
-        lines.push(format!("[{severity_markup}]🛑 COMMAND BLOCKED[/]"));
-        lines.push(String::new());
-
-        // 2. Command with highlighting
-        // Note: We use manual highlighting for now, but rich_rust Syntax could be used later
-        lines.push(format!("[dim]Command:[/]  [bold]{}[/]", self.command));
-
-        // 3. Explanation
-        if let Some(explanation) = &self.explanation {
-            lines.push(String::new());
-            lines.push(format!("[{severity_markup}]Explanation:[/]"));
-            for line in wrap_text(explanation, width) {
-                lines.push(line);
-            }
-        }
-
-        // 4. Pattern Info
-        lines.push(String::new());
-        for line in pattern_lines {
-            lines.push(format!("[dim]{line}[/]"));
-        }
-
-        // 5. Alternatives
-        if !self.alternatives.is_empty() {
-            lines.push(String::new());
-            lines.push(format!("[{}]Safe alternatives:[/]", theme.success_markup()));
-            for alt in &self.alternatives {
-                lines.push(format!("  [green]•[/] {alt}"));
-            }
-        }
-
-        // 6. Allow-once code
-        if let Some(code) = &self.allow_once_code {
-            lines.push(String::new());
-            lines.push("[dim]─────────────────────────────────────[/]".to_string());
-            lines.push(format!(
-                "[yellow]To allow once:[/] [bold]dcg allow-once {code}[/]"
-            ));
-        }
-
-        let content_str = lines.join("\n");
-
-        // Determine border style and color
-        let box_style: &'static rich_rust::r#box::BoxChars = match theme.border_style {
-            BorderStyle::Unicode => match self.severity {
-                Severity::Critical => &DOUBLE,
-                Severity::High => &HEAVY,
-                _ => &ROUNDED,
-            },
-            BorderStyle::Ascii => &ASCII,
-            BorderStyle::None => &MINIMAL,
-        };
-
-        let border_color = color_to_markup(theme.color_for_severity(self.severity));
-
-        // Create Panel
-        Panel::from_text(&content_str)
-            .title("[bold] DCG [/]")
-            .border_style(Style::parse(&border_color).unwrap_or_default())
-            .box_style(box_style)
-            .padding((1, 2))
-            .render_plain(width)
     }
 
     /// Render a plain text version for non-TTY contexts.
@@ -251,7 +157,6 @@ impl DenialBox {
     }
 
     /// Render with Unicode box-drawing characters.
-    #[cfg(not(feature = "rich-output"))]
     #[allow(clippy::too_many_lines)]
     fn render_unicode(&self, theme: &Theme) -> String {
         let width = terminal_width().saturating_sub(4).max(40) as usize;
@@ -431,7 +336,6 @@ impl DenialBox {
     }
 
     /// Render with ASCII box-drawing characters.
-    #[cfg(not(feature = "rich-output"))]
     fn render_ascii(&self, theme: &Theme) -> String {
         let width = terminal_width().saturating_sub(4).max(40) as usize;
         let mut output = String::new();
@@ -538,7 +442,6 @@ impl DenialBox {
     }
 
     /// Render with no borders (minimal style).
-    #[cfg(not(feature = "rich-output"))]
     fn render_minimal(&self, theme: &Theme) -> String {
         let mut output = String::new();
         let severity_code = severity_color_code(theme, self.severity);
@@ -601,7 +504,6 @@ impl DenialBox {
 }
 
 /// Convert a ratatui color to an ANSI foreground color code sequence.
-#[cfg(not(feature = "rich-output"))]
 fn ansi_color_code(color: Color) -> String {
     match color {
         Color::Reset => "0".to_string(),
@@ -627,13 +529,11 @@ fn ansi_color_code(color: Color) -> String {
 }
 
 /// Get ANSI color code for severity level.
-#[cfg(not(feature = "rich-output"))]
 fn severity_color_code(theme: &Theme, severity: Severity) -> String {
     ansi_color_code(theme.color_for_severity(severity))
 }
 
 /// Calculate padding needed to fill width, accounting for ANSI codes.
-#[cfg(not(feature = "rich-output"))]
 fn padding_for(text: &str, width: usize) -> String {
     let visible_len = strip_ansi_codes(text).chars().count();
     let padding = width.saturating_sub(visible_len);
@@ -641,7 +541,6 @@ fn padding_for(text: &str, width: usize) -> String {
 }
 
 /// Strip ANSI escape codes from a string to get visible length.
-#[cfg(not(feature = "rich-output"))]
 fn strip_ansi_codes(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut in_escape = false;
@@ -807,7 +706,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "rich-output"))]
     fn test_denial_box_unicode_render() {
         let span = HighlightSpan::new(0, 10);
         let theme = Theme::default();
@@ -827,7 +725,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "rich-output"))]
     fn test_denial_box_ascii_render() {
         let span = HighlightSpan::new(0, 10);
         let theme = Theme {
@@ -851,7 +748,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "rich-output"))]
     fn test_denial_box_no_color_still_uses_ascii_box() {
         let span = HighlightSpan::new(0, 10);
         let theme = Theme::no_color();
@@ -873,7 +769,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "rich-output"))]
     fn test_denial_box_unicode_without_colors_strips_ansi() {
         let span = HighlightSpan::new(0, 10);
         let theme = Theme::default().without_colors();
@@ -907,7 +802,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "rich-output"))]
     fn test_strip_ansi_codes() {
         let with_codes = "\x1b[31mRed text\x1b[0m and \x1b[32mgreen\x1b[0m";
         let stripped = strip_ansi_codes(with_codes);
@@ -916,7 +810,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "rich-output"))]
     fn test_severity_color_codes() {
         let theme = Theme::default();
         assert_eq!(severity_color_code(&theme, Severity::Critical), "31");
@@ -967,7 +860,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "rich-output"))]
     fn test_denial_box_minimal_render() {
         let span = HighlightSpan::new(0, 10);
         let theme = Theme {
@@ -1012,7 +904,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "rich-output"))]
     fn test_padding_for_with_ansi() {
         // Text with ANSI codes should be padded based on visible length
         let text_with_ansi = "\x1b[31mRed\x1b[0m";
