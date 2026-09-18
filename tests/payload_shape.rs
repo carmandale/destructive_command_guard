@@ -20,6 +20,13 @@
 //! the parsers directly and are meant to feed them odd shapes), and the shell
 //! scripts under `tests/e2e/` and `tests/scripts/`, which build their own JSON
 //! and run outside cargo. It is a syntactic proxy and is meant to stay one.
+//!
+//! And: an `EXEMPT` entry is per-FILE, not per-line. Measured 2026-09-18
+//! (`.agent-config-g9yf3`) rather than assumed — a real hand-spelled
+//! `PreToolUse` payload planted inside an exempted file is not reported, while
+//! the same literal in any other file still is. So an exemption is a claim
+//! about every hook payload that file will ever hold, which is why each one
+//! has to name the reader and why the list stays short.
 
 use std::path::Path;
 
@@ -38,14 +45,30 @@ const NEEDLE: &str = "\"tool_name\"";
 /// Each entry is a measured exemption, not a convenience. Adding one means
 /// naming the reader that consumes those bytes and showing it never reaches
 /// `detect_protocol`'s output shape.
-const EXEMPT: &[(&str, &str)] = &[(
-    "stdin_batch_mode.rs",
-    "`dcg hook --batch` reads dcg's own JSONL CLI format, not an agent's hook \
-     stdin. `evaluate_batch_line` in src/cli.rs binds the protocol as `_protocol` \
-     and answers in `BatchHookOutput`, so no envelope field can reach an output \
-     shape there — and these literals are the fixtures for that line parser, so \
-     routing them through the builder would make the test a mirror of it",
-)];
+const EXEMPT: &[(&str, &str)] = &[
+    (
+        "stdin_batch_mode.rs",
+        "`dcg hook --batch` reads dcg's own JSONL CLI format, not an agent's hook \
+         stdin. `evaluate_batch_line` in src/cli.rs binds the protocol as `_protocol` \
+         and answers in `BatchHookOutput`, so no envelope field can reach an output \
+         shape there — and these literals are the fixtures for that line parser, so \
+         routing them through the builder would make the test a mirror of it",
+    ),
+    (
+        "custom_pack_surfaces.rs",
+        "Same reader, same argument as `stdin_batch_mode.rs` above — re-verified \
+         against current source rather than inherited: `evaluate_batch_line` still \
+         destructures `extract_command_with_protocol` as `(command, _protocol)` and \
+         still answers in `BatchHookOutput` (index/decision/mode/rule_id/pack_id/ \
+         error), which has no `hookSpecificOutput` and no protocol-shaped field, so \
+         `detect_protocol`'s output shape is unreachable from this line. The one \
+         literal here is the `hook --batch` input for \
+         `hook_batch_denies_by_a_custom_paths_rule`; that test is about a \
+         custom_paths pack reaching the batch surface, and sending it a real \
+         PreToolUse envelope would test a shape `--batch` never receives \
+         (.agent-config-g9yf3)",
+    ),
+];
 
 #[test]
 fn every_hook_payload_comes_from_the_builder() {
@@ -106,7 +129,16 @@ fn every_hook_payload_comes_from_the_builder() {
          written by hand is the minimal {{tool_name, tool_input}} shape no real \
          PreToolUse sends, and it exercises a branch of detect_protocol that no \
          agent reaches. Build it with payload::pre_tool_use(cwd, command) or \
-         payload::pre_tool_use_for_tool(cwd, tool, input) instead:\n\n{}\n",
+         payload::pre_tool_use_for_tool(cwd, tool, input) instead.\n\n\
+         BUT FIRST: is this line hook stdin at all? A `dcg hook --batch` input \
+         line is dcg's own JSONL format, and the minimal shape is CORRECT there \
+         — `evaluate_batch_line` discards the protocol and answers in \
+         `BatchHookOutput`, so it can never emit the wrong protocol. Handing \
+         such a line a PreToolUse envelope tests a shape `--batch` never \
+         receives, which is the same class of defect this guard exists to \
+         prevent. If that is what you have, add the file to EXEMPT above with \
+         the reader that consumes it, rather than 'fixing' the call \
+         (.agent-config-g9yf3):\n\n{}\n",
         offenders.len(),
         offenders.join("\n")
     );
