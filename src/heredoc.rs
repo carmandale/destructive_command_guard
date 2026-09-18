@@ -3548,6 +3548,10 @@ pub struct ExtractedShellCommand {
     pub end: usize,
     /// 1-based line number.
     pub line_number: usize,
+    /// A whole statement carrying a heredoc, emitted so its body is judged.
+    /// The evaluator holds such a denial rather than returning it first
+    /// (`.agent-config-0awpo`, see Tier 2.5).
+    pub heredoc_statement: bool,
 }
 
 /// Extract executable shell commands from heredoc/script content.
@@ -3664,6 +3668,7 @@ fn collect_commands_recursive<D: ast_grep_core::Doc>(
                 start: range.start,
                 end: range.end,
                 line_number,
+                heredoc_statement: false,
             });
         }
     }
@@ -3690,6 +3695,7 @@ fn collect_commands_recursive<D: ast_grep_core::Doc>(
             start: range.start,
             end: range.end,
             line_number,
+            heredoc_statement: true,
         });
     }
 

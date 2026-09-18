@@ -231,6 +231,26 @@ fn a_warned_reset_hard_in_prose_quoting_a_heredoc_only_warns() {
     );
 }
 
+/// Cold review 2 (fail-open under the live policy shape): the nested statement
+/// is emitted ahead of the sibling after it, so a warned rule in the nested
+/// body, returned first, turned main's DENY of the later `rm -rf` into a WARN.
+/// A nested denial is held until nothing else denies.
+#[test]
+fn a_warned_nested_rule_does_not_hide_a_later_hard_denied_sibling() {
+    let cmd = "bash <<'EOF'\npython3 <<'PY'\nimport shutil; shutil.rmtree('/srv/cache')\nPY\n\
+               rm -rf /srv/data\nEOF";
+    let (stdout, stderr, exit_code) = run_with_warned_rules(cmd);
+    assert!(
+        stdout.contains("rm-rf"),
+        "the sibling's rule decides, not the warned nested one\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert_denied(
+        cmd,
+        (stdout, stderr, exit_code),
+        "main denies this command; reading the nested body must not weaken it",
+    );
+}
+
 #[test]
 fn an_unterminated_nested_cat_body_is_allowed() {
     let cmd = "bash <<'EOF'\ncat <<X\nnotes: os.remove is used by the cleanup step\nEOF";

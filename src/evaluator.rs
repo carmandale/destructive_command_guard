@@ -2708,6 +2708,9 @@ fn evaluate_heredoc(
     // sweep would stop reading a body that nothing else read either
     // (`.agent-config-dcg-fallback-scans-judged-content-zc6tb`).
     let mut judged_spans: Vec<std::ops::Range<usize>> = Vec::new();
+    // The first denial Tier 2.5 found in a nested heredoc statement, held
+    // until everything else has had its say (see the Tier 2.5 loop).
+    let mut held_nested_denial: Option<EvaluationResult> = None;
 
     for (index, content) in contents.iter().enumerate() {
         if inert_body_spans.iter().any(|(owner, span)| {
@@ -2806,56 +2809,72 @@ fn evaluate_heredoc(
 
                 if result.is_denied() {
                     // Propagate denial, wrapping the reason context
-                    if let Some(mut info) = result.pattern_info {
-                        info.reason = format!(
-                            "Embedded shell command blocked: {} (line {} of heredoc)",
-                            info.reason, inner.line_number
-                        );
-                        // Mark as heredoc source — but never for an explicit
-                        // block. A ConfigOverride or LegacyPattern denial
-                        // carries no pack_id, pattern_name or severity, so
-                        // relabelling it HeredocAst sends main.rs into
-                        // `resolve_mode(None, None, None)`, which returns
-                        // `[policy] default_mode`. Under `default_mode =
-                        // "warn"` that turned `bash -c 'terraform destroy'`
-                        // into a warning while the unwrapped command denied
-                        // (.agent-config-dcg-tier25-relabels-config-denials-4mnqi).
-                        if !matches!(
-                            info.source,
-                            MatchSource::ConfigOverride | MatchSource::LegacyPattern
-                        ) {
-                            info.source = MatchSource::HeredocAst;
-                        }
-                        if let Some(span) = info.matched_span {
-                            if let Some(mapped_inner) =
-                                map_heredoc_span(command, content, inner.start, inner.end)
-                            {
-                                let mapped = MatchSpan {
-                                    start: mapped_inner.start.saturating_add(span.start),
-                                    end: mapped_inner.start.saturating_add(span.end),
-                                };
-                                if mapped.end <= command.len() {
-                                    info.matched_span = Some(mapped);
-                                    info.matched_text_preview =
-                                        Some(extract_match_preview(command, &mapped));
+                    let denial = 'wrap: {
+                        if let Some(mut info) = result.pattern_info {
+                            info.reason = format!(
+                                "Embedded shell command blocked: {} (line {} of heredoc)",
+                                info.reason, inner.line_number
+                            );
+                            // Mark as heredoc source — but never for an explicit
+                            // block. A ConfigOverride or LegacyPattern denial
+                            // carries no pack_id, pattern_name or severity, so
+                            // relabelling it HeredocAst sends main.rs into
+                            // `resolve_mode(None, None, None)`, which returns
+                            // `[policy] default_mode`. Under `default_mode =
+                            // "warn"` that turned `bash -c 'terraform destroy'`
+                            // into a warning while the unwrapped command denied
+                            // (.agent-config-dcg-tier25-relabels-config-denials-4mnqi).
+                            if !matches!(
+                                info.source,
+                                MatchSource::ConfigOverride | MatchSource::LegacyPattern
+                            ) {
+                                info.source = MatchSource::HeredocAst;
+                            }
+                            if let Some(span) = info.matched_span {
+                                if let Some(mapped_inner) =
+                                    map_heredoc_span(command, content, inner.start, inner.end)
+                                {
+                                    let mapped = MatchSpan {
+                                        start: mapped_inner.start.saturating_add(span.start),
+                                        end: mapped_inner.start.saturating_add(span.end),
+                                    };
+                                    if mapped.end <= command.len() {
+                                        info.matched_span = Some(mapped);
+                                        info.matched_text_preview =
+                                            Some(extract_match_preview(command, &mapped));
+                                    } else {
+                                        info.matched_span = None;
+                                    }
                                 } else {
                                     info.matched_span = None;
                                 }
-                            } else {
-                                info.matched_span = None;
                             }
-                        }
 
-                        return Some(EvaluationResult {
-                            decision: EvaluationDecision::Deny,
-                            pattern_info: Some(info),
-                            allowlist_override: None,
-                            effective_mode: Some(crate::packs::DecisionMode::Deny),
-                            skipped_due_to_budget: false,
-                            branch_context: None,
-                        });
+                            break 'wrap EvaluationResult {
+                                decision: EvaluationDecision::Deny,
+                                pattern_info: Some(info),
+                                allowlist_override: None,
+                                effective_mode: Some(crate::packs::DecisionMode::Deny),
+                                skipped_due_to_budget: false,
+                                branch_context: None,
+                            };
+                        }
+                        result
+                    };
+                    // A nested heredoc statement is read by nobody before
+                    // `.agent-config-0awpo`, so its denial must not end the
+                    // evaluation ahead of anything that was read before it.
+                    // Returned first, a policy-WARNED rule in a nested body
+                    // let a later `rm -rf` sibling through: main denied that
+                    // command and the first cut of this fix only warned (cold
+                    // review 2). Held, it is returned only if nothing else
+                    // denies, so this reader can add a verdict but never
+                    // replace one.
+                    if inner.heredoc_statement {
+                        held_nested_denial.get_or_insert(denial);
+                        continue;
                     }
-                    return Some(result);
+                    return Some(denial);
                 }
             }
         }
@@ -2957,7 +2976,7 @@ fn evaluate_heredoc(
         }
     }
 
-    None
+    held_nested_denial
 }
 
 /// Blank out `spans` in `command`, byte for byte.
