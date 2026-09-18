@@ -4,7 +4,9 @@
 //! checks without shell-hook overhead.
 
 use crate::config::Config;
-use crate::evaluator::{EvaluationDecision, evaluate_command_consulting_allow_once};
+use crate::evaluator::{
+    EvaluationDecision, evaluate_command_consulting_allow_once, resolve_decision_mode,
+};
 use crate::packs::REGISTRY;
 use crate::scan::{
     ScanEvalContext, ScanFailOn, ScanFormat, ScanOptions, ScanRedactMode, scan_paths,
@@ -195,10 +197,19 @@ impl DcgMcpServer {
             &self.scan_ctx.allowlists,
         );
 
-        let mode = result.effective_mode.map(|m| m.label().to_string());
-        let allowed = result
-            .effective_mode
-            .map_or(result.decision != EvaluationDecision::Deny, |m| !m.blocks());
+        // The mode the hook applies, from the resolver the hook calls: policy,
+        // then confidence. Not `effective_mode`, which the evaluator stamps from
+        // severity alone, so a `[policy.rules]` deny on a Medium rule answered
+        // allowed:true here while the hook denied it
+        // (.agent-config-dcg-mcp-ignores-policy-b1loi). The hook resolves a mode
+        // only for a Deny, and lets a Deny with no rule to resolve through.
+        let resolved = if result.decision == EvaluationDecision::Deny {
+            resolve_decision_mode(&self.config, command, &result)
+        } else {
+            None
+        };
+        let mode = resolved.map(|m| m.label().to_string());
+        let allowed = resolved.is_none_or(|m| !m.blocks());
 
         let mut response = CheckCommandResponse {
             allowed,

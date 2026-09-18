@@ -24,6 +24,7 @@ use destructive_command_guard::cli::{self, Cli};
 use destructive_command_guard::config::Config;
 use destructive_command_guard::evaluator::{
     EvaluationDecision, MatchSource, evaluate_command_with_pack_order_deadline_at_path,
+    resolve_decision_mode,
 };
 #[allow(unused_imports)]
 use destructive_command_guard::exit_codes::{EXIT_DENIED, EXIT_PARSE_ERROR, EXIT_SUCCESS};
@@ -664,7 +665,14 @@ fn main() {
         return;
     }
 
-    let Some(ref info) = result.pattern_info else {
+    // Policy, then confidence: the one resolver `dcg test` and the MCP
+    // `check_command` tool also call, so they report the mode applied here
+    // (.agent-config-dcg-mcp-ignores-policy-b1loi). It is `None` exactly when
+    // `pattern_info` is.
+    let (Some(info), Some(mode)) = (
+        result.pattern_info.as_ref(),
+        resolve_decision_mode(&config, &command, &result),
+    ) else {
         // Fail open: structurally unexpected, but hook safety wins.
         if let Some(writer) = history_writer.as_ref() {
             let entry = build_history_entry(
@@ -682,31 +690,6 @@ fn main() {
     };
 
     let pack = info.pack_id.as_deref();
-    let mut mode = match info.source {
-        MatchSource::Pack | MatchSource::HeredocAst => {
-            config
-                .policy()
-                .resolve_mode(pack, info.pattern_name.as_deref(), info.severity)
-        }
-        // Never downgrade explicit blocks.
-        MatchSource::ConfigOverride | MatchSource::LegacyPattern => DecisionMode::Deny,
-    };
-
-    // Apply confidence scoring (if enabled) to potentially downgrade Deny to Warn.
-    // Only applies to pack/heredoc matches, not config overrides.
-    if matches!(info.source, MatchSource::Pack | MatchSource::HeredocAst) {
-        // Asked through the evaluator's own helper, so the question it asked
-        // before returning this match and the answer applied here are one
-        // computation (.agent-config-dcg-confidence-downgrades-early-return-tk1gu).
-        let confidence_result = destructive_command_guard::evaluator::confidence_result_for(
-            &command,
-            &result,
-            mode,
-            &config.confidence,
-        );
-        mode = confidence_result.mode;
-    }
-
     let pattern = info.pattern_name.as_deref();
     let explanation = info.explanation.as_deref();
 

@@ -532,11 +532,12 @@ fn hold_first_blocking(
 }
 
 /// Whether the policy denies the rule this denial names, asked with the same
-/// three fields the hook resolves the mode from (main.rs, `resolve_mode`).
+/// three fields the hook resolves the mode from ([`resolve_decision_mode`],
+/// which calls `resolve_mode`).
 ///
 /// It answers the policy's question only: `apply_confidence_scoring` runs after
-/// `resolve_mode` in main.rs and can still downgrade that Deny to Warn, which
-/// this cannot see. Confidence scoring is off by default.
+/// `resolve_mode` in [`resolve_decision_mode`] and can still downgrade that Deny
+/// to Warn, which this cannot see. Confidence scoring is off by default.
 ///
 /// Severity alone is not that answer: `[policy.rules]` can set a High rule to
 /// warn, and the live config does for `core.git:reset-hard`. Deciding "blocks"
@@ -3192,6 +3193,51 @@ pub fn apply_confidence_scoring(
         score: Some(score),
         downgraded: should_downgrade,
     }
+}
+
+/// The mode the hook applies to a matched rule: `[policy]` first, then confidence.
+///
+/// This is the one place that answer is computed. The hook (main.rs), `dcg test`
+/// and the MCP `check_command` tool all call it, so none of them can report a
+/// mode the others would not apply. `EvaluationResult::effective_mode` is NOT
+/// this answer: the evaluator stamps it from severity alone and never consults
+/// `[policy.rules]`, `[policy.packs]` or `default_mode`, so a surface that read
+/// it answered "allowed" for a Medium rule the policy denies
+/// (.agent-config-dcg-mcp-ignores-policy-b1loi).
+///
+/// Returns `None` when the result carries no `pattern_info` -- there is no rule
+/// to resolve. The hook and MCP ask only for a `Deny` decision; `dcg test` asks
+/// for any, which is the same answer because no `Allow` carries `pattern_info`.
+#[must_use]
+pub fn resolve_decision_mode(
+    config: &Config,
+    command: &str,
+    result: &EvaluationResult,
+) -> Option<crate::packs::DecisionMode> {
+    let info = result.pattern_info.as_ref()?;
+
+    let mut mode = match info.source {
+        MatchSource::Pack | MatchSource::HeredocAst => config.policy().resolve_mode(
+            info.pack_id.as_deref(),
+            info.pattern_name.as_deref(),
+            info.severity,
+        ),
+        // Never downgrade explicit blocks.
+        MatchSource::ConfigOverride | MatchSource::LegacyPattern => {
+            crate::packs::DecisionMode::Deny
+        }
+    };
+
+    // Confidence scoring (if enabled) may downgrade Deny to Warn, and only for
+    // pack/heredoc matches, never config overrides. Asked through
+    // [`confidence_result_for`], the helper the evaluator's early-return
+    // question uses, so the two are one computation
+    // (.agent-config-dcg-confidence-downgrades-early-return-tk1gu).
+    if matches!(info.source, MatchSource::Pack | MatchSource::HeredocAst) {
+        mode = confidence_result_for(command, result, mode, &config.confidence).mode;
+    }
+
+    Some(mode)
 }
 
 /// Apply git branch-aware strictness to an evaluation result.

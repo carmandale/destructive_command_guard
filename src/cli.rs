@@ -11,8 +11,8 @@ use inquire::{Select, Text};
 use crate::agent::{DetectionMethod, detect_agent_with_details};
 use crate::config::Config;
 use crate::evaluator::{
-    DEFAULT_WINDOW_WIDTH, EvaluationDecision, EvaluationResult, MatchSource,
-    evaluate_command_with_pack_order, evaluate_command_with_pack_order_deadline_at_path,
+    DEFAULT_WINDOW_WIDTH, EvaluationDecision, MatchSource, evaluate_command_with_pack_order,
+    evaluate_command_with_pack_order_deadline_at_path,
 };
 use crate::exit_codes::EXIT_DENIED;
 use crate::highlight::{HighlightSpan, format_highlighted_command, should_use_color};
@@ -3412,50 +3412,6 @@ fn log_interactive_allowlist_audit_event(
     Ok(())
 }
 
-fn resolve_mode_for_cli(
-    config: &Config,
-    command: &str,
-    result: &EvaluationResult,
-) -> Option<DecisionMode> {
-    let info = result.pattern_info.as_ref()?;
-    let pack = info.pack_id.as_deref();
-    let pattern = info.pattern_name.as_deref();
-
-    let mut mode = match info.source {
-        MatchSource::Pack | MatchSource::HeredocAst => {
-            config.policy().resolve_mode(pack, pattern, info.severity)
-        }
-        MatchSource::ConfigOverride | MatchSource::LegacyPattern => DecisionMode::Deny,
-    };
-
-    if matches!(info.source, MatchSource::Pack | MatchSource::HeredocAst) {
-        let sanitized = crate::context::sanitize_for_pattern_matching(command);
-        let normalized_command = crate::normalize::normalize_command(command);
-        let normalized_sanitized = crate::normalize::normalize_command(sanitized.as_ref());
-
-        let mut confidence_command = command;
-        let mut confidence_sanitized: Option<&str> = None;
-
-        if normalized_command.len() == normalized_sanitized.len() {
-            confidence_command = normalized_command.as_ref();
-            if sanitized.as_ref() != command {
-                confidence_sanitized = Some(normalized_sanitized.as_ref());
-            }
-        }
-
-        let confidence_result = crate::apply_confidence_scoring(
-            confidence_command,
-            confidence_sanitized,
-            result,
-            mode,
-            &config.confidence,
-        );
-        mode = confidence_result.mode;
-    }
-
-    Some(mode)
-}
-
 /// Test a command against the configured packs using the shared evaluator.
 ///
 /// This ensures parity with hook mode by using the same evaluation logic:
@@ -3729,7 +3685,8 @@ fn test_command(
     }
     println!();
 
-    let resolved_mode = resolve_mode_for_cli(&effective_config, command, &result);
+    let resolved_mode =
+        crate::evaluator::resolve_decision_mode(&effective_config, command, &result);
 
     match result.decision {
         EvaluationDecision::Allow => {
