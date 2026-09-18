@@ -956,14 +956,9 @@ dcg explain --verbose "rm -rf /tmp/build"
 dcg explain --format json "kubectl delete namespace production"
 ```
 
-JSON output is versioned via `schema_version` (currently 2). v2 adds
+JSON output is versioned via `schema_version` (currently 3). v2 adds
 `matched_span`, `matched_text_preview`, and `explanation` in the `match`
-object when a pattern is detected.
-
-The top-level `mode` field was added without a version bump: like
-`normalized_command`, `allowlist`, `pack_summary` and `suggestions` it is
-omitted when it has no value, so every object a v2 reader could already
-receive is unchanged. Detect it by presence.
+object when a pattern is detected. v3 adds top-level `mode`.
 
 `decision` is the evaluator's **raw match**; `mode` is the verdict the **hook**
 applies to it (`"deny"`, `"warn"` or `"log"`), resolved through `[policy]` and

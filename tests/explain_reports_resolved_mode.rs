@@ -156,9 +156,10 @@ fn an_allowed_command_reports_no_mode() {
         body.get("mode").is_none(),
         "an allow resolves no mode, and the key is absent rather than null: {body}"
     );
-    // `mode` is additive: it costs the schema no version bump, because a v2
-    // reader receives exactly the object it received before.
-    assert_eq!(body["schema_version"], 2, "{body}");
+    // v3 announces `mode`. The field is additive -- a v2 reader receives the
+    // same object it did before -- but the version is what lets a consumer
+    // tell an old binary's silence from this one's "nothing to resolve".
+    assert_eq!(body["schema_version"], 3, "{body}");
 }
 
 // ===========================================================================

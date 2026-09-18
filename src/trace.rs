@@ -51,17 +51,17 @@ use std::time::Instant;
 /// Current JSON schema version for `dcg explain --format json`.
 ///
 /// v2 adds `matched_span`, `matched_text_preview`, and `explanation` in `match`.
+/// v3 adds top-level `mode`, the verdict the hook applies to the match
+/// `decision` names (.agent-config-33e9r).
 ///
-/// Deliberately NOT bumped for the top-level `mode` field
-/// (.agent-config-33e9r). `mode` is optional and omitted whenever there is no
-/// rule to resolve, exactly like `normalized_command`, `allowlist`,
-/// `pack_summary` and `suggestions`, so every v2 object this crate could
-/// already emit is still emitted byte-for-byte. Detect `mode` by presence.
-/// The cost of not bumping is real but currently unpaid: a consumer cannot
-/// distinguish "absent because nothing to resolve" from "absent because this
-/// binary predates the field", and no in-repo consumer reads explain's
-/// `decision` at all (`scripts/perf_baseline.py` reads only `trace`).
-pub const EXPLAIN_JSON_SCHEMA_VERSION: u32 = 2;
+/// `mode` is additive -- omitted when there is no rule to resolve, like
+/// `normalized_command`, `allowlist` and `pack_summary` -- so the bump is an
+/// announcement, not a break. It is worth making because the alternative is
+/// an ambiguity in the dangerous direction: without a version, a consumer
+/// cannot tell "`mode` absent because nothing to resolve" from "`mode` absent
+/// because this binary predates the field", and the second means `decision`
+/// is the raw match with no warning attached.
+pub const EXPLAIN_JSON_SCHEMA_VERSION: u32 = 3;
 
 /// A complete trace of a command evaluation.
 ///
@@ -2227,7 +2227,7 @@ mod tests {
         };
 
         let json = trace.format_json();
-        assert!(json.contains("\"schema_version\": 2"));
+        assert!(json.contains("\"schema_version\": 3"));
         assert!(json.contains("\"decision\": \"allow\""));
         assert!(json.contains("\"command\": \"git status\""));
         assert!(json.contains("\"total_duration_us\": 94"));
@@ -2478,7 +2478,7 @@ mod tests {
 
     #[test]
     fn json_schema_version_is_stable() {
-        assert_eq!(EXPLAIN_JSON_SCHEMA_VERSION, 2);
+        assert_eq!(EXPLAIN_JSON_SCHEMA_VERSION, 3);
     }
 
     #[test]
@@ -2499,7 +2499,7 @@ mod tests {
 
         let output = trace.to_json_output();
 
-        assert_eq!(output.schema_version, 2);
+        assert_eq!(output.schema_version, 3);
         assert_eq!(output.command, "git status");
         assert_eq!(output.decision, "allow");
         assert_eq!(output.total_duration_us, 100);
@@ -2853,6 +2853,6 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         let version = parsed["schema_version"].as_u64();
-        assert_eq!(version, Some(2), "Schema version should be 2");
+        assert_eq!(version, Some(3), "Schema version should be 3");
     }
 }

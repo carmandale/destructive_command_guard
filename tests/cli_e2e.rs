@@ -186,7 +186,7 @@ mod explain_tests {
         let json: serde_json::Value =
             serde_json::from_str(&stdout).expect("explain --format json should produce valid JSON");
 
-        assert_eq!(json["schema_version"], 2, "should have schema_version");
+        assert_eq!(json["schema_version"], 3, "should have schema_version");
         assert!(json["command"].is_string(), "should have command field");
         assert!(json["decision"].is_string(), "should have decision field");
         assert!(
