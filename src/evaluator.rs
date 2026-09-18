@@ -1820,16 +1820,39 @@ fn evaluate_at_path_impl(
         deadline,
         project_path,
     );
-    // A heredoc allowlist hit explains why an otherwise-clean command is allowed. It must
-    // never convert a pack result that does not allow into an allow: the pack blocked a
-    // DIFFERENT rule, which the user never allowlisted, so one allowlisted heredoc rule
-    // would let every destructive command sharing the line through (.agent-config-4lazh).
-    // `skipped_due_to_budget` is excluded for the same reason: the hook turns a budget
-    // skip into a denial, and relabelling it as an allowlist allow would discard that.
-    // The held heredoc match stands unless the pack scan produced a denial
-    // the POLICY denies -- that rule decides, which is the whole point of not
-    // returning the warned heredoc match up front. A budget skip is left
-    // alone: the hook turns it into a denial, stricter than this warn.
+    answer_after_pack_scan(
+        result,
+        heredoc_pending,
+        heredoc_allowlist_hit,
+        policy,
+        confidence,
+        command,
+    )
+}
+
+/// The answer once the pack scan has run: its result, combined with what the
+/// heredoc stage left behind. Both callers of the pack scan end here, so the
+/// combination is written, and tested, once.
+///
+/// The held heredoc match stands unless the pack scan produced a denial
+/// the POLICY denies -- that rule decides, which is the whole point of not
+/// returning the warned heredoc match up front. A budget skip is left
+/// alone: the hook turns it into a denial, stricter than this warn.
+///
+/// A heredoc allowlist hit explains why an otherwise-clean command is allowed. It must
+/// never convert a pack result that does not allow into an allow: the pack blocked a
+/// DIFFERENT rule, which the user never allowlisted, so one allowlisted heredoc rule
+/// would let every destructive command sharing the line through (.agent-config-4lazh).
+/// `skipped_due_to_budget` is excluded for the same reason: the hook turns a budget
+/// skip into a denial, and relabelling it as an allowlist allow would discard that.
+fn answer_after_pack_scan(
+    result: EvaluationResult,
+    heredoc_pending: Option<EvaluationResult>,
+    heredoc_allowlist_hit: Option<(PatternMatch, AllowlistLayer, String)>,
+    policy: &PolicyConfig,
+    confidence: &crate::config::ConfidenceConfig,
+    command: &str,
+) -> EvaluationResult {
     if let Some(pending) = heredoc_pending {
         let pack_decides = result.skipped_due_to_budget
             || (result.decision == EvaluationDecision::Deny
@@ -2570,35 +2593,14 @@ where
         None,
         None, // project_path: legacy function, path-aware allowlisting unavailable
     );
-    // A heredoc allowlist hit explains why an otherwise-clean command is allowed. It must
-    // never convert a pack result that does not allow into an allow: the pack blocked a
-    // DIFFERENT rule, which the user never allowlisted, so one allowlisted heredoc rule
-    // would let every destructive command sharing the line through (.agent-config-4lazh).
-    // `skipped_due_to_budget` is excluded for the same reason: the hook turns a budget
-    // skip into a denial, and relabelling it as an allowlist allow would discard that.
-    // The held heredoc match stands unless the pack scan produced a denial
-    // the POLICY denies -- that rule decides, which is the whole point of not
-    // returning the warned heredoc match up front. A budget skip is left
-    // alone: the hook turns it into a denial, stricter than this warn.
-    if let Some(pending) = heredoc_pending {
-        let pack_decides = result.skipped_due_to_budget
-            || (result.decision == EvaluationDecision::Deny
-                && decision_blocks(config.policy(), &config.confidence, command, &result));
-        if !pack_decides {
-            return pending;
-        }
-    }
-
-    if result.allowlist_override.is_none()
-        && result.decision == EvaluationDecision::Allow
-        && !result.skipped_due_to_budget
-    {
-        if let Some((matched, layer, reason)) = heredoc_allowlist_hit {
-            return EvaluationResult::allowed_by_allowlist(matched, layer, reason);
-        }
-    }
-
-    result
+    answer_after_pack_scan(
+        result,
+        heredoc_pending,
+        heredoc_allowlist_hit,
+        config.policy(),
+        &config.confidence,
+        command,
+    )
 }
 /// Context for heredoc evaluation to avoid too many arguments.
 #[derive(Clone, Copy)]
@@ -4964,6 +4966,101 @@ mod tests {
             assert!(result.pattern_info.is_none());
             assert!(result.allowlist_override.is_none());
             assert!(result.effective_mode.is_none());
+        }
+
+        // The pack scan running out of budget AFTER the heredoc stage finished is reachable only
+        // by timing: the heredoc stage refuses to start with less than 20ms left, the pack scan
+        // gives up with less than 1ms. So these ask `answer_after_pack_scan` directly, with
+        // `allowed_due_to_budget()` -- the value every budget exit of the pack scan returns --
+        // standing where a real mid-pack budget skip would
+        // (.agent-config-dcg-postpack-budget-branch-unpinned-77ih2).
+
+        fn heredoc_rule_denial() -> EvaluationResult {
+            EvaluationResult::denied_by_pack_pattern(
+                "heredoc.python",
+                "shutil_rmtree",
+                "shutil.rmtree() recursively deletes directories",
+                None,
+                crate::packs::Severity::Critical,
+                &[],
+            )
+        }
+
+        fn answer_with(
+            result: EvaluationResult,
+            heredoc_pending: Option<EvaluationResult>,
+            heredoc_allowlist_hit: Option<(PatternMatch, AllowlistLayer, String)>,
+        ) -> EvaluationResult {
+            answer_after_pack_scan(
+                result,
+                heredoc_pending,
+                heredoc_allowlist_hit,
+                &PolicyConfig::default(),
+                &crate::config::ConfidenceConfig::default(),
+                "python3 -c \"import shutil; shutil.rmtree('/p')\" && git stash clear",
+            )
+        }
+
+        /// A budget skip outranks a heredoc match the policy only warns: the hook denies a
+        /// budget skip, and returning the held warning instead would let the command run.
+        #[test]
+        fn a_pack_budget_skip_is_not_replaced_by_a_held_heredoc_warning() {
+            // Control: a clean pack scan returns the held match, so it is live input.
+            let clean = answer_with(
+                EvaluationResult::allowed(),
+                Some(heredoc_rule_denial()),
+                None,
+            );
+            assert!(
+                clean.is_denied() && clean.pattern_info.is_some(),
+                "control: a clean pack scan must return the held heredoc match"
+            );
+
+            let result = answer_with(
+                EvaluationResult::allowed_due_to_budget(),
+                Some(heredoc_rule_denial()),
+                None,
+            );
+            assert!(
+                result.skipped_due_to_budget,
+                "a pack-scan budget skip must survive a held heredoc warning"
+            );
+            assert!(
+                result.pattern_info.is_none(),
+                "a budget skip must not be replaced by the held heredoc match"
+            );
+        }
+
+        /// A budget skip is not relabelled as an allow by a heredoc allowlist hit: the hook
+        /// denies a budget skip, and an allowlist explanation would turn it into an allow.
+        #[test]
+        fn a_pack_budget_skip_is_not_relabelled_by_a_heredoc_allowlist_hit() {
+            let hit = || {
+                Some((
+                    heredoc_rule_denial()
+                        .pattern_info
+                        .expect("a pack-pattern denial carries its match"),
+                    AllowlistLayer::Project,
+                    "allowlisted in this project".to_string(),
+                ))
+            };
+
+            // Control: the same hit does explain a clean pack scan, so it is live input.
+            let clean = answer_with(EvaluationResult::allowed(), None, hit());
+            assert!(
+                clean.allowlist_override.is_some(),
+                "control: a clean pack scan must be explained by the heredoc allowlist hit"
+            );
+
+            let result = answer_with(EvaluationResult::allowed_due_to_budget(), None, hit());
+            assert!(
+                result.skipped_due_to_budget,
+                "a pack-scan budget skip must survive a heredoc allowlist hit"
+            );
+            assert!(
+                result.allowlist_override.is_none(),
+                "a budget skip must not carry an allowlist explanation"
+            );
         }
     }
 
