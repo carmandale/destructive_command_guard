@@ -12,7 +12,7 @@ use crate::agent::{DetectionMethod, detect_agent_with_details};
 use crate::config::Config;
 use crate::evaluator::{
     DEFAULT_WINDOW_WIDTH, EvaluationDecision, MatchSource, evaluate_command_with_pack_order,
-    evaluate_command_with_pack_order_deadline_at_path,
+    evaluate_command_with_pack_order_deadline_at_path, resolve_decision_mode,
 };
 use crate::exit_codes::EXIT_DENIED;
 use crate::highlight::{HighlightSpan, format_highlighted_command, should_use_color};
@@ -534,12 +534,17 @@ pub struct HookCommand {
 pub struct BatchHookOutput {
     /// Index of the input line (0-based)
     pub index: usize,
-    /// Decision: "allow" or "deny"
+    /// Decision the hook would apply: "allow" or "deny" ("skip"/"error" for
+    /// lines that are not evaluated). A rule the policy or confidence only
+    /// warns on or logs is "allow", with `mode` naming it.
     pub decision: &'static str,
-    /// Rule ID if denied (e.g., "core.git:reset-hard")
+    /// The resolved mode of the matched rule: "deny", "warn" or "log".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<&'static str>,
+    /// Rule ID of the matched rule (e.g., "core.git:reset-hard")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rule_id: Option<String>,
-    /// Pack ID if denied
+    /// Pack ID of the matched rule
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pack_id: Option<String>,
     /// Error message if parsing failed
@@ -689,9 +694,13 @@ pub struct TestOutput {
     pub robot_mode: bool,
     /// The command that was tested
     pub command: String,
-    /// The decision: "allow" or "deny"
+    /// The decision the hook would apply: "allow" or "deny". A rule the policy
+    /// or confidence only warns on or logs is "allow", with `mode` naming it.
     pub decision: String,
-    /// Rule ID if blocked (e.g., "core.git:reset-hard")
+    /// The resolved mode of the matched rule: "deny", "warn" or "log".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// Rule ID of the matched rule (e.g., "core.git:reset-hard")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rule_id: Option<String>,
     /// Pack ID that matched (e.g., "core.git")
@@ -700,7 +709,7 @@ pub struct TestOutput {
     /// Pattern name within the pack
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pattern_name: Option<String>,
-    /// Reason for blocking
+    /// Why the matched rule exists
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// Explanation for the match (if available)
@@ -2043,8 +2052,7 @@ fn run_hook_command(config: &Config, cmd: &HookCommand) -> Result<(), Box<dyn st
                         &compiled_overrides,
                         &allowlists,
                         &heredoc_settings,
-                        config.policy(),
-                        &config.confidence,
+                        config,
                         cmd.continue_on_error,
                     )
                 })
@@ -2073,8 +2081,7 @@ fn run_hook_command(config: &Config, cmd: &HookCommand) -> Result<(), Box<dyn st
                     &compiled_overrides,
                     &allowlists,
                     &heredoc_settings,
-                    config.policy(),
-                    &config.confidence,
+                    config,
                     cmd.continue_on_error,
                 );
                 let json = serde_json::to_string(&result)?;
@@ -2091,6 +2098,7 @@ fn run_hook_command(config: &Config, cmd: &HookCommand) -> Result<(), Box<dyn st
                         let result = BatchHookOutput {
                             index,
                             decision: "error",
+                            mode: None,
                             rule_id: None,
                             pack_id: None,
                             error: Some(format!("IO error: {e}")),
@@ -2112,8 +2120,7 @@ fn run_hook_command(config: &Config, cmd: &HookCommand) -> Result<(), Box<dyn st
                 &compiled_overrides,
                 &allowlists,
                 &heredoc_settings,
-                config.policy(),
-                &config.confidence,
+                config,
                 cmd.continue_on_error,
             );
             let json = serde_json::to_string(&result)?;
@@ -2135,8 +2142,7 @@ fn evaluate_batch_line(
     compiled_overrides: &crate::config::CompiledOverrides,
     allowlists: &crate::allowlist::LayeredAllowlist,
     heredoc_settings: &crate::config::HeredocSettings,
-    policy: &crate::config::PolicyConfig,
-    confidence: &crate::config::ConfidenceConfig,
+    config: &Config,
     continue_on_error: bool,
 ) -> BatchHookOutput {
     // Skip empty lines
@@ -2144,6 +2150,7 @@ fn evaluate_batch_line(
         return BatchHookOutput {
             index,
             decision: "skip",
+            mode: None,
             rule_id: None,
             pack_id: None,
             error: Some("Empty line".to_string()),
@@ -2158,6 +2165,7 @@ fn evaluate_batch_line(
                 return BatchHookOutput {
                     index,
                     decision: "error",
+                    mode: None,
                     rule_id: None,
                     pack_id: None,
                     error: Some(format!("JSON parse error: {e}")),
@@ -2166,6 +2174,7 @@ fn evaluate_batch_line(
             return BatchHookOutput {
                 index,
                 decision: "error",
+                mode: None,
                 rule_id: None,
                 pack_id: None,
                 error: Some(format!("JSON parse error: {e}")),
@@ -2177,6 +2186,7 @@ fn evaluate_batch_line(
         return BatchHookOutput {
             index,
             decision: "skip",
+            mode: None,
             rule_id: None,
             pack_id: None,
             error: Some("Not a supported shell tool invocation or missing command".to_string()),
@@ -2192,8 +2202,8 @@ fn evaluate_batch_line(
         compiled_overrides,
         allowlists,
         heredoc_settings,
-        policy,
-        confidence,
+        config.policy(),
+        &config.confidence,
         None,
         None,
         None, // No deadline for batch mode
@@ -2203,6 +2213,7 @@ fn evaluate_batch_line(
         EvaluationDecision::Allow => BatchHookOutput {
             index,
             decision: "allow",
+            mode: None,
             rule_id: None,
             pack_id: None,
             error: None,
@@ -2222,9 +2233,17 @@ fn evaluate_batch_line(
                         (rule_id, info.pack_id.clone())
                     });
 
+            // The hook's verdict, from the resolver the hook calls: a rule the
+            // policy or confidence only warns on or logs is allowed, as the
+            // hook allows it. This answered "deny" for every match, so a
+            // Medium rule the hook only warns on came back denied
+            // (.agent-config-a56do).
+            let mode = resolve_decision_mode(config, &command, &eval_result);
+            let blocks = mode.is_some_and(|mode| mode.blocks());
             BatchHookOutput {
                 index,
-                decision: "deny",
+                decision: if blocks { "deny" } else { "allow" },
+                mode: mode.map(|mode| mode.label()),
                 rule_id,
                 pack_id,
                 error: None,
@@ -3438,6 +3457,14 @@ fn test_command(
 
     let elapsed = start.elapsed();
 
+    // The mode the hook applies, from the resolver the hook calls. Every output
+    // format and the exit code follow it: a rule the policy or confidence only
+    // warns on or logs is not blocked. The JSON/TOON decision and both exit
+    // codes used to follow the raw match alone (.agent-config-a56do).
+    let resolved_mode = resolve_decision_mode(&effective_config, command, &result);
+    let blocked = result.decision == EvaluationDecision::Deny
+        && resolved_mode.is_some_and(|mode| mode.blocks());
+
     // Handle structured output (JSON/TOON)
     if format.is_structured() {
         let output = match result.decision {
@@ -3456,6 +3483,7 @@ fn test_command(
                     robot_mode,
                     command: command.to_string(),
                     decision: "allow".to_string(),
+                    mode: None,
                     rule_id: None,
                     pack_id: None,
                     pattern_name: None,
@@ -3514,7 +3542,8 @@ fn test_command(
                     dcg_version: env!("CARGO_PKG_VERSION").to_string(),
                     robot_mode,
                     command: command.to_string(),
-                    decision: "deny".to_string(),
+                    decision: if blocked { "deny" } else { "allow" }.to_string(),
+                    mode: resolved_mode.map(|mode| mode.label().to_string()),
                     rule_id,
                     pack_id,
                     pattern_name,
@@ -3539,7 +3568,7 @@ fn test_command(
             }
             TestFormat::Pretty => unreachable!("handled above"),
         }
-        return result.decision == EvaluationDecision::Deny;
+        return blocked;
     }
 
     // Pretty output (default)
@@ -3580,9 +3609,6 @@ fn test_command(
         println!("Command: {command}");
     }
     println!();
-
-    let resolved_mode =
-        crate::evaluator::resolve_decision_mode(&effective_config, command, &result);
 
     match result.decision {
         EvaluationDecision::Allow => {
@@ -3883,7 +3909,7 @@ fn test_command(
     }
 
     // Return true if the command was blocked (for exit code handling)
-    result.decision == EvaluationDecision::Deny
+    blocked
 }
 
 /// Generate a sample configuration file
@@ -11357,8 +11383,7 @@ mod tests {
                     &ctx.compiled_overrides,
                     &ctx.allowlists,
                     &ctx.heredoc_settings,
-                    &crate::config::PolicyConfig::default(),
-                    &crate::config::ConfidenceConfig::default(),
+                    &Config::default(),
                     true,
                 )
             })
@@ -12924,6 +12949,7 @@ exclude = ["target/**"]
             robot_mode: false,
             command: "rm -rf /".to_string(),
             decision: "deny".to_string(),
+            mode: Some("deny".to_string()),
             rule_id: Some("core.filesystem:rm-rf-root".to_string()),
             pack_id: Some("core.filesystem".to_string()),
             pattern_name: Some("rm-rf-root".to_string()),

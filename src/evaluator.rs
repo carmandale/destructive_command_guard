@@ -719,11 +719,14 @@ pub struct EvaluationResult {
     pub pattern_info: Option<PatternMatch>,
     /// Allowlist override information (present when decision is Allow due to allowlist).
     pub allowlist_override: Option<AllowlistOverride>,
-    /// Effective decision mode (how to handle the decision).
+    /// A mode the evaluator stamps without consulting `[policy]` or confidence:
+    /// the rule's severity default for most pack matches, Deny for explicit
+    /// blocks, heredoc matches, allowlist results and several other shapes.
     /// Present when a pattern matched. None means the command is clean (no pattern matched).
-    /// - Deny: block command, output warning + JSON deny
-    /// - Warn: allow command, output warning only
-    /// - Log: allow command, log only (no visible output)
+    ///
+    /// This is NOT the mode the hook applies. Every verdict comes from [`resolve_decision_mode`]; surfaces
+    /// that read this field reported warn/deny the hook does not apply
+    /// (.agent-config-dcg-mcp-ignores-policy-b1loi, .agent-config-a56do).
     pub effective_mode: Option<crate::packs::DecisionMode>,
     /// Whether evaluation skipped deeper analysis due to a deadline overrun.
     pub skipped_due_to_budget: bool,
@@ -1177,27 +1180,13 @@ pub fn evaluate_detailed_with_allowlists(
 
     let evaluation_time_us = start.elapsed().as_micros() as u64;
 
-    // Apply confidence scoring if applicable
-    let confidence = if result.is_denied() {
-        let sanitized = sanitize_for_pattern_matching(command);
-        let sanitized_str = if matches!(sanitized, std::borrow::Cow::Owned(_)) {
-            Some(sanitized.as_ref())
-        } else {
-            None
-        };
-        let mode = result
-            .effective_mode
-            .unwrap_or(crate::packs::DecisionMode::Deny);
-        Some(apply_confidence_scoring(
-            command,
-            sanitized_str,
-            &result,
-            mode,
-            &config.confidence,
-        ))
-    } else {
-        None
-    };
+    // The hook's own answer, not `effective_mode` (severity alone)
+    // (.agent-config-a56do).
+    let confidence = result
+        .pattern_info
+        .as_ref()
+        .filter(|_| result.is_denied())
+        .map(|info| resolved_confidence(config, command, &result, info));
 
     DetailedEvaluationResult {
         result,
@@ -3258,8 +3247,9 @@ pub fn apply_confidence_scoring(
 /// The mode the hook applies to a matched rule: `[policy]` first, then confidence.
 ///
 /// This is the one place that answer is computed. The hook (main.rs), `dcg test`
-/// and the MCP `check_command` tool all call it, so none of them can report a
-/// mode the others would not apply. `EvaluationResult::effective_mode` is NOT
+/// (pretty, JSON and TOON output and its exit code), `dcg hook --batch`,
+/// `dcg simulate`, `dcg scan` and the MCP `check_command` tool all call it, so
+/// none of them can report a mode the others would not apply. `EvaluationResult::effective_mode` is NOT
 /// this answer: the evaluator stamps it from severity alone and never consults
 /// `[policy.rules]`, `[policy.packs]` or `default_mode`, so a surface that read
 /// it answered "allowed" for a Medium rule the policy denies
@@ -3275,29 +3265,46 @@ pub fn resolve_decision_mode(
     result: &EvaluationResult,
 ) -> Option<crate::packs::DecisionMode> {
     let info = result.pattern_info.as_ref()?;
+    Some(resolved_confidence(config, command, result, info).mode)
+}
 
-    let mut mode = match info.source {
-        MatchSource::Pack | MatchSource::HeredocAst => config.policy().resolve_mode(
+/// [`resolve_decision_mode`]'s answer with its confidence details: `[policy]`
+/// first, then confidence. `evaluate_detailed` reports exactly this, so it
+/// cannot show a mode the hook would not apply.
+fn resolved_confidence(
+    config: &Config,
+    command: &str,
+    result: &EvaluationResult,
+    info: &PatternMatch,
+) -> ConfidenceResult {
+    let explicit_block = matches!(
+        info.source,
+        MatchSource::ConfigOverride | MatchSource::LegacyPattern
+    );
+    let mode = if explicit_block {
+        crate::packs::DecisionMode::Deny
+    } else {
+        config.policy().resolve_mode(
             info.pack_id.as_deref(),
             info.pattern_name.as_deref(),
             info.severity,
-        ),
-        // Never downgrade explicit blocks.
-        MatchSource::ConfigOverride | MatchSource::LegacyPattern => {
-            crate::packs::DecisionMode::Deny
-        }
+        )
     };
 
-    // Confidence scoring (if enabled) may downgrade Deny to Warn, and only for
-    // pack/heredoc matches, never config overrides. Asked through
-    // [`confidence_result_for`], the helper the evaluator's early-return
-    // question uses, so the two are one computation
-    // (.agent-config-dcg-confidence-downgrades-early-return-tk1gu).
-    if matches!(info.source, MatchSource::Pack | MatchSource::HeredocAst) {
-        mode = confidence_result_for(command, result, mode, &config.confidence).mode;
+    // Confidence scoring (if enabled) may downgrade Deny to Warn, and never an
+    // explicit block. Asked through [`confidence_result_for`], the helper the
+    // evaluator's early-return question uses, so the two are one computation
+    // (.agent-config-dcg-confidence-downgrades-early-return-tk1gu). Skipped
+    // outright when disabled -- the answer is then the policy's mode, and the
+    // command need not be sanitized and normalized to learn that.
+    if explicit_block || !config.confidence.enabled {
+        return ConfidenceResult {
+            mode,
+            score: None,
+            downgraded: false,
+        };
     }
-
-    Some(mode)
+    confidence_result_for(command, result, mode, &config.confidence)
 }
 
 /// Apply git branch-aware strictness to an evaluation result.

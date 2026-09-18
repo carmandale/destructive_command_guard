@@ -29,7 +29,8 @@
 
 use crate::config::{Config, HeredocSettings};
 use crate::evaluator::{
-    EvaluationDecision, MatchSource, PatternMatch, evaluate_command_with_pack_order_at_path,
+    EvaluationDecision, PatternMatch, evaluate_command_with_pack_order_at_path,
+    resolve_decision_mode,
 };
 use crate::packs::{DecisionMode, EnabledPacks, Severity};
 use crate::suggestions::{SuggestionKind, get_suggestion_by_kind};
@@ -384,6 +385,11 @@ pub fn evaluate_extracted_command(
         return None;
     }
 
+    // The mode the hook applies (policy, then confidence), from the resolver the
+    // hook calls. A local copy of its policy half never applied confidence and
+    // gave a pack match with no pattern name no mode at all (.agent-config-a56do).
+    let decision_mode = resolve_decision_mode(config, &extracted.command, &result);
+
     let Some(pattern) = result.pattern_info else {
         return Some(ScanFinding {
             file: extracted.file.clone(),
@@ -399,7 +405,7 @@ pub fn evaluate_extracted_command(
         });
     };
 
-    let (rule_id, severity, decision_mode) = resolve_severity_and_rule_id(config, &pattern);
+    let (rule_id, severity) = rule_id_and_severity(&pattern);
 
     let scan_decision = match decision_mode {
         Some(DecisionMode::Deny) | None => ScanDecision::Deny,
@@ -434,33 +440,13 @@ pub fn evaluate_extracted_command(
     })
 }
 
-fn resolve_severity_and_rule_id(
-    config: &Config,
-    pattern: &PatternMatch,
-) -> (Option<String>, Option<Severity>, Option<DecisionMode>) {
-    let Some(pack_id) = pattern.pack_id.as_deref() else {
-        return (None, None, None);
+fn rule_id_and_severity(pattern: &PatternMatch) -> (Option<String>, Option<Severity>) {
+    let (Some(pack_id), Some(pattern_name)) =
+        (pattern.pack_id.as_deref(), pattern.pattern_name.as_deref())
+    else {
+        return (None, None);
     };
-
-    let Some(pattern_name) = pattern.pattern_name.as_deref() else {
-        return (None, None, None);
-    };
-
-    let rule_id = Some(format!("{pack_id}:{pattern_name}"));
-
-    let severity = pattern.severity;
-
-    // Never downgrade explicit blocks; packs/AST matches are policy-controlled.
-    let mode = match pattern.source {
-        MatchSource::Pack | MatchSource::HeredocAst => {
-            config
-                .policy()
-                .resolve_mode(Some(pack_id), Some(pattern_name), severity)
-        }
-        MatchSource::ConfigOverride | MatchSource::LegacyPattern => DecisionMode::Deny,
-    };
-
-    (rule_id, severity, Some(mode))
+    (Some(format!("{pack_id}:{pattern_name}")), pattern.severity)
 }
 
 fn redact_and_truncate(command: &str, options: &ScanOptions) -> String {

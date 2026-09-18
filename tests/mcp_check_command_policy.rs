@@ -183,6 +183,10 @@ fn assert_answer(body: &Value, allowed: bool, mode: &str, rule: &str, severity: 
     assert_eq!(body["severity"], severity, "rule severity: {body}");
     assert_eq!(body["allowed"], allowed, "allowed: {body}");
     assert_eq!(body["mode"], mode, "mode: {body}");
+    // `decision` is the verdict, as in `dcg test` and `dcg hook --batch`
+    // (.agent-config-a56do): never "deny" beside allowed:true.
+    let verdict = if allowed { "allow" } else { "deny" };
+    assert_eq!(body["decision"], verdict, "decision: {body}");
 }
 
 #[test]

@@ -225,10 +225,10 @@ impl DcgMcpServer {
 
         let mut response = CheckCommandResponse {
             allowed,
-            decision: match result.decision {
-                EvaluationDecision::Allow => "allow".to_string(),
-                EvaluationDecision::Deny => "deny".to_string(),
-            },
+            // The verdict, as `decision` means in `dcg test` and `dcg hook
+            // --batch`: a rule the policy or confidence only warns on or logs is
+            // "allow", with `mode` naming it (.agent-config-a56do).
+            decision: if allowed { "allow" } else { "deny" }.to_string(),
             mode,
             skipped_due_to_budget: result.skipped_due_to_budget,
             reason: None,
