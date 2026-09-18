@@ -3675,9 +3675,9 @@ fn collect_commands_recursive<D: ast_grep_core::Doc>(
     // body is masked from the fallback sweep, not the sweep either
     // (`.agent-config-0awpo`). So the whole redirected statement is emitted as
     // well, and the evaluator judges it exactly as it judges the same text typed
-    // at the top level: an inert receiver stays inert, an interpreter's body
-    // meets that interpreter's rules, and an unterminated body -- which bash
-    // runs to the end of input, as this node does -- meets the fallback.
+    // at the top level: an inert receiver stays inert, and an interpreter's body
+    // meets that interpreter's rules, terminated or not
+    // (`statement_with_open_heredocs_terminated`).
     if kind == "redirected_statement"
         && node
             .children()
@@ -3686,7 +3686,7 @@ fn collect_commands_recursive<D: ast_grep_core::Doc>(
         let range = node.range();
         let line_number = content[..range.start].matches('\n').count() + 1;
         commands.push(ExtractedShellCommand {
-            text: node.text().to_string(),
+            text: statement_with_open_heredocs_terminated(&node),
             start: range.start,
             end: range.end,
             line_number,
@@ -3702,6 +3702,45 @@ fn collect_commands_recursive<D: ast_grep_core::Doc>(
     for child in node.children() {
         collect_commands_recursive(child, content, commands);
     }
+}
+
+/// A redirected statement's text as bash runs it.
+///
+/// bash reads an unterminated heredoc to the end of its input, as if its
+/// delimiter followed, and tree-sitter-bash parses it the same way but leaves
+/// `heredoc_end` empty. Handed back unterminated, the evaluator could only skip
+/// that body and sweep it with the raw fallback regex, which hard-denies prose
+/// -- a commit message that merely quotes `python3 <<'PY'` -- and cannot see
+/// that a `cat` body is data. Written out terminated, the body meets the rules
+/// its receiver would meet (`.agent-config-0awpo`, cold review).
+fn statement_with_open_heredocs_terminated<D: ast_grep_core::Doc>(
+    statement: &ast_grep_core::Node<'_, D>,
+) -> String {
+    let mut text = statement.text().to_string();
+    for redirect in statement
+        .children()
+        .filter(|child| child.kind() == "heredoc_redirect")
+    {
+        let terminated = redirect
+            .children()
+            .any(|child| child.kind() == "heredoc_end" && !child.text().is_empty());
+        if terminated {
+            continue;
+        }
+        let Some(start) = redirect
+            .children()
+            .find(|child| child.kind() == "heredoc_start")
+        else {
+            continue;
+        };
+        let start = start.text();
+        let delimiter = start.trim_matches(|c| c == '\'' || c == '"' || c == '\\');
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(delimiter);
+    }
+    text
 }
 
 // ============================================================================

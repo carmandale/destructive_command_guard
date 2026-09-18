@@ -23,13 +23,20 @@
 //! ```text
 //!   row                                        | main 639a354b | fixed
 //!   -------------------------------------------|---------------|------
-//!   unterminated_nested_os_remove (A)          | ALLOW         | DENY
-//!   unterminated_nested_rmtree (E)             | ALLOW         | DENY
+//!   unterminated_nested_os_remove (A)          | ALLOW         | DENY os_remove
+//!   unterminated_nested_rmtree (E)             | ALLOW         | DENY shutil_rmtree
 //!   terminated_nested_os_remove (D)            | ALLOW         | DENY
 //!   the same body at top level (C)             | DENY          | DENY
 //!   warned reset-hard beside $((1 << 4)) (F)   | WARN          | WARN
 //!   nested cat body quoting rm -rf (I)         | ALLOW         | ALLOW
+//!   commit prose quoting `python3 <<'PY'`      | ALLOW         | ALLOW
+//!   unterminated nested cat body               | ALLOW         | ALLOW
 //! ```
+//!
+//! The last two rows were DENY on 97303189, the first cut of this fix, which
+//! handed an unterminated nested statement back unterminated, so only the raw
+//! fallback read it. Found by its cold review; bash runs such a body to the end
+//! of input, so it is now written out terminated there.
 
 #![allow(clippy::doc_markdown, clippy::uninlined_format_args)]
 
@@ -158,21 +165,81 @@ const UNTERMINATED_RMTREE: &str =
 const TERMINATED_OS_REMOVE: &str =
     "bash <<'EOF'\necho hi\npython3 <<'PY'\nimport os; os.remove('/etc/hosts')\nPY\nEOF";
 
+/// The unterminated rows are judged by the python RULE, not by the regex sweep:
+/// bash runs the body to the end of input, so it is read as if terminated there.
+/// A sweep-only deny here would also hard-deny prose (the commit-message rows).
 #[test]
 fn an_unterminated_nested_python_heredoc_in_a_bash_body_is_denied() {
+    let (stdout, stderr, exit_code) = run_default(UNTERMINATED_OS_REMOVE);
+    assert!(
+        stdout.contains("os_remove"),
+        "judged by the python rule\nstdout: {stdout}\nstderr: {stderr}"
+    );
     assert_denied(
         UNTERMINATED_OS_REMOVE,
-        run_default(UNTERMINATED_OS_REMOVE),
+        (stdout, stderr, exit_code),
         "the nested body reaches python; something must read it",
     );
 }
 
 #[test]
 fn an_unterminated_nested_rmtree_in_a_bash_body_is_denied() {
+    let (stdout, stderr, exit_code) = run_default(UNTERMINATED_RMTREE);
+    assert!(
+        stdout.contains("shutil_rmtree"),
+        "judged by the python rule\nstdout: {stdout}\nstderr: {stderr}"
+    );
     assert_denied(
         UNTERMINATED_RMTREE,
-        run_default(UNTERMINATED_RMTREE),
+        (stdout, stderr, exit_code),
         "the nested body reaches python; something must read it",
+    );
+}
+
+/// Cold review of 97303189 (false-positive lens): prose that dcg guesses is
+/// bash, quoting an unterminated heredoc operator, was swept by the fallback
+/// and hard-denied. main 639a354b allows both rows.
+const COMMIT_PROSE_QUOTING_A_HEREDOC: &str = "git commit -F - <<'MSG'\n\
+     fix(dcg): judge nested heredoc bodies\n\
+     \n\
+     The guard skipped the python3 <<'PY' body nested in a bash body,\n\
+     for example one that calls os.remove on a scratch file.\n\
+     MSG";
+
+#[test]
+fn commit_prose_quoting_an_unterminated_heredoc_is_allowed() {
+    let (stdout, stderr, exit_code) = run_default(COMMIT_PROSE_QUOTING_A_HEREDOC);
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    assert_eq!(
+        decision(&stdout),
+        None,
+        "prose is not swept as unjudged code\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+#[test]
+fn a_warned_reset_hard_in_prose_quoting_a_heredoc_only_warns() {
+    let cmd = "git commit -F - <<'MSG'\n\
+         fix: judge ${nested} bodies\n\
+         A python3 <<'PY' body nested in bash was read by nothing.\n\
+         The test pins git reset --hard as a warning.\n\
+         MSG";
+    assert_only_warned(
+        cmd,
+        run_with_warned_rules(cmd),
+        "main warns here; an unjudged-content sweep must not turn it into a hard deny",
+    );
+}
+
+#[test]
+fn an_unterminated_nested_cat_body_is_allowed() {
+    let cmd = "bash <<'EOF'\ncat <<X\nnotes: os.remove is used by the cleanup step\nEOF";
+    let (stdout, stderr, exit_code) = run_default(cmd);
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    assert_eq!(
+        decision(&stdout),
+        None,
+        "an unterminated cat body is still data\nstdout: {stdout}\nstderr: {stderr}"
     );
 }
 
