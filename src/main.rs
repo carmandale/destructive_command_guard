@@ -35,10 +35,9 @@ use destructive_command_guard::hook;
 use destructive_command_guard::load_default_allowlists;
 #[cfg(test)]
 use destructive_command_guard::normalize::normalize_command;
-use destructive_command_guard::packs::load_external_packs;
+use destructive_command_guard::packs::{DecisionMode, EnabledPacks};
 #[cfg(test)]
-use destructive_command_guard::packs::pack_aware_quick_reject;
-use destructive_command_guard::packs::{DecisionMode, REGISTRY};
+use destructive_command_guard::packs::{REGISTRY, pack_aware_quick_reject};
 use destructive_command_guard::pending_exceptions::{PendingExceptionStore, log_maintenance};
 use destructive_command_guard::perf::{Deadline, HOOK_EVALUATION_BUDGET};
 // Import HookInput for parsing stdin JSON in hook mode
@@ -46,7 +45,6 @@ use destructive_command_guard::perf::{Deadline, HOOK_EVALUATION_BUDGET};
 use destructive_command_guard::hook::HookInput;
 #[cfg(test)]
 use std::borrow::Cow;
-use std::collections::HashSet;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -416,15 +414,18 @@ fn main() {
     // Compute effective heredoc settings once (avoid per-command parsing/allocations).
     let heredoc_settings = config.heredoc_settings();
 
-    // Get enabled pack IDs early for pack-aware quick reject.
-    // This is done before stdin read to minimize latency on the critical path.
-    let mut enabled_packs: HashSet<String> = config.enabled_pack_ids();
-    let mut enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
-
-    // Load external packs from custom_paths (glob + tilde expansion).
-    // External packs are loaded once and cached for the process lifetime.
-    let external_paths = config.packs.expand_custom_paths();
-    let external_store = load_external_packs(&external_paths);
+    // Build the enabled pack set early for pack-aware quick reject, before the
+    // stdin read to minimize latency on the critical path. External packs from
+    // custom_paths are loaded, enabled, and cached for the process lifetime.
+    let EnabledPacks {
+        keywords: enabled_keywords,
+        ordered: ordered_packs,
+        keyword_index,
+        external: external_store,
+    } = EnabledPacks::load(
+        config.enabled_pack_ids(),
+        &config.packs.expand_custom_paths(),
+    );
 
     // Log warnings from external pack loading (fail-open: don't block on warnings).
     if config.general.verbose {
@@ -432,33 +433,6 @@ fn main() {
             eprintln!("[dcg] Warning: {warning}");
         }
     }
-
-    // Auto-enable external packs: packs loaded via custom_paths are implicitly enabled.
-    // This avoids requiring users to both add a path AND explicitly enable the pack ID.
-    for id in external_store.pack_ids() {
-        enabled_packs.insert(id.clone());
-    }
-
-    // Merge external pack keywords into enabled keywords for quick rejection.
-    // This ensures commands with external pack keywords are not prematurely rejected.
-    enabled_keywords.extend(external_store.keywords().iter().copied());
-
-    // Build ordered pack list and keyword index AFTER external packs are loaded,
-    // so external pack IDs are included in the evaluation iteration list.
-    let mut ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
-    // Append external pack IDs (not in the registry, so expand_enabled_ordered won't include them).
-    for id in external_store.pack_ids() {
-        if !ordered_packs.contains(id) {
-            ordered_packs.push(id.clone());
-        }
-    }
-    // Keyword index only covers built-in packs; disable when external packs are present
-    // to ensure the non-indexed path (which handles both built-in and external) is used.
-    let keyword_index = if external_store.pack_ids().next().is_some() {
-        None
-    } else {
-        REGISTRY.build_enabled_keyword_index(&ordered_packs)
-    };
 
     // Read and parse input
     let max_input_bytes = config.general.max_hook_input_bytes();
@@ -606,7 +580,8 @@ fn main() {
         Some(&deadline),
     );
 
-    // NOTE: External packs from custom_paths are now checked in evaluate_command()
+    // NOTE: External packs from custom_paths are checked by the evaluator
+    // through the `EnabledPacks::load` pack order
     // alongside built-in packs, so no separate fallback check is needed here.
 
     let eval_duration = eval_start.elapsed();

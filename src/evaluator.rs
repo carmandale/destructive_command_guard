@@ -719,11 +719,14 @@ pub struct EvaluationResult {
     pub pattern_info: Option<PatternMatch>,
     /// Allowlist override information (present when decision is Allow due to allowlist).
     pub allowlist_override: Option<AllowlistOverride>,
-    /// Effective decision mode (how to handle the decision).
+    /// A mode the evaluator stamps without consulting `[policy]` or confidence:
+    /// the rule's severity default for most pack matches, Deny for explicit
+    /// blocks, heredoc matches, allowlist results and several other shapes.
     /// Present when a pattern matched. None means the command is clean (no pattern matched).
-    /// - Deny: block command, output warning + JSON deny
-    /// - Warn: allow command, output warning only
-    /// - Log: allow command, log only (no visible output)
+    ///
+    /// This is NOT the mode the hook applies. Every verdict comes from [`resolve_decision_mode`]; surfaces
+    /// that read this field reported warn/deny the hook does not apply
+    /// (.agent-config-dcg-mcp-ignores-policy-b1loi, .agent-config-a56do).
     pub effective_mode: Option<crate::packs::DecisionMode>,
     /// Whether evaluation skipped deeper analysis due to a deadline overrun.
     pub skipped_due_to_budget: bool,
@@ -1112,6 +1115,8 @@ impl DetailedEvaluationResult {
 ///     }
 /// }
 /// ```
+///
+/// `[packs] custom_paths` packs are not evaluated; see [`evaluate_command`].
 #[must_use]
 pub fn evaluate_detailed(command: &str, config: &Config) -> DetailedEvaluationResult {
     let allowlists = LayeredAllowlist::default();
@@ -1142,7 +1147,10 @@ pub fn evaluate_detailed_with_allowlists(
 
     let start = Instant::now();
 
-    // Collect enabled keywords for quick-reject tracking
+    // Built-in packs only. This is a library call with no production caller,
+    // and custom_paths packs live in a process-global store the first load
+    // decides, so loading them here would pin every later call to this
+    // config's packs (.agent-config-zpo5q).
     let enabled_packs = config.enabled_pack_ids();
     let enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
     let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
@@ -1177,27 +1185,13 @@ pub fn evaluate_detailed_with_allowlists(
 
     let evaluation_time_us = start.elapsed().as_micros() as u64;
 
-    // Apply confidence scoring if applicable
-    let confidence = if result.is_denied() {
-        let sanitized = sanitize_for_pattern_matching(command);
-        let sanitized_str = if matches!(sanitized, std::borrow::Cow::Owned(_)) {
-            Some(sanitized.as_ref())
-        } else {
-            None
-        };
-        let mode = result
-            .effective_mode
-            .unwrap_or(crate::packs::DecisionMode::Deny);
-        Some(apply_confidence_scoring(
-            command,
-            sanitized_str,
-            &result,
-            mode,
-            &config.confidence,
-        ))
-    } else {
-        None
-    };
+    // The hook's own answer, not `effective_mode` (severity alone)
+    // (.agent-config-a56do).
+    let confidence = result
+        .pattern_info
+        .as_ref()
+        .filter(|_| result.is_denied())
+        .map(|info| resolved_confidence(config, command, &result, info));
 
     DetailedEvaluationResult {
         result,
@@ -1240,6 +1234,10 @@ pub fn evaluate_detailed_with_allowlists(
 /// - Quick rejection skips regex for 99%+ of commands
 /// - Config overrides use precompiled regexes (no per-command compilation)
 /// - Short-circuits on first match
+///
+/// `[packs] custom_paths` packs are not evaluated. To evaluate them, build the
+/// pack set with [`crate::packs::EnabledPacks::load`] and call
+/// [`evaluate_command_with_pack_order`].
 #[must_use]
 pub fn evaluate_command(
     command: &str,
@@ -1383,9 +1381,12 @@ pub fn evaluate_command_with_deadline(
 
 /// [`evaluate_command`], but the ambient allow-once store IS consulted.
 ///
-/// This is the interactive surface's spelling: a user who ran `dcg allow-once`
-/// expects the next matching command to pass. Named separately so that reaching
-/// disk is something a call site asks for rather than something it inherits.
+/// A user who ran `dcg allow-once` expects the next matching command to pass.
+/// Named separately so that reaching disk is something a call site asks for
+/// rather than something it inherits. Its pack set is `enabled_pack_ids()`
+/// alone, without `custom_paths` packs, which is why the MCP server calls
+/// [`evaluate_command_with_pack_order_deadline_at_path`] instead
+/// (.agent-config-1j0l5, .agent-config-zpo5q).
 #[must_use]
 pub fn evaluate_command_consulting_allow_once(
     command: &str,
@@ -1414,6 +1415,12 @@ fn evaluate_config_with_source(
     allowlists: &LayeredAllowlist,
     deadline: Option<&Deadline>,
 ) -> EvaluationResult {
+    // Built-in packs only: the caller supplies the quick-reject keywords, so
+    // custom_paths packs loaded here would be reached only when a command also
+    // carried one of the caller's keywords, which is a guard that fires by
+    // accident. No production surface calls this family; surfaces that answer
+    // for the user's config build `EnabledPacks::load` and call a pack-order
+    // entry (.agent-config-zpo5q).
     let enabled_packs: HashSet<String> = config.enabled_pack_ids();
     let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
     let keyword_index = REGISTRY.build_enabled_keyword_index(&ordered_packs);
@@ -1558,7 +1565,7 @@ pub fn evaluate_command_with_pack_order_deadline(
 
 /// Evaluate a command with deadline support and an optional project path.
 ///
-/// This is the hook and CLI entry point, so it consults the ambient allow-once
+/// This is the hook, CLI, and MCP entry point, so it consults the ambient allow-once
 /// store. Callers that want the verdict to be a function of their arguments alone
 /// want [`evaluate_command`].
 #[must_use]
@@ -2335,6 +2342,8 @@ fn evaluate_packs_with_allowlists(
 /// This function accepts any types that implement pattern matching:
 /// * `S` - Safe pattern type with `is_match` method returning `bool`
 /// * `D` - Destructive pattern type with `is_match` method returning `bool` and `reason` method
+///
+/// `[packs] custom_paths` packs are not evaluated; see [`evaluate_command`].
 #[allow(clippy::too_many_lines)]
 pub fn evaluate_command_with_legacy<S, D>(
     command: &str,
@@ -2378,6 +2387,9 @@ where
     }
 
     // Step 2.5: Pre-calculate ordered packs for heredoc recursion (and later use)
+    // Built-in packs only, like `evaluate_command`: with caller-supplied
+    // quick-reject keywords, custom packs would fire only by accident
+    // (.agent-config-zpo5q).
     let enabled_packs: HashSet<String> = config.enabled_pack_ids();
     let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
     let keyword_index = REGISTRY.build_enabled_keyword_index(&ordered_packs);
@@ -3255,8 +3267,9 @@ pub fn apply_confidence_scoring(
 /// The mode the hook applies to a matched rule: `[policy]` first, then confidence.
 ///
 /// This is the one place that answer is computed. The hook (main.rs), `dcg test`
-/// and the MCP `check_command` tool all call it, so none of them can report a
-/// mode the others would not apply. `EvaluationResult::effective_mode` is NOT
+/// (pretty, JSON and TOON output and its exit code), `dcg hook --batch`,
+/// `dcg simulate`, `dcg scan` and the MCP `check_command` tool all call it, so
+/// none of them can report a mode the others would not apply. `EvaluationResult::effective_mode` is NOT
 /// this answer: the evaluator stamps it from severity alone and never consults
 /// `[policy.rules]`, `[policy.packs]` or `default_mode`, so a surface that read
 /// it answered "allowed" for a Medium rule the policy denies
@@ -3272,29 +3285,46 @@ pub fn resolve_decision_mode(
     result: &EvaluationResult,
 ) -> Option<crate::packs::DecisionMode> {
     let info = result.pattern_info.as_ref()?;
+    Some(resolved_confidence(config, command, result, info).mode)
+}
 
-    let mut mode = match info.source {
-        MatchSource::Pack | MatchSource::HeredocAst => config.policy().resolve_mode(
+/// [`resolve_decision_mode`]'s answer with its confidence details: `[policy]`
+/// first, then confidence. `evaluate_detailed` reports exactly this, so it
+/// cannot show a mode the hook would not apply.
+fn resolved_confidence(
+    config: &Config,
+    command: &str,
+    result: &EvaluationResult,
+    info: &PatternMatch,
+) -> ConfidenceResult {
+    let explicit_block = matches!(
+        info.source,
+        MatchSource::ConfigOverride | MatchSource::LegacyPattern
+    );
+    let mode = if explicit_block {
+        crate::packs::DecisionMode::Deny
+    } else {
+        config.policy().resolve_mode(
             info.pack_id.as_deref(),
             info.pattern_name.as_deref(),
             info.severity,
-        ),
-        // Never downgrade explicit blocks.
-        MatchSource::ConfigOverride | MatchSource::LegacyPattern => {
-            crate::packs::DecisionMode::Deny
-        }
+        )
     };
 
-    // Confidence scoring (if enabled) may downgrade Deny to Warn, and only for
-    // pack/heredoc matches, never config overrides. Asked through
-    // [`confidence_result_for`], the helper the evaluator's early-return
-    // question uses, so the two are one computation
-    // (.agent-config-dcg-confidence-downgrades-early-return-tk1gu).
-    if matches!(info.source, MatchSource::Pack | MatchSource::HeredocAst) {
-        mode = confidence_result_for(command, result, mode, &config.confidence).mode;
+    // Confidence scoring (if enabled) may downgrade Deny to Warn, and never an
+    // explicit block. Asked through [`confidence_result_for`], the helper the
+    // evaluator's early-return question uses, so the two are one computation
+    // (.agent-config-dcg-confidence-downgrades-early-return-tk1gu). Skipped
+    // outright when disabled -- the answer is then the policy's mode, and the
+    // command need not be sanitized and normalized to learn that.
+    if explicit_block || !config.confidence.enabled {
+        return ConfidenceResult {
+            mode,
+            score: None,
+            downgraded: false,
+        };
     }
-
-    Some(mode)
+    confidence_result_for(command, result, mode, &config.confidence)
 }
 
 /// Apply git branch-aware strictness to an evaluation result.

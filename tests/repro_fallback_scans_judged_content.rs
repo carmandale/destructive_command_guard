@@ -76,7 +76,11 @@ fn fillers(k: usize) -> String {
     FILLER.repeat(k)
 }
 
-fn run_hook(mut cmd: std::process::Command, sandbox: &spawn::Sandbox, command: &str) -> (String, String, i32) {
+fn run_hook(
+    mut cmd: std::process::Command,
+    sandbox: &spawn::Sandbox,
+    command: &str,
+) -> (String, String, i32) {
     let input = payload::pre_tool_use(sandbox.root(), command).to_string();
     let mut child = cmd
         .stdin(Stdio::piped())
@@ -127,7 +131,11 @@ fn run_with_warned_rules(command: &str) -> (String, String, i32) {
 /// reason naming content that was read.
 const LEGACY_FALLBACK_REASON: &str = "Unjudged command content contains destructive pattern";
 
-fn assert_not_denied_as_unjudged(command: &str, (stdout, stderr, exit_code): (String, String, i32), why: &str) {
+fn assert_not_denied_as_unjudged(
+    command: &str,
+    (stdout, stderr, exit_code): (String, String, i32),
+    why: &str,
+) {
     assert_eq!(
         exit_code, 0,
         "hook mode exits 0 whatever the verdict ({why})\nstderr: {stderr}"
@@ -140,7 +148,11 @@ fn assert_not_denied_as_unjudged(command: &str, (stdout, stderr, exit_code): (St
     );
 }
 
-fn assert_denied_as_unjudged(command: &str, (stdout, stderr, exit_code): (String, String, i32), why: &str) {
+fn assert_denied_as_unjudged(
+    command: &str,
+    (stdout, stderr, exit_code): (String, String, i32),
+    why: &str,
+) {
     assert_eq!(
         exit_code, 0,
         "hook mode exits 0 whatever the verdict ({why})\nstderr: {stderr}"
@@ -232,7 +244,10 @@ fn a_warned_rmtree_in_a_judged_inline_script_keeps_its_rule() {
     // fillers the heredoc is the SKIPPED content and the sweep is right to read
     // it. That version of this row was red before AND after the fix, for the
     // correct reason, and it was testing the control, not the defect.
-    let rmtree = format!("python3 -c 'import shutil; {}(\"/srv/data\")'; ", "shutil.rmtree");
+    let rmtree = format!(
+        "python3 -c 'import shutil; {}(\"/srv/data\")'; ",
+        "shutil.rmtree"
+    );
     let cmd = format!("{rmtree}{}", fillers(10));
     assert_not_denied_as_unjudged(
         &cmd,

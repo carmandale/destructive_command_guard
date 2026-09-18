@@ -469,9 +469,11 @@ fn parse_plain_command(line: &str, max_command_bytes: Option<usize>) -> ParsedLi
 // and aggregates results into actionable summaries.
 
 use crate::config::Config;
-use crate::evaluator::{EvaluationDecision, EvaluationResult, evaluate_command_with_pack_order};
-use crate::packs::REGISTRY;
-use std::collections::{HashMap, HashSet};
+use crate::evaluator::{
+    EvaluationDecision, EvaluationResult, evaluate_command_with_pack_order, resolve_decision_mode,
+};
+use crate::packs::EnabledPacks;
+use std::collections::HashMap;
 
 /// Default number of exemplars to keep per rule.
 pub const DEFAULT_EXEMPLAR_LIMIT: usize = 3;
@@ -489,20 +491,22 @@ pub enum SimulateDecision {
 }
 
 impl SimulateDecision {
-    /// Convert from evaluation result to simulation decision.
-    #[inline]
+    /// The decision the hook would apply to this evaluation result.
+    ///
+    /// Resolved through [`resolve_decision_mode`], the one resolver the hook
+    /// calls, so `[policy]` and confidence decide warn vs deny. It used to read
+    /// `effective_mode`, which the evaluator stamps from severity alone, so a
+    /// Medium rule the policy denies counted as Warn (.agent-config-a56do). A
+    /// Deny with no rule to resolve counts as Allow, as the hook lets it through.
     #[must_use]
-    pub const fn from_evaluation(result: &EvaluationResult) -> Self {
+    pub fn from_evaluation(config: &Config, command: &str, result: &EvaluationResult) -> Self {
         match result.decision {
             EvaluationDecision::Allow => Self::Allow,
-            EvaluationDecision::Deny => {
-                // Check effective_mode for warn vs deny distinction
-                match result.effective_mode {
-                    Some(crate::packs::DecisionMode::Warn) => Self::Warn,
-                    Some(crate::packs::DecisionMode::Log) => Self::Allow,
-                    _ => Self::Deny,
-                }
-            }
+            EvaluationDecision::Deny => match resolve_decision_mode(config, command, result) {
+                Some(crate::packs::DecisionMode::Deny) => Self::Deny,
+                Some(crate::packs::DecisionMode::Warn) => Self::Warn,
+                Some(crate::packs::DecisionMode::Log) | None => Self::Allow,
+            },
         }
     }
 }
@@ -680,10 +684,16 @@ impl SimulationAggregator {
         }
     }
 
-    /// Record an evaluation result.
-    pub fn record(&mut self, command: &str, line_number: usize, result: &EvaluationResult) {
+    /// Record an evaluation result, decided as the hook would under `config`.
+    pub fn record(
+        &mut self,
+        config: &Config,
+        command: &str,
+        line_number: usize,
+        result: &EvaluationResult,
+    ) {
         self.summary.total_commands += 1;
-        let decision = SimulateDecision::from_evaluation(result);
+        let decision = SimulateDecision::from_evaluation(config, command, result);
 
         match decision {
             SimulateDecision::Allow => self.summary.allow_count += 1,
@@ -813,10 +823,16 @@ pub fn run_simulation<I>(
 where
     I: IntoIterator<Item = ParsedCommand>,
 {
-    let enabled_packs: HashSet<String> = config.enabled_pack_ids();
-    let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
-    let keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
-    let keyword_index = REGISTRY.build_enabled_keyword_index(&ordered_packs);
+    // The hook's pack set, custom_paths packs included (.agent-config-zpo5q).
+    let EnabledPacks {
+        keywords,
+        ordered: ordered_packs,
+        keyword_index,
+        ..
+    } = EnabledPacks::load(
+        config.enabled_pack_ids(),
+        &config.packs.expand_custom_paths(),
+    );
     let compiled_overrides = config.overrides.compile();
     let allowlists = crate::allowlist::load_default_allowlists();
     let heredoc_settings = config.heredoc_settings();
@@ -835,7 +851,7 @@ where
             config.policy(),
             &config.confidence,
         );
-        aggregator.record(&cmd.command, cmd.line_number, &result);
+        aggregator.record(config, &cmd.command, cmd.line_number, &result);
     }
 
     aggregator.finalize(parse_stats)
@@ -1419,9 +1435,15 @@ echo world
         let mut agg = SimulationAggregator::new(config);
 
         // Record some results
-        agg.record("ls", 1, &EvaluationResult::allowed());
-        agg.record("git status", 2, &EvaluationResult::allowed());
+        agg.record(&Config::default(), "ls", 1, &EvaluationResult::allowed());
         agg.record(
+            &Config::default(),
+            "git status",
+            2,
+            &EvaluationResult::allowed(),
+        );
+        agg.record(
+            &Config::default(),
             "rm -rf /",
             3,
             &EvaluationResult::denied_by_pack("core.filesystem", "destructive", None),
@@ -1447,6 +1469,7 @@ echo world
 
         // Add rules with same count in different order
         agg.record(
+            &Config::default(),
             "cmd1",
             1,
             &EvaluationResult::denied_by_pack_pattern(
@@ -1459,6 +1482,7 @@ echo world
             ),
         );
         agg.record(
+            &Config::default(),
             "cmd2",
             2,
             &EvaluationResult::denied_by_pack_pattern(
@@ -1471,6 +1495,7 @@ echo world
             ),
         );
         agg.record(
+            &Config::default(),
             "cmd3",
             3,
             &EvaluationResult::denied_by_pack_pattern(
@@ -1505,6 +1530,7 @@ echo world
         // Add 5 occurrences of the same rule
         for i in 1..=5 {
             agg.record(
+                &Config::default(),
                 &format!("cmd{i}"),
                 i,
                 &EvaluationResult::denied_by_pack_pattern(
@@ -1540,6 +1566,7 @@ echo world
 
         // Command is 20 chars, should be truncated to fit within 10 chars including "..."
         agg.record(
+            &Config::default(),
             "12345678901234567890",
             1,
             &EvaluationResult::denied_by_pack_pattern(

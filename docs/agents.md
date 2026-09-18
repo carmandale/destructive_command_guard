@@ -145,6 +145,13 @@ The `--format json` output includes agent information:
 }
 ```
 
+`decision` is the verdict the hook would apply, after `[policy]` and confidence
+scoring. A rule they only warn on or log reports `"decision": "allow"` with
+`"mode": "warn"` or `"log"` alongside the rule's fields, and exits 0; `mode` is
+present whenever a matched rule was resolved (not for an allowlisted match).
+`dcg hook --batch` rows and the MCP `check_command` tool use `decision` and
+`mode` the same way.
+
 ## Robot Mode
 
 Robot mode provides a unified, machine-friendly interface for AI agents. When
