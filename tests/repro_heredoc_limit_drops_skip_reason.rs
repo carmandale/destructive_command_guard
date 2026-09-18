@@ -244,7 +244,9 @@ fn extraction_reports_the_limit_it_hit() {
     };
 
     match destructive_command_guard::heredoc::extract_content(&cmd, &limits) {
-        ExtractionResult::Partial { extracted, skipped } => {
+        ExtractionResult::Partial {
+            extracted, skipped, ..
+        } => {
             assert_eq!(
                 extracted.len(),
                 limits.max_heredocs,

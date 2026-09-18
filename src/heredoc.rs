@@ -930,6 +930,20 @@ pub enum ExtractionResult {
     Partial {
         extracted: Vec<ExtractedContent>,
         skipped: Vec<SkipReason>,
+        /// The byte ranges of `command` that went UNREAD, when they can be
+        /// accounted for -- `None` when they cannot.
+        ///
+        /// The rudimentary fallback sweep in the evaluator exists for text no
+        /// reader read. It used to read the whole raw command, so a `git reset
+        /// --hard` sitting in the OUTER command -- which the pack scan judges
+        /// under `[policy.rules]` -- was hard-denied as "unjudged", past the
+        /// policy that warned on it (`.agent-config-8xx4u`). The extractor is
+        /// the only thing that knows what it did not read, so it says so here.
+        ///
+        /// `None` means "cannot account for it": the sweep then reads
+        /// everything, which is the fail-closed side of the uncertainty and is
+        /// what every caller did before this field existed.
+        unread: Option<Vec<std::ops::Range<usize>>>,
     },
     /// Extraction failed (timeout, malformed, etc.) - fail open with warning.
     Failed(String),
@@ -1185,6 +1199,7 @@ pub fn extract_content(command: &str, limits: &ExtractionLimits) -> ExtractionRe
             // which is how unread content reaches a shell unjudged
             // (`.agent-config-1227x`).
             ExtractionResult::Partial {
+                unread: unread_extents(command, &extracted, &skip_reasons),
                 extracted,
                 skipped: skip_reasons,
             }
@@ -1209,6 +1224,7 @@ pub fn extract_content(command: &str, limits: &ExtractionLimits) -> ExtractionRe
             // which is how unread content reaches a shell unjudged
             // (`.agent-config-1227x`).
             ExtractionResult::Partial {
+                unread: unread_extents(command, &extracted, &skip_reasons),
                 extracted,
                 skipped: skip_reasons,
             }
@@ -1262,6 +1278,7 @@ pub fn extract_content(command: &str, limits: &ExtractionLimits) -> ExtractionRe
                 "tier2_complete: partial extraction with skips"
             );
             ExtractionResult::Partial {
+                unread: unread_extents(command, &extracted, &skip_reasons),
                 extracted,
                 skipped: skip_reasons,
             }
@@ -1293,6 +1310,113 @@ fn record_heredoc_limit(limits: &ExtractionLimits, skip_reasons: &mut Vec<SkipRe
     skip_reasons.push(SkipReason::ExceededHeredocLimit {
         limit: limits.max_heredocs,
     });
+}
+
+/// The byte ranges of `command` that no extractor read, when they can be
+/// accounted for.
+///
+/// The evaluator's rudimentary fallback sweep is the reader of last resort for
+/// text nobody read. It used to read the whole raw command, so OUTER command
+/// text -- which the pack scan judges under `[policy.rules]` a few steps later
+/// -- was hard-denied as "unjudged", past the policy that warned on it
+/// (`.agent-config-8xx4u`). Only the extractor knows what it did not read.
+///
+/// Returns `None` when that cannot be said, and the sweep then reads
+/// everything, exactly as it did before this existed: the fail-closed side of
+/// the uncertainty.
+fn unread_extents(
+    command: &str,
+    extracted: &[ExtractedContent],
+    skipped: &[SkipReason],
+) -> Option<Vec<std::ops::Range<usize>>> {
+    // Two skip kinds leave content the locators can still point at: the count
+    // cap (the constructs past it were never touched, and are still there to
+    // find) and an unterminated delimiter (its operator is right there). Every
+    // other kind -- a timeout, a size or line limit hit mid-body, binary
+    // content, a malformed parse -- stops mid-stream at a position nothing
+    // records, so what went unread cannot be named and this does not pretend
+    // to name it.
+    if !skipped.iter().all(|r| {
+        matches!(
+            r,
+            SkipReason::ExceededHeredocLimit { .. } | SkipReason::UnterminatedHeredoc { .. }
+        )
+    }) {
+        return None;
+    }
+
+    // A construct the extractors already took, or one spelled INSIDE content
+    // they took, is not unread. The second half is what makes a phantom
+    // harmless: `1 << 20` inside a judged python script is a shift operator the
+    // context-free locator reads as a heredoc opener, and the text after it is
+    // the outer command, not a body (`.agent-config-8xx4u`).
+    let judged = |start: usize| {
+        extracted.iter().any(|c| {
+            (c.byte_range.start <= start && start < c.byte_range.end)
+                || c.content_range
+                    .as_ref()
+                    .is_some_and(|r| r.start <= start && start < r.end)
+        })
+    };
+
+    let mut spans: Vec<std::ops::Range<usize>> = Vec::new();
+
+    for pattern in [
+        &*INLINE_SCRIPT_SINGLE_QUOTE,
+        &*INLINE_SCRIPT_DOUBLE_QUOTE,
+        &*HERESTRING_SINGLE_QUOTE,
+        &*HERESTRING_DOUBLE_QUOTE,
+        &*HERESTRING_UNQUOTED,
+    ] {
+        for m in pattern.find_iter(command) {
+            if !judged(m.start()) {
+                spans.push(m.start()..m.end());
+            }
+        }
+    }
+
+    for cap in HEREDOC_EXTRACTOR.captures_iter(command) {
+        let Some(full) = cap.get(0) else { continue };
+        // `<<<` CONTAINS `<<`, so this regex matches at offset 1 of every
+        // here-string. The same guard `extract_heredocs` uses, for the same
+        // reason: that content was located above, as a here-string.
+        if full.start() > 0 && command.as_bytes()[full.start() - 1] == b'<' {
+            continue;
+        }
+        if judged(full.start()) {
+            continue;
+        }
+
+        let delimiter = cap
+            .get(2)
+            .or_else(|| cap.get(3))
+            .or_else(|| cap.get(4))
+            .map_or("", |m| m.as_str());
+        let heredoc_type = match cap.get(1).map(|m| m.as_str()) {
+            Some("-") => HeredocType::TabStripped,
+            Some("~") => HeredocType::IndentStripped,
+            _ => HeredocType::Standard,
+        };
+
+        // The body starts on the next line, as in `extract_heredocs`. An
+        // unterminated body runs to the end of the command, which is the
+        // fail-closed answer for a delimiter that never arrives.
+        let body_start = command[full.end()..]
+            .find('\n')
+            .map_or(command.len(), |rel| full.end().saturating_add(rel));
+        let end = find_heredoc_terminator(command, body_start, delimiter, heredoc_type)
+            .unwrap_or(command.len());
+
+        // From the START of the receiving command, not from the operator: the
+        // readers inside the sweep look backwards from `<<` for the command
+        // that receives the body, and a blanked receiver reads as an inert one.
+        let receiver_start = command[..full.start()]
+            .rfind(['\n', ';', '&', '|'])
+            .map_or(0, |i| i + 1);
+        spans.push(receiver_start..end.max(full.end()));
+    }
+
+    Some(spans)
 }
 
 /// Extract inline scripts from -c/-e flags.
@@ -4817,7 +4941,10 @@ mod tests {
             let result = extract_content(cmd, &limits);
             // Was `if let ... { }` with no else and "skip result is also
             // acceptable", which asserted nothing the moment the shape changed.
-            let ExtractionResult::Partial { extracted, skipped } = result else {
+            let ExtractionResult::Partial {
+                extracted, skipped, ..
+            } = result
+            else {
                 panic!("three heredocs against a cap of two must report Partial: {result:?}");
             };
             assert!(extracted.len() <= limits.max_heredocs);

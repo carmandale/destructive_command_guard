@@ -131,6 +131,12 @@ fn run_with_warned_rules(command: &str) -> (String, String, i32) {
 /// reason naming content that was read.
 const LEGACY_FALLBACK_REASON: &str = "Unjudged command content contains destructive pattern";
 
+/// The rule `.agent-config-8xx4u` is about, spelled once. It is also a
+/// `FALLBACK_PATTERNS` entry, which is the whole collision: the sweep and the
+/// `core.git` pack both recognise it, and only one of them answers to
+/// `[policy.rules]`.
+const RESET_HARD: &str = "git reset --hard";
+
 fn assert_not_denied_as_unjudged(
     command: &str,
     (stdout, stderr, exit_code): (String, String, i32),
@@ -198,7 +204,9 @@ fn the_live_instance_really_does_go_partial() {
         ..ExtractionLimits::default()
     };
     match destructive_command_guard::heredoc::extract_content(LIVE_INSTANCE, &limits) {
-        ExtractionResult::Partial { extracted, skipped } => {
+        ExtractionResult::Partial {
+            extracted, skipped, ..
+        } => {
             assert!(
                 extracted.iter().any(|c| c.content.contains("rm -rf")),
                 "the body holding the text IS one of the extracted, judged entries: {extracted:?}"
@@ -261,6 +269,43 @@ fn a_warned_rmtree_in_a_judged_inline_script_keeps_its_rule() {
 // reason the mask is collected inside the matching loop rather than from the
 // extraction result.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// `.agent-config-8xx4u`: the sweep read OUTER command text and hard-denied it
+// as unjudged, past the policy that warned on it. Both rows were RED before
+// that fix and are the reason `unread_extents` exists.
+// ---------------------------------------------------------------------------
+
+/// The bead's P2, measured on `main` 76d93747: a `1 << 20` anywhere in the
+/// line made extraction `Partial`, and the sweep then hard-denied the outer
+/// `RESET_HARD` -- which `"core.git:reset-hard" = "warn"` warns on, and which
+/// the pack scan is about to judge under exactly that rule. P3 (the same
+/// command with the python prefix removed) WARNs on both sides, which is what
+/// makes the DENY a defect rather than a policy.
+#[test]
+fn an_outer_warned_rule_is_not_denied_as_unjudged_behind_a_phantom_heredoc() {
+    let cmd = format!("python3 -c \"print(1 << 20)\" && {}", RESET_HARD);
+    assert_not_denied_as_unjudged(
+        &cmd,
+        run_with_warned_rules(&cmd),
+        "the `<< 20` is inside the JUDGED python script; the outer command is the \
+         pack scan's to judge",
+    );
+}
+
+/// The same claim behind a GENUINE skip, so the row above cannot be read as
+/// "phantom heredocs only". Ten fillers fill the cap, so the `bash` heredoc
+/// really did go unread -- and the outer command after its terminator still
+/// belongs to the pack scan.
+#[test]
+fn a_real_unread_body_does_not_make_the_outer_command_unjudged() {
+    let cmd = format!("{}bash <<'EOF'\necho hi\nEOF\n{}", fillers(10), RESET_HARD);
+    assert_not_denied_as_unjudged(
+        &cmd,
+        run_with_warned_rules(&cmd),
+        "what went unread is the `echo hi` body, not the command after it",
+    );
+}
 
 #[test]
 fn a_skipped_body_holding_rm_rf_still_denies() {

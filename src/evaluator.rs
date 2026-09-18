@@ -2570,9 +2570,9 @@ fn evaluate_heredoc(
         .unwrap_or(u64::MAX),
         ..context.heredoc_settings.limits
     };
-    let (contents, fallback_needed) =
+    let (contents, fallback_needed, unread) =
         match extract_content(command, &deadline_bounded_extraction_limits) {
-            ExtractionResult::Extracted(contents) => (contents, false),
+            ExtractionResult::Extracted(contents) => (contents, false, None),
             ExtractionResult::NoContent => return None,
             ExtractionResult::Skipped(reasons) => {
                 let is_timeout = reasons
@@ -2617,7 +2617,11 @@ fn evaluate_heredoc(
 
                 return None;
             }
-            ExtractionResult::Partial { extracted, skipped } => {
+            ExtractionResult::Partial {
+                extracted,
+                skipped,
+                unread,
+            } => {
                 // Check strict mode settings for skipped items
                 let is_timeout = skipped
                     .iter()
@@ -2650,7 +2654,7 @@ fn evaluate_heredoc(
                 // check over the whole raw command -- whatever the reason was.
                 let fallback_needed = !skipped.is_empty();
 
-                (extracted, fallback_needed)
+                (extracted, fallback_needed, unread)
             }
             ExtractionResult::Failed(err) => {
                 if !context.heredoc_settings.fallback_on_parse_error {
@@ -2951,13 +2955,56 @@ fn evaluate_heredoc(
     }
 
     if fallback_needed {
-        let unjudged = mask_judged_spans(command, &judged_spans);
+        // The sweep is the reader of last resort for text nobody read. OUTER
+        // command text is not that text: the pack scan judges it under
+        // `[policy.rules]` a few steps from here, so denying it here as
+        // "Unjudged command content" -- a `denied_by_legacy` carrying no
+        // ruleId, which `main.rs` applies PAST the policy -- is both a false
+        // claim and an over-block. A policy-WARNED `git reset --hard` was hard-denied
+        // whenever anything else in the same command made extraction Partial,
+        // down to a `1 << 20` (`.agent-config-8xx4u`).
+        //
+        // So when the extractor can account for what it left unread, the sweep
+        // reads that and nothing else: everything outside those extents is
+        // masked alongside the judged spans. When it cannot say (`None`),
+        // nothing extra is masked and the sweep reads the whole command, as it
+        // always did.
+        let mut masked = judged_spans.clone();
+        if let Some(unread) = unread.as_ref() {
+            masked.extend(complement_spans(command.len(), unread));
+        }
+        let unjudged = mask_judged_spans(command, &masked);
         if let Some(blocked) = check_fallback_patterns(unjudged.as_ref()) {
             return Some(blocked);
         }
     }
 
     None
+}
+
+/// The ranges of `0..len` that `spans` does not cover.
+///
+/// Masking the complement is how the fallback sweep is restricted to the
+/// extents the extractor says went unread: everything else is blanked by the
+/// same length-preserving masker, so one reader and one set of coordinates
+/// serve both halves.
+fn complement_spans(len: usize, spans: &[std::ops::Range<usize>]) -> Vec<std::ops::Range<usize>> {
+    let mut sorted: Vec<std::ops::Range<usize>> =
+        spans.iter().filter(|s| s.start < s.end).cloned().collect();
+    sorted.sort_by_key(|s| s.start);
+
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+    for span in sorted {
+        if span.start > cursor {
+            out.push(cursor..span.start);
+        }
+        cursor = cursor.max(span.end);
+    }
+    if cursor < len {
+        out.push(cursor..len);
+    }
+    out
 }
 
 /// Blank out `spans` in `command`, byte for byte.
