@@ -167,15 +167,23 @@ fn the_same_pair_in_the_other_order_also_denies() {
     );
 }
 
-/// The bead's own input: a heredoc rule `[policy.rules]` explicitly denies, in
-/// front of a Critical wipe, with confidence scoring on.
+/// The bead's own input, pinned as a REGRESSION PIN and nothing more.
 ///
-/// The deny must survive whether or not the heredoc rule is the match that is
-/// found — on `main` the Medium heredoc rule is skipped and `stash-clear`
-/// answers; once a branch lets that rule return early, it becomes downgradable
-/// and must be held rather than allowed to decide.
+/// Read what this does not prove before trusting it. It passes with the
+/// `decision_blocks` change reverted, so it is not a kill for that change. The
+/// chain, measured by the cold reviewer of `3e2736f2`: `heredoc.python.os_system`
+/// is `Severity::Medium` (`src/ast_matcher.rs`), the heredoc AST loop gates on
+/// `blocks_by_default()`, which is Critical-or-High, so the rule is skipped
+/// before `[policy.rules]` is ever consulted and the `"deny"` line above is
+/// inert. What answers here is the OUTER pack scan finding the Critical wipe.
+///
+/// It is kept because the input is the one the bead names and it must keep
+/// denying. The hole it exposes — a heredoc AST rule asking SEVERITY a question
+/// only the policy can answer, which is `.agent-config-5nyrn` one nesting level
+/// in — is tracked separately; see the follow-up bead in the tk1gu thread.
+/// Do not read a green here as evidence about confidence scoring.
 #[test]
-fn a_policy_denied_heredoc_rule_does_not_hide_the_wipe_behind_it() {
+fn the_beads_named_input_keeps_denying() {
     let config = format!("{CONFIDENCE_ON}\"heredoc.python:os_system\" = \"deny\"\n");
     let command = "python3 <<'EOF2' && git stash clear\nimport os\nos.system('ls')\nEOF2";
 
