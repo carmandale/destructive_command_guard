@@ -889,6 +889,11 @@ dcg test --explain "git reset --hard"
 - `0`: command would be allowed
 - `1`: command would be blocked
 
+"Blocked" means the verdict the hook applies — `[policy]`, then confidence
+scoring — not the raw pattern match. A Medium rule that matches but only warns
+exits `0`. `--explain` and `-vvv` honour the same contract; the standalone
+`dcg explain` subcommand always exits `0`, because it is a diagnostic.
+
 #### Flags and Options
 
 - `-c, --config <PATH>`: use a specific config file
@@ -955,6 +960,19 @@ JSON output is versioned via `schema_version` (currently 2). v2 adds
 `matched_span`, `matched_text_preview`, and `explanation` in the `match`
 object when a pattern is detected.
 
+The top-level `mode` field was added without a version bump: like
+`normalized_command`, `allowlist`, `pack_summary` and `suggestions` it is
+omitted when it has no value, so every object a v2 reader could already
+receive is unchanged. Detect it by presence.
+
+`decision` is the evaluator's **raw match**; `mode` is the verdict the **hook**
+applies to it (`"deny"`, `"warn"` or `"log"`), resolved through `[policy]` and
+then confidence scoring. They differ whenever your policy differs from the
+rule's severity, so `{"decision": "deny", "mode": "warn"}` describes a command
+that runs. `mode` is absent when there is no rule to resolve. The pretty trace
+carries the same answer on a `Hook verdict:` line beside `Decision:`, and the
+compact trace brackets it — `DENY[warn] core.git:stash-drop …`.
+
 **Example Output**:
 
 ```
@@ -978,7 +996,9 @@ Suggestion: Consider using 'git stash' first to save your changes.
 
 The explain mode shows:
 - **Normalized command**: How dcg sees the command after path normalization
-- **Decision**: Whether the command would be blocked or allowed
+- **Decision**: The raw match the evaluator made — `ALLOW` or `DENY`
+- **Hook verdict**: What the hook actually does with that match once `[policy]`
+  and confidence scoring are applied — `BLOCKED`, or `WARN`/`LOG (policy allows)`
 - **Matching rule**: Which pack and pattern triggered the decision
 - **Evaluation trace**: Step-by-step timing of each evaluation stage
 - **Suggestion**: Actionable guidance for safer alternatives

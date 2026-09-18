@@ -1826,7 +1826,14 @@ pub fn run_command(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     TestFormat::Pretty => ExplainFormat::Pretty,
                     TestFormat::Json | TestFormat::Toon => ExplainFormat::Json,
                 };
-                handle_explain(&effective_config, &command, explain_format, with_packs);
+                let was_blocked =
+                    handle_explain(&effective_config, &command, explain_format, with_packs);
+                // Same exit contract as `dcg test` without the flag: README
+                // documents 0 allowed / 1 blocked, and `--explain` is a flag of
+                // this subcommand, not a different one (.agent-config-33e9r).
+                if was_blocked {
+                    std::process::exit(EXIT_DENIED);
+                }
             } else {
                 let was_blocked = test_command(
                     &effective_config,
@@ -1933,7 +1940,12 @@ pub fn run_command(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             };
 
             if !verbosity.quiet {
-                handle_explain(&config, &command, effective_format, with_packs);
+                // Deliberately discarded: `dcg explain` is a diagnostic and
+                // exits 0 on every verdict. Three suites pin that contract for
+                // a Critical rule (tests/agent_exit_codes.rs,
+                // tests/robot_mode.rs, tests/tui_e2e.rs); the exit-1 contract
+                // belongs to `dcg test` (.agent-config-33e9r).
+                let _hook_blocks = handle_explain(&config, &command, effective_format, with_packs);
             }
         }
         Some(Command::Corpus(corpus)) => {
@@ -3354,8 +3366,10 @@ fn test_command(
     }
 
     if verbosity.is_trace() && format == TestFormat::Pretty {
-        handle_explain(config, command, ExplainFormat::Pretty, extra_packs);
-        return false; // Explain mode doesn't track blocked status
+        // `-vvv` is still `dcg test`, so it keeps `dcg test`'s exit contract:
+        // the trace answers whether the hook blocks, and the caller exits 1 on
+        // it. It used to return a flat `false` (.agent-config-33e9r).
+        return handle_explain(config, command, ExplainFormat::Pretty, extra_packs);
     }
 
     // Build effective config with extra packs if specified
@@ -3762,7 +3776,9 @@ fn test_command(
                             let action = loop {
                                 let choice = prompt_for_block_action();
                                 if choice == InteractiveDecision::ShowDetails {
-                                    handle_explain(
+                                    // Printed for the human at the prompt; this
+                                    // call decides no exit code.
+                                    let _hook_blocks = handle_explain(
                                         &effective_config,
                                         command,
                                         ExplainFormat::Pretty,
@@ -5027,13 +5043,20 @@ fn truncate_for_markdown(s: &str, max_len: usize) -> String {
 ///
 /// Shows a detailed decision trace for why a command would be allowed or denied.
 /// Currently wraps the evaluator result; full tracing integration is future work.
+///
+/// Returns whether the HOOK would block the command -- the trace's resolved
+/// mode, not its raw match. `dcg explain` ignores that (its exit code is 0 on
+/// any verdict, which `tests/agent_exit_codes.rs`, `tests/robot_mode.rs` and
+/// `tests/tui_e2e.rs` pin); `dcg test --explain` and `dcg test -vvv` exit with
+/// it, because README documents `dcg test` as 0 allowed / 1 blocked and
+/// `--explain` is one of its flags (.agent-config-33e9r).
 #[allow(clippy::needless_pass_by_value)] // Value consumed from CLI args
 fn handle_explain(
     config: &Config,
     command: &str,
     format: ExplainFormat,
     extra_packs: Option<Vec<String>>,
-) {
+) -> bool {
     use crate::trace::{MatchInfo, TraceCollector, TraceDetails};
 
     // Build effective config with extra packs if specified
@@ -5103,8 +5126,20 @@ fn handle_explain(
         });
     }
 
+    // The mode the hook applies to that match, from the one resolver the hook,
+    // `dcg test` and the MCP `check_command` tool all call. Asked exactly as
+    // mcp.rs asks it: only a Deny has a verdict to resolve. Without this the
+    // trace reported the evaluator's raw match as its decision, so
+    // `Decision: DENY` printed for a command the hook waves through
+    // (.agent-config-33e9r).
+    let resolved_mode = if result.decision == EvaluationDecision::Deny {
+        crate::evaluator::resolve_decision_mode(&effective_config, command, &result)
+    } else {
+        None
+    };
+
     // Finish and get trace
-    let trace = collector.finish(result.decision);
+    let trace = collector.finish(result.decision, resolved_mode);
 
     // Format and print based on selected format
     match format {
@@ -5122,6 +5157,11 @@ fn handle_explain(
             println!("{json}");
         }
     }
+
+    // A Deny with no mode to resolve is NOT a block: the hook fails open on
+    // that shape (main.rs, the `let (Some(info), Some(mode)) = ... else`
+    // arm), and mcp.rs answers `allowed` for it too.
+    resolved_mode.is_some_and(|m| m.blocks())
 }
 
 // =============================================================================

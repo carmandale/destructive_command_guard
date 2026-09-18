@@ -31,9 +31,11 @@
 //!
 //! let mut collector = TraceCollector::new("git reset --hard");
 //! // ... pass &mut collector to evaluator ...
-//! let trace = collector.finish(EvaluationDecision::Deny);
+//! let resolved = evaluator::resolve_decision_mode(&config, command, &result);
+//! let trace = collector.finish(EvaluationDecision::Deny, resolved);
 //!
 //! println!("Decision: {:?}", trace.decision);
+//! println!("Hook verdict: {:?}", trace.resolved_mode);
 //! println!("Total time: {}us", trace.total_duration_us);
 //! for step in &trace.steps {
 //!     println!("  {} ({}us)", step.name, step.duration_us);
@@ -42,13 +44,23 @@
 
 use crate::allowlist::AllowlistLayer;
 use crate::evaluator::{EvaluationDecision, MatchSource};
-use crate::packs::Severity;
+use crate::packs::{DecisionMode, Severity};
 use serde::Serialize;
 use std::time::Instant;
 
-/// Current JSON schema version for explain output.
-/// JSON schema version for `dcg explain --format json`.
+/// Current JSON schema version for `dcg explain --format json`.
+///
 /// v2 adds `matched_span`, `matched_text_preview`, and `explanation` in `match`.
+///
+/// Deliberately NOT bumped for the top-level `mode` field
+/// (.agent-config-33e9r). `mode` is optional and omitted whenever there is no
+/// rule to resolve, exactly like `normalized_command`, `allowlist`,
+/// `pack_summary` and `suggestions`, so every v2 object this crate could
+/// already emit is still emitted byte-for-byte. Detect `mode` by presence.
+/// The cost of not bumping is real but currently unpaid: a consumer cannot
+/// distinguish "absent because nothing to resolve" from "absent because this
+/// binary predates the field", and no in-repo consumer reads explain's
+/// `decision` at all (`scripts/perf_baseline.py` reads only `trace`).
 pub const EXPLAIN_JSON_SCHEMA_VERSION: u32 = 2;
 
 /// A complete trace of a command evaluation.
@@ -62,8 +74,23 @@ pub struct ExplainTrace {
     pub normalized_command: Option<String>,
     /// The sanitized command (after masking safe string arguments).
     pub sanitized_command: Option<String>,
-    /// The final decision (Allow or Deny).
+    /// The evaluator's raw match (Allow or Deny). NOT the hook's verdict --
+    /// see [`ExplainTrace::resolved_mode`].
     pub decision: EvaluationDecision,
+    /// The mode the hook applies to that match: `[policy]`, then confidence,
+    /// from `evaluator::resolve_decision_mode` -- the one resolver the hook,
+    /// `dcg test` and the MCP `check_command` tool all call.
+    ///
+    /// `None` when there is no rule to resolve: an Allow, or a Deny carrying no
+    /// `pattern_info`. The hook FAILS OPEN on that second shape -- main.rs
+    /// returns without blocking when the resolver answers `None` -- so `None`
+    /// here means "not blocked", never "blocked by default".
+    ///
+    /// Reading `decision` as the verdict is the defect this field exists to
+    /// close: under `[policy.rules] "core.git:checkout-discard" = "warn"`,
+    /// `dcg explain` printed `Decision: DENY` while the hook allowed the
+    /// command (.agent-config-33e9r).
+    pub resolved_mode: Option<DecisionMode>,
     /// Whether evaluation was skipped due to time budget exhaustion.
     pub skipped_due_to_budget: bool,
     /// Total evaluation duration in microseconds.
@@ -327,15 +354,27 @@ impl TraceCollector {
     }
 
     /// Finish collection and produce the final trace.
+    ///
+    /// `resolved_mode` is the hook's verdict for `decision`, from
+    /// `evaluator::resolve_decision_mode`, and `None` when there is no rule to
+    /// resolve. It is a parameter rather than a setter on purpose: a caller
+    /// cannot finish a trace without having asked the question, which is how
+    /// the explain surface came to report the raw match as its decision
+    /// (.agent-config-33e9r).
     #[allow(clippy::cast_possible_truncation)] // Microseconds fit in u64
     #[must_use]
-    pub fn finish(self, decision: EvaluationDecision) -> ExplainTrace {
+    pub fn finish(
+        self,
+        decision: EvaluationDecision,
+        resolved_mode: Option<DecisionMode>,
+    ) -> ExplainTrace {
         let total_duration_us = self.start_time.elapsed().as_micros() as u64;
         ExplainTrace {
             command: self.command,
             normalized_command: self.normalized_command,
             sanitized_command: self.sanitized_command,
             decision,
+            resolved_mode,
             skipped_due_to_budget: self.skipped_due_to_budget,
             total_duration_us,
             steps: self.steps,
@@ -378,7 +417,13 @@ impl ExplainTrace {
     /// Format examples:
     /// - `ALLOW (94us) git status`
     /// - `DENY core.git:reset-hard (847us) git reset --hard — destroys uncommitted changes`
+    /// - `DENY[warn] core.git:stash-drop (312us) git stash drop — deletes a single stash`
     /// - `DENY containers.docker:system-prune (1.2ms) docker system prune -af — removes all unused data`
+    ///
+    /// The bracket carries [`ExplainTrace::resolved_mode`] when the hook does
+    /// NOT apply the match — a `DENY` the policy or confidence scoring turned
+    /// into a warn or a log. A blocking verdict adds nothing, so the line a
+    /// consumer already parses is unchanged for it.
     ///
     /// The command is truncated to `max_command_len` characters (default 60) with UTF-8 safety.
     #[must_use]
@@ -387,6 +432,10 @@ impl ExplainTrace {
         let decision_str = match self.decision {
             EvaluationDecision::Allow => "ALLOW",
             EvaluationDecision::Deny => "DENY",
+        };
+        let decision_str = match self.resolved_mode {
+            Some(mode) if !mode.blocks() => format!("{decision_str}[{}]", mode.label()),
+            _ => decision_str.to_string(),
         };
 
         let duration_str = format_duration(self.total_duration_us);
@@ -448,6 +497,21 @@ impl ExplainTrace {
             EvaluationDecision::Deny => format!("{red}{bold}DENY{reset}"),
         };
         out.push_str(&format!("{bold}Decision:{reset} {decision_str}\n"));
+
+        // The verdict the hook applies to that match, beside the raw match
+        // rather than instead of it: this is a trace of the evaluator, and
+        // which of the two answers a reader wanted was exactly the ambiguity
+        // (.agent-config-33e9r). Absent when there is no rule to resolve, where
+        // the decision line above is the whole answer.
+        if let Some(mode) = self.resolved_mode {
+            let verdict = match mode {
+                DecisionMode::Deny => format!("{red}{bold}BLOCKED{reset}"),
+                DecisionMode::Warn => format!("{yellow}{bold}WARN{reset} (policy allows)"),
+                DecisionMode::Log => format!("{yellow}{bold}LOG{reset} (policy allows)"),
+            };
+            out.push_str(&format!("{bold}Hook verdict:{reset} {verdict}\n"));
+        }
+
         out.push_str(&format!(
             "{bold}Latency:{reset}  {}\n",
             format_duration(self.total_duration_us)
@@ -686,6 +750,7 @@ impl ExplainTrace {
                 EvaluationDecision::Allow => "allow".to_string(),
                 EvaluationDecision::Deny => "deny".to_string(),
             },
+            mode: self.resolved_mode.map(|m| m.label().to_string()),
             skipped_due_to_budget: self.skipped_due_to_budget.then_some(true),
             total_duration_us: self.total_duration_us,
             steps: self.steps.iter().map(TraceStep::to_json).collect(),
@@ -718,8 +783,15 @@ pub struct ExplainJsonOutput {
     /// Sanitized command (if different from original).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sanitized_command: Option<String>,
-    /// Decision: "allow" or "deny".
+    /// The evaluator's raw match: "allow" or "deny". NOT the hook's verdict --
+    /// read `mode` for that. Same meaning the MCP `check_command` tool gives
+    /// its own `decision` field.
     pub decision: String,
+    /// The mode the hook applies to the match: "deny", "warn" or "log".
+    /// Absent when there is no rule to resolve, where `decision` is the whole
+    /// answer. A "deny" `decision` with `mode` "warn" runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
     /// Whether evaluation was skipped due to time budget exhaustion.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skipped_due_to_budget: Option<bool>,
@@ -1266,9 +1338,12 @@ mod tests {
             explanation: None,
         });
 
-        let trace = collector.finish(EvaluationDecision::Deny);
+        let trace = collector.finish(EvaluationDecision::Deny, Some(DecisionMode::Warn));
 
         assert_eq!(trace.decision, EvaluationDecision::Deny);
+        // The verdict the caller resolved reaches the trace unchanged: a Deny
+        // the hook only warns on must not arrive as a block.
+        assert_eq!(trace.resolved_mode, Some(DecisionMode::Warn));
         assert_eq!(trace.command, "git reset --hard");
         assert!(trace.total_duration_us > 0);
         assert_eq!(trace.steps.len(), 1);
@@ -1291,7 +1366,7 @@ mod tests {
             },
         );
 
-        let trace = collector.finish(EvaluationDecision::Allow);
+        let trace = collector.finish(EvaluationDecision::Allow, None);
 
         assert_eq!(trace.decision, EvaluationDecision::Allow);
         assert!(trace.match_info.is_none());
@@ -1321,7 +1396,7 @@ mod tests {
             original_match,
         });
 
-        let trace = collector.finish(EvaluationDecision::Allow);
+        let trace = collector.finish(EvaluationDecision::Allow, None);
 
         assert_eq!(trace.decision, EvaluationDecision::Allow);
         assert!(trace.was_allowlisted());
@@ -1362,7 +1437,7 @@ mod tests {
             },
         );
 
-        let trace = collector.finish(EvaluationDecision::Allow);
+        let trace = collector.finish(EvaluationDecision::Allow, None);
 
         assert_eq!(trace.steps.len(), 3);
         assert_eq!(trace.steps[0].name, "step1");
@@ -1387,7 +1462,7 @@ mod tests {
             },
         );
 
-        let trace = collector.finish(EvaluationDecision::Allow);
+        let trace = collector.finish(EvaluationDecision::Allow, None);
 
         assert!(trace.find_step("keyword_gating").is_some());
         assert!(trace.find_step("nonexistent").is_none());
@@ -1522,6 +1597,7 @@ mod tests {
             match_info: None,
             allowlist_info: None,
             pack_summary: None,
+            resolved_mode: None,
         };
 
         let compact = trace.format_compact(None);
@@ -1552,6 +1628,7 @@ mod tests {
             }),
             allowlist_info: None,
             pack_summary: None,
+            resolved_mode: None,
         };
 
         let compact = trace.format_compact(None);
@@ -1576,6 +1653,7 @@ mod tests {
             match_info: None,
             allowlist_info: None,
             pack_summary: None,
+            resolved_mode: None,
         };
 
         let compact = trace.format_compact(Some(40));
@@ -1607,6 +1685,7 @@ mod tests {
             }),
             allowlist_info: None,
             pack_summary: None,
+            resolved_mode: None,
         };
 
         let compact = trace.format_compact(None);
@@ -1614,6 +1693,128 @@ mod tests {
             compact,
             "DENY containers.docker:system-prune (1.5ms) docker system prune -af — removes all unused data"
         );
+    }
+
+    // ========================================================================
+    // Resolved-mode tests (.agent-config-33e9r)
+    //
+    // Every case carries its control, because a formatter that ignored
+    // `resolved_mode` entirely would still pass the Deny row: Deny is what the
+    // raw decision already said. The Warn/Log rows are what can only come from
+    // the resolved mode.
+    // ========================================================================
+
+    /// A `git stash drop` denial -- Medium, the shape whose hook verdict the
+    /// policy and confidence scoring actually move -- under `mode`.
+    fn stash_drop_trace(mode: Option<DecisionMode>) -> ExplainTrace {
+        ExplainTrace {
+            command: "git stash drop".to_string(),
+            normalized_command: None,
+            sanitized_command: None,
+            decision: EvaluationDecision::Deny,
+            skipped_due_to_budget: false,
+            total_duration_us: 312,
+            steps: vec![],
+            match_info: Some(MatchInfo {
+                rule_id: Some("core.git:stash-drop".to_string()),
+                pack_id: Some("core.git".to_string()),
+                pattern_name: Some("stash-drop".to_string()),
+                severity: Some(Severity::Medium),
+                reason: "deletes a single stash".to_string(),
+                source: MatchSource::Pack,
+                match_start: None,
+                match_end: None,
+                matched_text_preview: None,
+                explanation: None,
+            }),
+            allowlist_info: None,
+            pack_summary: None,
+            resolved_mode: mode,
+        }
+    }
+
+    #[test]
+    fn compact_brackets_a_deny_the_hook_does_not_apply() {
+        assert_eq!(
+            stash_drop_trace(Some(DecisionMode::Warn)).format_compact(None),
+            "DENY[warn] core.git:stash-drop (312us) git stash drop — deletes a single stash"
+        );
+        assert_eq!(
+            stash_drop_trace(Some(DecisionMode::Log)).format_compact(None),
+            "DENY[log] core.git:stash-drop (312us) git stash drop — deletes a single stash"
+        );
+
+        // Controls: a blocking verdict, and no verdict at all, both leave the
+        // line consumers already parse untouched.
+        let blocking = "DENY core.git:stash-drop (312us) git stash drop — deletes a single stash";
+        assert_eq!(
+            stash_drop_trace(Some(DecisionMode::Deny)).format_compact(None),
+            blocking
+        );
+        assert_eq!(stash_drop_trace(None).format_compact(None), blocking);
+    }
+
+    #[test]
+    fn pretty_names_the_hook_verdict_beside_the_raw_decision() {
+        let warned = stash_drop_trace(Some(DecisionMode::Warn)).format_pretty(false);
+        assert!(
+            warned.contains("Decision: DENY"),
+            "the raw match stays on the page: {warned}"
+        );
+        assert!(
+            warned.contains("Hook verdict: WARN (policy allows)"),
+            "and the verdict sits beside it: {warned}"
+        );
+
+        let logged = stash_drop_trace(Some(DecisionMode::Log)).format_pretty(false);
+        assert!(
+            logged.contains("Hook verdict: LOG (policy allows)"),
+            "{logged}"
+        );
+
+        // Control: the same trace the hook does block says BLOCKED, not
+        // "policy allows".
+        let blocked = stash_drop_trace(Some(DecisionMode::Deny)).format_pretty(false);
+        assert!(blocked.contains("Hook verdict: BLOCKED"), "{blocked}");
+        assert!(!blocked.contains("policy allows"), "{blocked}");
+
+        // Control: no rule to resolve, no verdict line -- the decision line is
+        // then the whole answer, which is what the hook does too.
+        let unresolved = stash_drop_trace(None).format_pretty(false);
+        assert!(!unresolved.contains("Hook verdict:"), "{unresolved}");
+        assert!(unresolved.contains("Decision: DENY"), "{unresolved}");
+    }
+
+    #[test]
+    fn json_carries_the_mode_beside_the_decision() {
+        let warned = stash_drop_trace(Some(DecisionMode::Warn)).to_json_output();
+        assert_eq!(warned.decision, "deny", "the raw match is unchanged");
+        assert_eq!(warned.mode, Some("warn".to_string()));
+
+        assert_eq!(
+            stash_drop_trace(Some(DecisionMode::Log))
+                .to_json_output()
+                .mode,
+            Some("log".to_string())
+        );
+
+        // Control: the blocking verdict is reported too, not inferred from the
+        // field's absence.
+        let blocked = stash_drop_trace(Some(DecisionMode::Deny)).to_json_output();
+        assert_eq!(blocked.decision, "deny");
+        assert_eq!(blocked.mode, Some("deny".to_string()));
+
+        // Additive: with nothing to resolve the key is absent, so a v2 reader
+        // sees exactly the object it saw before.
+        let unresolved = stash_drop_trace(None);
+        assert_eq!(unresolved.to_json_output().mode, None);
+        let value: serde_json::Value =
+            serde_json::from_str(&unresolved.format_json()).expect("valid JSON");
+        assert!(
+            value.get("mode").is_none(),
+            "an unresolved mode serializes no key: {value}"
+        );
+        assert_eq!(value["decision"], "deny");
     }
 
     // ========================================================================
@@ -1633,6 +1834,7 @@ mod tests {
             match_info: None,
             allowlist_info: None,
             pack_summary: None,
+            resolved_mode: None,
         };
 
         let pretty = trace.format_pretty(false);
@@ -1674,6 +1876,7 @@ mod tests {
             }),
             allowlist_info: None,
             pack_summary: None,
+            resolved_mode: None,
         };
 
         let pretty = trace.format_pretty(false);
@@ -1726,6 +1929,7 @@ mod tests {
             }),
             allowlist_info: None,
             pack_summary: None,
+            resolved_mode: None,
         };
 
         let pretty = trace.format_pretty(false);
@@ -1767,6 +1971,7 @@ mod tests {
                 original_match,
             }),
             pack_summary: None,
+            resolved_mode: None,
         };
 
         let pretty = trace.format_pretty(false);
@@ -1800,6 +2005,7 @@ mod tests {
                     "database.postgresql".to_string(),
                 ],
             }),
+            resolved_mode: None,
         };
 
         let pretty = trace.format_pretty(false);
@@ -1854,6 +2060,7 @@ mod tests {
             match_info: None,
             allowlist_info: None,
             pack_summary: None,
+            resolved_mode: None,
         };
 
         let pretty = trace.format_pretty(false);
@@ -1892,6 +2099,7 @@ mod tests {
             }),
             allowlist_info: None,
             pack_summary: None,
+            resolved_mode: None,
         };
 
         let with_color = trace.format_pretty(true);
@@ -2015,6 +2223,7 @@ mod tests {
             match_info: None,
             allowlist_info: None,
             pack_summary: None,
+            resolved_mode: None,
         };
 
         let json = trace.format_json();
@@ -2037,6 +2246,7 @@ mod tests {
             match_info: None,
             allowlist_info: None,
             pack_summary: None,
+            resolved_mode: None,
         };
 
         let json = trace.format_json();
@@ -2067,6 +2277,7 @@ mod tests {
             }),
             allowlist_info: None,
             pack_summary: None,
+            resolved_mode: None,
         };
 
         let json = trace.format_json();
@@ -2124,6 +2335,7 @@ mod tests {
             match_info: None,
             allowlist_info: None,
             pack_summary: None,
+            resolved_mode: None,
         };
 
         let json = trace.format_json();
@@ -2168,6 +2380,7 @@ mod tests {
                 original_match,
             }),
             pack_summary: None,
+            resolved_mode: None,
         };
 
         let json = trace.format_json();
@@ -2196,6 +2409,7 @@ mod tests {
                 evaluated: vec!["core.git".to_string()],
                 skipped: vec!["containers.docker".to_string()],
             }),
+            resolved_mode: None,
         };
 
         let json = trace.format_json();
@@ -2244,6 +2458,7 @@ mod tests {
                 evaluated: vec!["core.git".to_string()],
                 skipped: vec!["containers.docker".to_string()],
             }),
+            resolved_mode: None,
         };
 
         let json = trace.format_json();
@@ -2279,6 +2494,7 @@ mod tests {
             match_info: None,
             allowlist_info: None,
             pack_summary: None,
+            resolved_mode: None,
         };
 
         let output = trace.to_json_output();
@@ -2556,6 +2772,7 @@ mod tests {
             }),
             allowlist_info: None,
             pack_summary: None,
+            resolved_mode: None,
         };
 
         let json = trace.format_json();
@@ -2593,6 +2810,7 @@ mod tests {
             }),
             allowlist_info: None,
             pack_summary: None,
+            resolved_mode: None,
         };
 
         let json = trace.format_json();
@@ -2628,6 +2846,7 @@ mod tests {
             match_info: None,
             allowlist_info: None,
             pack_summary: None,
+            resolved_mode: None,
         };
 
         let json = trace.format_json();
