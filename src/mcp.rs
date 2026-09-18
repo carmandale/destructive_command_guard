@@ -7,7 +7,7 @@ use crate::config::Config;
 use crate::evaluator::{
     EvaluationDecision, evaluate_command_with_pack_order_deadline_at_path, resolve_decision_mode,
 };
-use crate::packs::REGISTRY;
+use crate::packs::{REGISTRY, get_external_packs};
 use crate::scan::{
     ScanEvalContext, ScanFailOn, ScanFormat, ScanOptions, ScanRedactMode, scan_paths,
 };
@@ -274,8 +274,11 @@ impl DcgMcpServer {
             .split_once(':')
             .ok_or_else(|| Self::call_tool_error("rule_id must be in 'pack:pattern' format"))?;
 
+        // A custom_paths pack is one `check_command` can answer with; the
+        // server loaded the store at startup (.agent-config-zpo5q).
         let pack = REGISTRY
             .get(pack_id)
+            .or_else(|| get_external_packs().and_then(|store| store.get(pack_id)))
             .ok_or_else(|| Self::call_tool_error(format!("Unknown pack '{pack_id}'")))?;
 
         let pattern = pack

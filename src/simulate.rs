@@ -472,8 +472,8 @@ use crate::config::Config;
 use crate::evaluator::{
     EvaluationDecision, EvaluationResult, evaluate_command_with_pack_order, resolve_decision_mode,
 };
-use crate::packs::REGISTRY;
-use std::collections::{HashMap, HashSet};
+use crate::packs::EnabledPacks;
+use std::collections::HashMap;
 
 /// Default number of exemplars to keep per rule.
 pub const DEFAULT_EXEMPLAR_LIMIT: usize = 3;
@@ -823,10 +823,16 @@ pub fn run_simulation<I>(
 where
     I: IntoIterator<Item = ParsedCommand>,
 {
-    let enabled_packs: HashSet<String> = config.enabled_pack_ids();
-    let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
-    let keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
-    let keyword_index = REGISTRY.build_enabled_keyword_index(&ordered_packs);
+    // The hook's pack set, custom_paths packs included (.agent-config-zpo5q).
+    let EnabledPacks {
+        keywords,
+        ordered: ordered_packs,
+        keyword_index,
+        ..
+    } = EnabledPacks::load(
+        config.enabled_pack_ids(),
+        &config.packs.expand_custom_paths(),
+    );
     let compiled_overrides = config.overrides.compile();
     let allowlists = crate::allowlist::load_default_allowlists();
     let heredoc_settings = config.heredoc_settings();

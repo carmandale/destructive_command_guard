@@ -3646,10 +3646,8 @@ destructive_patterns:
 // ============================================================================
 // Custom Pack Loading E2E Tests
 // ============================================================================
-// NOTE: These tests are currently ignored because the ExternalPackLoader
-// is not yet integrated into the main evaluation path. The loader exists
-// (src/packs/external.rs) but is not called from main.rs or evaluator.rs.
-// See git_safety_guard-wy6s for the integration task.
+// The hook loads `[packs] custom_paths` packs through `EnabledPacks::load`;
+// tests/custom_pack_surfaces.rs covers the other surfaces.
 
 mod custom_pack_loading_tests {
     use super::*;
@@ -3761,8 +3759,25 @@ custom_paths = ["{}"]
         (sandbox, output)
     }
 
+    /// The rule the hook denied by, or `None` when it allowed (an allow prints
+    /// nothing).
+    fn hook_verdict(output: &std::process::Output) -> Option<String> {
+        assert!(output.status.success(), "hook exits 0 on allow and deny");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if stdout.trim().is_empty() {
+            return None;
+        }
+        let json: serde_json::Value =
+            serde_json::from_str(stdout.trim()).expect("hook output is JSON");
+        assert_eq!(
+            json["hookSpecificOutput"]["permissionDecision"], "deny",
+            "{stdout}"
+        );
+        let rule = json["hookSpecificOutput"]["ruleId"].as_str();
+        Some(rule.expect("a denial names its rule").to_string())
+    }
+
     #[test]
-    #[ignore = "External pack loading not yet integrated into evaluation path"]
     fn custom_pack_blocks_matching_command() {
         let pack_content = r#"
 schema_version: 1
@@ -3779,20 +3794,14 @@ destructive_patterns:
 "#;
 
         let (_temp, output) = setup_custom_pack_env(pack_content, "deploy --env prod");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-
-        // Parse hook output
-        let json: serde_json::Value =
-            serde_json::from_str(stdout.trim()).expect("should produce valid JSON");
-
         assert_eq!(
-            json["hookSpecificOutput"]["permissionDecision"], "deny",
-            "custom pack should block matching command\nstdout:\n{stdout}"
+            hook_verdict(&output).as_deref(),
+            Some("custom.deploy:prod-deploy"),
+            "custom pack should block matching command"
         );
     }
 
     #[test]
-    #[ignore = "External pack loading not yet integrated into evaluation path"]
     fn custom_pack_allows_non_matching_command() {
         let pack_content = r#"
 schema_version: 1
@@ -3807,21 +3816,23 @@ destructive_patterns:
     severity: critical
 "#;
 
-        let (_temp, output) = setup_custom_pack_env(pack_content, "deploy --env staging");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-
-        // Parse hook output
-        let json: serde_json::Value =
-            serde_json::from_str(stdout.trim()).expect("should produce valid JSON");
-
+        // The same pack denies the matching command, so the allow below is the
+        // pack's answer and not a pack that never loaded.
+        let (_temp, matching) = setup_custom_pack_env(pack_content, "deploy --env prod");
         assert_eq!(
-            json["hookSpecificOutput"]["permissionDecision"], "allow",
-            "custom pack should allow non-matching command\nstdout:\n{stdout}"
+            hook_verdict(&matching).as_deref(),
+            Some("custom.deploy:prod-deploy")
+        );
+
+        let (_temp, output) = setup_custom_pack_env(pack_content, "deploy --env staging");
+        assert_eq!(
+            hook_verdict(&output),
+            None,
+            "custom pack should allow non-matching command"
         );
     }
 
     #[test]
-    #[ignore = "External pack loading not yet integrated into evaluation path"]
     fn custom_pack_safe_pattern_takes_precedence() {
         let pack_content = r#"
 schema_version: 1
@@ -3841,16 +3852,20 @@ safe_patterns:
     description: Staging deployments are allowed
 "#;
 
+        // Any other environment is denied, so the destructive pattern does
+        // match staging and only the safe pattern lets it through.
+        let (_temp, prod) = setup_custom_pack_env(pack_content, "deploy --env prod");
+        assert_eq!(
+            hook_verdict(&prod).as_deref(),
+            Some("custom.deploy:any-deploy")
+        );
+
         // Staging should be allowed (safe pattern takes precedence)
         let (_temp, output) = setup_custom_pack_env(pack_content, "deploy --env staging");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-
-        let json: serde_json::Value =
-            serde_json::from_str(stdout.trim()).expect("should produce valid JSON");
-
         assert_eq!(
-            json["hookSpecificOutput"]["permissionDecision"], "allow",
-            "safe pattern should allow staging deploy\nstdout:\n{stdout}"
+            hook_verdict(&output),
+            None,
+            "safe pattern should allow staging deploy"
         );
     }
 

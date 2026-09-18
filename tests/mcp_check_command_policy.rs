@@ -51,6 +51,21 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 ///
 /// `allowlist`, when given, is written as the sandbox user's allowlist.
 fn mcp_check(config: &str, allowlist: Option<&str>, commands: &[&str]) -> Vec<Value> {
+    let arguments: Vec<Value> = commands.iter().map(|c| json!({"command": c})).collect();
+    mcp_calls(config, allowlist, "check_command", &arguments)
+        .iter()
+        .map(|result| {
+            let text = result["content"][0]["text"]
+                .as_str()
+                .unwrap_or_else(|| panic!("check_command returned no text: {result}"));
+            serde_json::from_str(text).expect("check_command body is JSON")
+        })
+        .collect()
+}
+
+/// Call `tool` once per entry of `arguments` on one `dcg mcp-server` under
+/// `config`, and return each call's `result` in order.
+fn mcp_calls(config: &str, allowlist: Option<&str>, tool: &str, arguments: &[Value]) -> Vec<Value> {
     let sandbox = spawn::sandbox();
     let config_path = sandbox.root().join("policy.toml");
     std::fs::write(&config_path, config).expect("write policy config");
@@ -116,25 +131,27 @@ fn mcp_check(config: &str, allowlist: Option<&str>, commands: &[&str]) -> Vec<Va
     assert!(init.get("result").is_some(), "initialize failed: {init}");
     send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
 
-    let mut bodies = Vec::with_capacity(commands.len());
-    for (id, command) in (1_u64..).zip(commands) {
+    let mut results = Vec::with_capacity(arguments.len());
+    for (id, args) in (1_u64..).zip(arguments) {
         send(&json!({
             "jsonrpc": "2.0",
             "id": id,
             "method": "tools/call",
-            "params": {"name": "check_command", "arguments": {"command": command}}
+            "params": {"name": tool, "arguments": args}
         }));
         let response = response_to(id);
-        let text = response["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap_or_else(|| panic!("check_command returned no text: {response}"));
-        bodies.push(serde_json::from_str(text).expect("check_command body is JSON"));
+        let result = response.get("result");
+        results.push(
+            result
+                .unwrap_or_else(|| panic!("{tool} returned no result: {response}"))
+                .clone(),
+        );
     }
 
     drop(stdin);
     let _ = child.kill();
     let _ = child.wait();
-    bodies
+    results
 }
 
 /// Whether the hook denies `command` under `config`, run the way the other hook
@@ -268,10 +285,9 @@ destructive_patterns:
 ";
 const CUSTOM_COMMAND: &str = "deploy --env prod";
 
-/// A rule from a `custom_paths` pack is denied by the hook, and the MCP answer
-/// must deny it too.
-#[test]
-fn a_custom_paths_pack_rule_answers_not_allowed() {
+/// A config that loads `CUSTOM_PACK` through `[packs] custom_paths`, and the
+/// directory holding the pack (keep it alive while the config is used).
+fn custom_pack_config() -> (tempfile::TempDir, String) {
     let packs = tempfile::tempdir().expect("create pack dir");
     let pack_path = packs.path().join("custom.yaml");
     std::fs::write(&pack_path, CUSTOM_PACK).expect("write custom pack");
@@ -279,6 +295,38 @@ fn a_custom_paths_pack_rule_answers_not_allowed() {
         "[packs]\ncustom_paths = [\"{}\"]\n",
         pack_path.to_string_lossy().replace('\\', "/")
     );
+    (packs, config)
+}
+
+/// `explain_pattern` explains a custom_paths rule, which `check_command` can
+/// answer with. It looked rules up in the built-in registry only
+/// (.agent-config-zpo5q).
+#[test]
+fn explain_pattern_explains_a_custom_paths_rule() {
+    let (_packs, config) = custom_pack_config();
+    let args = [json!({"rule_id": "custom.deploy:prod-deploy"})];
+
+    let result = &mcp_calls(&config, None, "explain_pattern", &args)[0];
+    assert_ne!(result["isError"], true, "{result}");
+    let text = result["content"][0]["text"].as_str().expect("text");
+    let body: Value = serde_json::from_str(text).expect("explain_pattern body is JSON");
+    assert_eq!(body["pack_id"], "custom.deploy", "{body}");
+    assert_eq!(body["pattern_name"], "prod-deploy", "{body}");
+    assert_eq!(
+        body["reason"], "Direct production deployment blocked",
+        "{body}"
+    );
+
+    // Control: without the pack the rule is unknown.
+    let without = &mcp_calls(NO_POLICY, None, "explain_pattern", &args)[0];
+    assert_eq!(without["isError"], true, "{without}");
+}
+
+/// A rule from a `custom_paths` pack is denied by the hook, and the MCP answer
+/// must deny it too.
+#[test]
+fn a_custom_paths_pack_rule_answers_not_allowed() {
+    let (_packs, config) = custom_pack_config();
 
     assert!(
         hook_denies(&config, None, CUSTOM_COMMAND),

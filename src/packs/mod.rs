@@ -1891,12 +1891,15 @@ pub fn get_external_packs() -> Option<&'static ExternalPackStore> {
 /// The packs a config turns on, in evaluation order, with its `custom_paths`
 /// packs loaded and enabled.
 ///
-/// The hook, `dcg test`, and `ScanEvalContext` (`dcg scan` and the MCP server)
-/// build their pack set here. This was a block pasted into the hook and
-/// `dcg test`, and the MCP server never got it, so it allowed commands the
-/// hook denied by an external pack rule (.agent-config-1j0l5). Other surfaces
-/// still build their own pack set without external packs
-/// (.agent-config-zpo5q).
+/// Every surface that answers for the user's config builds its pack set here:
+/// the hook, `dcg hook --batch`, `dcg test`, `dcg explain`, `dcg simulate`,
+/// `dcg dev debug`, and `ScanEvalContext` (`dcg scan` and the MCP server).
+/// This was a block pasted into the hook and `dcg test`, and the others never
+/// got it, so they allowed commands the hook denied by an external pack rule
+/// (.agent-config-1j0l5, .agent-config-zpo5q). The corpus runner, the
+/// `dcg doctor` smoke test, and the library calls (`evaluate_command` and its
+/// family, `evaluate_detailed`, `evaluate_command_with_legacy`) stay
+/// built-in-only on purpose; each says why.
 pub struct EnabledPacks {
     /// Keywords for quick rejection, external pack keywords included.
     pub keywords: Vec<&'static str>,

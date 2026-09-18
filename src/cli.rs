@@ -2014,13 +2014,16 @@ fn run_hook_command(config: &Config, cmd: &HookCommand) -> Result<(), Box<dyn st
     let compiled_overrides = config.overrides.compile();
     let allowlists = crate::load_default_allowlists();
     let heredoc_settings = config.heredoc_settings();
-    let enabled_packs = config.enabled_pack_ids();
-    let enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
-    let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
-    let keyword_index = REGISTRY.build_enabled_keyword_index(&ordered_packs);
-
-    // TODO: External pack loading is not yet implemented.
-    // When ExternalPackLoader is implemented, load custom YAML packs here.
+    // The hook's pack set, custom_paths packs included (.agent-config-zpo5q).
+    let EnabledPacks {
+        keywords: enabled_keywords,
+        ordered: ordered_packs,
+        keyword_index,
+        ..
+    } = EnabledPacks::load(
+        config.enabled_pack_ids(),
+        &config.packs.expand_custom_paths(),
+    );
 
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -3452,7 +3455,8 @@ fn test_command(
         None, // deadline
     );
 
-    // NOTE: External packs from custom_paths are now checked in evaluate_command()
+    // NOTE: External packs from custom_paths are checked by the evaluator
+    // through the `EnabledPacks::load` pack order
     // alongside built-in packs, so no separate fallback check is needed here.
 
     let elapsed = start.elapsed();
@@ -5056,11 +5060,16 @@ fn handle_explain(
         },
     );
 
-    // Get enabled packs and collect keywords
-    let enabled_packs = effective_config.enabled_pack_ids();
-    let enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
-    let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
-    let keyword_index = REGISTRY.build_enabled_keyword_index(&ordered_packs);
+    // The hook's pack set, custom_paths packs included (.agent-config-zpo5q).
+    let EnabledPacks {
+        keywords: enabled_keywords,
+        ordered: ordered_packs,
+        keyword_index,
+        ..
+    } = EnabledPacks::load(
+        effective_config.enabled_pack_ids(),
+        &effective_config.packs.expand_custom_paths(),
+    );
     let heredoc_settings = effective_config.heredoc_settings();
     let compiled_overrides = effective_config.overrides.compile();
     let allowlists = crate::LayeredAllowlist::default();
@@ -5424,6 +5433,11 @@ fn run_single_corpus_test(
         }
     }
 
+    // Built-in packs only, on purpose: the corpus asserts what the built-in
+    // rules decide, which is also why it skips allowlists (it still reads the
+    // rest of the user's config). A user's custom_paths rule could flip a
+    // corpus verdict. Every surface that answers for the user's config uses
+    // `EnabledPacks::load` instead (.agent-config-zpo5q).
     let enabled_packs = effective_config.enabled_pack_ids();
     let enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
     let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
@@ -8939,9 +8953,12 @@ fn is_valid_pack_id(id: &str) -> bool {
 /// Run a quick smoke test to verify the evaluator works.
 ///
 /// Tests both an allow case and a deny case to ensure basic functionality.
-#[allow(dead_code)]
 fn run_smoke_test() -> bool {
     let config = Config::load();
+    // Built-in packs only, on purpose: `dcg doctor` asks whether the evaluator
+    // works, on two built-in commands, and a user's custom_paths rule on
+    // `git status` would turn that into a false "evaluator broken" report
+    // (.agent-config-zpo5q).
     let enabled_packs = config.enabled_pack_ids();
     let enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
     let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
@@ -11053,8 +11070,16 @@ fn dev_debug(config: &Config, command: &str, all_packs: bool) {
     println!("Command: {}", command.yellow());
     println!();
 
-    let enabled_packs = config.enabled_pack_ids();
-    let enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
+    // The hook's pack set, custom_paths packs included (.agent-config-zpo5q).
+    let EnabledPacks {
+        keywords: enabled_keywords,
+        ordered: ordered_packs,
+        external,
+        ..
+    } = EnabledPacks::load(
+        config.enabled_pack_ids(),
+        &config.packs.expand_custom_paths(),
+    );
 
     // Check keyword matching
     println!("{}", "Keyword Matching:".bold());
@@ -11080,10 +11105,9 @@ fn dev_debug(config: &Config, command: &str, all_packs: bool) {
 
     // Check each pack
     println!("{}", "Pack Evaluation:".bold());
-    let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
 
     for pack_id in &ordered_packs {
-        if let Some(pack) = REGISTRY.get(pack_id) {
+        if let Some(pack) = REGISTRY.get(pack_id).or_else(|| external.get(pack_id)) {
             // Check if pack keywords match
             let pack_matches = pack.keywords.iter().any(|k| command_lower.contains(k));
 
@@ -11353,10 +11377,15 @@ mod tests {
         let compiled_overrides = config.overrides.compile();
         let allowlists = crate::allowlist::LayeredAllowlist::default();
         let heredoc_settings = config.heredoc_settings();
-        let enabled_packs = config.enabled_pack_ids();
-        let enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
-        let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
-        let keyword_index = REGISTRY.build_enabled_keyword_index(&ordered_packs);
+        let EnabledPacks {
+            keywords: enabled_keywords,
+            ordered: ordered_packs,
+            keyword_index,
+            ..
+        } = EnabledPacks::load(
+            config.enabled_pack_ids(),
+            &config.packs.expand_custom_paths(),
+        );
 
         BatchEvalContext {
             enabled_keywords,

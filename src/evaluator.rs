@@ -1115,6 +1115,8 @@ impl DetailedEvaluationResult {
 ///     }
 /// }
 /// ```
+///
+/// `[packs] custom_paths` packs are not evaluated; see [`evaluate_command`].
 #[must_use]
 pub fn evaluate_detailed(command: &str, config: &Config) -> DetailedEvaluationResult {
     let allowlists = LayeredAllowlist::default();
@@ -1145,7 +1147,10 @@ pub fn evaluate_detailed_with_allowlists(
 
     let start = Instant::now();
 
-    // Collect enabled keywords for quick-reject tracking
+    // Built-in packs only. This is a library call with no production caller,
+    // and custom_paths packs live in a process-global store the first load
+    // decides, so loading them here would pin every later call to this
+    // config's packs (.agent-config-zpo5q).
     let enabled_packs = config.enabled_pack_ids();
     let enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
     let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
@@ -1229,6 +1234,10 @@ pub fn evaluate_detailed_with_allowlists(
 /// - Quick rejection skips regex for 99%+ of commands
 /// - Config overrides use precompiled regexes (no per-command compilation)
 /// - Short-circuits on first match
+///
+/// `[packs] custom_paths` packs are not evaluated. To evaluate them, build the
+/// pack set with [`crate::packs::EnabledPacks::load`] and call
+/// [`evaluate_command_with_pack_order`].
 #[must_use]
 pub fn evaluate_command(
     command: &str,
@@ -1406,6 +1415,12 @@ fn evaluate_config_with_source(
     allowlists: &LayeredAllowlist,
     deadline: Option<&Deadline>,
 ) -> EvaluationResult {
+    // Built-in packs only: the caller supplies the quick-reject keywords, so
+    // custom_paths packs loaded here would be reached only when a command also
+    // carried one of the caller's keywords, which is a guard that fires by
+    // accident. No production surface calls this family; surfaces that answer
+    // for the user's config build `EnabledPacks::load` and call a pack-order
+    // entry (.agent-config-zpo5q).
     let enabled_packs: HashSet<String> = config.enabled_pack_ids();
     let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
     let keyword_index = REGISTRY.build_enabled_keyword_index(&ordered_packs);
@@ -2327,6 +2342,8 @@ fn evaluate_packs_with_allowlists(
 /// This function accepts any types that implement pattern matching:
 /// * `S` - Safe pattern type with `is_match` method returning `bool`
 /// * `D` - Destructive pattern type with `is_match` method returning `bool` and `reason` method
+///
+/// `[packs] custom_paths` packs are not evaluated; see [`evaluate_command`].
 #[allow(clippy::too_many_lines)]
 pub fn evaluate_command_with_legacy<S, D>(
     command: &str,
@@ -2370,6 +2387,9 @@ where
     }
 
     // Step 2.5: Pre-calculate ordered packs for heredoc recursion (and later use)
+    // Built-in packs only, like `evaluate_command`: with caller-supplied
+    // quick-reject keywords, custom packs would fire only by accident
+    // (.agent-config-zpo5q).
     let enabled_packs: HashSet<String> = config.enabled_pack_ids();
     let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
     let keyword_index = REGISTRY.build_enabled_keyword_index(&ordered_packs);

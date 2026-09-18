@@ -580,7 +580,8 @@ fn main() {
         Some(&deadline),
     );
 
-    // NOTE: External packs from custom_paths are now checked in evaluate_command()
+    // NOTE: External packs from custom_paths are checked by the evaluator
+    // through the `EnabledPacks::load` pack order
     // alongside built-in packs, so no separate fallback check is needed here.
 
     let eval_duration = eval_start.elapsed();
