@@ -150,9 +150,10 @@ const BOTH_PACKS: &str = "core,cicd.github_actions,platform.github";
 /// Runs the hook with `packs` enabled and returns (ruleId, whole stdout); `None` is allow.
 fn hook(packs: &str, command: &str) -> Option<(String, String)> {
     let (mut cmd, sandbox) = spawn::dcg_with_packs(packs);
-    // Far above any run here, so an allow cannot be the evaluation budget failing open.
-    cmd.env("DCG_HOOK_TIMEOUT_MS", "600000")
-        .stdin(Stdio::piped())
+    // The budget that keeps an allow here from being the evaluation clock
+    // failing open is `spawn::GENEROUS_HOOK_TIMEOUT_MS`, which every harness
+    // now carries (.agent-config-0o2q1). This file used to set its own.
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = cmd.spawn().expect("spawn dcg");

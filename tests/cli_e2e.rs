@@ -69,12 +69,49 @@ fn write_hook_input(child: &mut std::process::Child, input: &serde_json::Value) 
     }
 }
 
+/// Whether a hook run keeps the harness's generous evaluation budget.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HookBudget {
+    /// `spawn::GENEROUS_HOOK_TIMEOUT_MS`, so a `ruleId` assertion cannot be
+    /// decided by machine load. Every test but the budget tests wants this.
+    Harness,
+    /// Drop it, so `[general] hook_timeout_ms` in the test's own config is what
+    /// decides. Only a test whose subject IS the budget wants this.
+    FromConfig,
+}
+
 /// Run dcg in hook mode (no CLI subcommand) and capture output.
 ///
 /// This runs with a cleared environment and a temp CWD to ensure tests don't
 /// depend on user/system configs or allowlists.
 fn run_dcg_hook_with_env(command: &str, extra_env: &[(&str, &std::ffi::OsStr)]) -> HookRunOutput {
+    run_dcg_hook_inner(command, extra_env, HookBudget::Harness)
+}
+
+/// Like [`run_dcg_hook_with_env`], but the hook budget comes from the config
+/// the test wrote, not from the harness.
+///
+/// `DCG_HOOK_TIMEOUT_MS` is applied after the config file is loaded, so the
+/// harness value would otherwise win and a test that starves the budget on
+/// purpose would silently stop starving it. Removing it here keeps these tests
+/// measuring the `[general] hook_timeout_ms` path end to end, which is the only
+/// place in the suite that still does (.agent-config-0o2q1).
+fn run_dcg_hook_under_config_budget(
+    command: &str,
+    extra_env: &[(&str, &std::ffi::OsStr)],
+) -> HookRunOutput {
+    run_dcg_hook_inner(command, extra_env, HookBudget::FromConfig)
+}
+
+fn run_dcg_hook_inner(
+    command: &str,
+    extra_env: &[(&str, &std::ffi::OsStr)],
+    budget: HookBudget,
+) -> HookRunOutput {
     let (mut cmd, sandbox) = spawn::dcg();
+    if budget == HookBudget::FromConfig {
+        cmd.env_remove("DCG_HOOK_TIMEOUT_MS");
+    }
     std::fs::create_dir_all(sandbox.root().join(".git")).expect("failed to create .git dir");
 
     let input = payload::pre_tool_use(sandbox.root(), command);
@@ -3706,31 +3743,20 @@ mod custom_pack_loading_tests {
 
         // Write config that loads the custom pack.
         //
-        // The budget is pinned far above the 200ms default on purpose. These
-        // harnesses ask what a PATTERN decides, and one of them drives a
-        // pattern built to exhaust fancy_regex's backtrack limit -- a fixed
-        // step count, which is deterministic. The hook deadline is a clock,
-        // and a denial from the clock arrives under
-        // `core.limits:evaluation-timeout` rather than under the rule, so a
-        // loaded `--release` suite could turn an in-budget verdict into a
-        // phantom regression for whoever happened to hit it
-        // (.agent-config-60dbp).
-        //
-        // Measured 2026-09-16 on a release build: the crafted command's
-        // in-deadline work still finished under a 2ms budget at load ~48, and
-        // flipped to the timeout rule only at 1ms -- so this is not a slow path
-        // being papered over. It is a ~100x margin that only a heavily loaded
-        // box can close, and the full suite runs at load 430-490.
+        // No hook budget here: these harnesses ask what a PATTERN decides, and
+        // the budget that keeps the clock out of that answer is
+        // `spawn::GENEROUS_HOOK_TIMEOUT_MS`, carried by every harness and
+        // applied after any config file (.agent-config-0o2q1). This block used
+        // to pin `hook_timeout_ms = 20000` itself for the same reason, one file
+        // at a time (.agent-config-60dbp); the env override now outranks it, so
+        // the line was doing nothing and read as if it were the protection.
         //
         // `budget_overrun_denies_instead_of_allowing` and its neighbours own
-        // the timeout contract and write their own config, so nothing here is
-        // what proves the budget still fires.
+        // the timeout contract and drop the harness budget to get it, so
+        // nothing here is what proves the budget still fires.
         let config_path = sandbox.dcg_config_dir().join("config.toml");
         let config_content = format!(
             r#"
-[general]
-hook_timeout_ms = 20000
-
 [packs]
 enabled = ["core.git", "core.filesystem"]
 custom_paths = ["{}"]
@@ -4853,6 +4879,47 @@ mod fail_closed_tests {
         path
     }
 
+    /// The production budget stays 200ms.
+    ///
+    /// Every other hook test in this suite now runs at
+    /// `spawn::GENEROUS_HOOK_TIMEOUT_MS`, because a `ruleId` assertion decided
+    /// by a wall clock is not a test (.agent-config-0o2q1). The tempting other
+    /// fix is to raise the real budget until the flake stops, which ships a dcg
+    /// that waits longer on every command a real agent runs. This module
+    /// delivers its own budget in every case, so nothing else here would
+    /// notice. This does.
+    #[test]
+    fn the_production_hook_budget_is_still_200ms() {
+        assert_eq!(
+            destructive_command_guard::HOOK_EVALUATION_BUDGET_MS,
+            200,
+            "dcg's production hook wall-clock budget changed"
+        );
+    }
+
+    /// Control for the harness budget: it reaches the child, and it wins.
+    ///
+    /// `DCG_HOOK_TIMEOUT_MS` is applied after the config file, so the same 0ms
+    /// config that `budget_overrun_denies_instead_of_allowing` starves on must
+    /// come back ALLOWED here. That pair is what tells the two apart: if
+    /// `spawn::dcg_in` stopped exporting the budget, this goes red and the
+    /// starved test stays green; if the override stopped being applied after
+    /// the config, the starved test goes red and this stays green.
+    #[test]
+    fn the_harness_budget_overrides_a_starved_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = write_config(temp.path(), 0);
+
+        let run = run_dcg_hook_with_env("echo hello", &[("DCG_CONFIG", config.as_os_str())]);
+        assert!(
+            run.stdout_str().trim().is_empty(),
+            "the harness hook budget did not reach the child: a 0ms config still decided \
+             the verdict\nstdout:\n{}\nstderr:\n{}",
+            run.stdout_str(),
+            run.stderr_str()
+        );
+    }
+
     /// A command dcg could not finish judging must be denied, not allowed.
     ///
     /// Both budget checks used to `return` silently, and silence at exit 0 is
@@ -4866,7 +4933,8 @@ mod fail_closed_tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let config = write_config(temp.path(), 0);
 
-        let run = run_dcg_hook_with_env("echo hello", &[("DCG_CONFIG", config.as_os_str())]);
+        let run =
+            run_dcg_hook_under_config_budget("echo hello", &[("DCG_CONFIG", config.as_os_str())]);
         let stdout = run.stdout_str();
 
         assert!(
@@ -4936,7 +5004,7 @@ mod fail_closed_tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let config = write_config(temp.path(), 5);
 
-        let run = run_dcg_hook_with_env(
+        let run = run_dcg_hook_under_config_budget(
             &slow_to_evaluate_command(),
             &[("DCG_CONFIG", config.as_os_str())],
         );
@@ -5179,6 +5247,9 @@ mod fail_closed_tests {
     /// pointed at a temp dir wrote 3422 bytes into the live store and left the
     /// temp dir empty, so ~150k measurement invocations grew the state of the
     /// guard they were supposed to be measuring from the outside.
+    ///
+    /// The denial this needs is the budget overrun, so it takes the budget from
+    /// its own config like its neighbours above (.agent-config-0o2q1).
     #[test]
     fn xdg_config_home_selects_the_pending_store() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -5190,7 +5261,7 @@ mod fail_closed_tests {
         std::fs::create_dir_all(&xdg).expect("xdg dir");
         let config = write_config(temp.path(), 0);
 
-        let run = run_dcg_hook_with_env(
+        let run = run_dcg_hook_under_config_budget(
             "echo hello",
             &[
                 ("DCG_CONFIG", config.as_os_str()),
