@@ -4268,6 +4268,8 @@ pub struct ExtractedShellCommand {
 /// - Pipe sources and targets: commands on either side of `|`
 /// - Commands inside command substitutions: contents of `$(...)`
 /// - Commands inside subshells: contents of `(...)`
+/// - A statement that carries a heredoc, whole: `python3 <<'PY' ... PY`, so
+///   the body is judged together with the command that receives it
 ///
 /// # What does NOT get extracted (false positive avoidance)
 ///
@@ -4307,14 +4309,28 @@ pub fn extract_shell_commands(content: &str) -> Vec<ExtractedShellCommand> {
     }
 
     let start = Instant::now();
-    let ast = AstGrep::new(content, SupportLang::Bash);
+    // bash reads every line of a heredoc body newline-terminated, but the body
+    // is extracted with its final newline joined away. Without that newline
+    // tree-sitter-bash cannot read an unterminated nested heredoc the way bash
+    // does -- a body running to the end of input -- and parses the operator as
+    // an ERROR node, so its statement is never emitted (`.agent-config-0awpo`).
+    // Appending at the end moves no offset; `end` is clamped back below.
+    let source: std::borrow::Cow<'_, str> = if content.ends_with('\n') {
+        std::borrow::Cow::Borrowed(content)
+    } else {
+        std::borrow::Cow::Owned(format!("{content}\n"))
+    };
+    let ast = AstGrep::new(source.as_ref(), SupportLang::Bash);
     let root = ast.root();
 
     let mut commands = Vec::new();
 
     // Walk the AST to find command nodes
     // tree-sitter-bash uses "command" nodes for simple commands
-    collect_commands_recursive(root, content, &mut commands);
+    collect_commands_recursive(root, source.as_ref(), &mut commands);
+    for command in &mut commands {
+        command.end = command.end.min(content.len());
+    }
 
     debug!(
         elapsed_us = start.elapsed().as_micros(),
@@ -4355,6 +4371,31 @@ fn collect_commands_recursive<D: ast_grep_core::Doc>(
                 line_number,
             });
         }
+    }
+
+    // A heredoc is the one part of a statement its `command` node does not
+    // carry: tree-sitter hangs the body off a sibling `heredoc_redirect`, so
+    // `python3 <<'PY' ... PY` inside a bash body reached the evaluator as a bare
+    // `python3`, and the body was read by nothing -- no rule, and, once a judged
+    // body is masked from the fallback sweep, not the sweep either
+    // (`.agent-config-0awpo`). So the whole redirected statement is emitted as
+    // well, and the evaluator judges it exactly as it judges the same text typed
+    // at the top level: an inert receiver stays inert, an interpreter's body
+    // meets that interpreter's rules, and an unterminated body -- which bash
+    // runs to the end of input, as this node does -- meets the fallback.
+    if kind == "redirected_statement"
+        && node
+            .children()
+            .any(|child| child.kind() == "heredoc_redirect")
+    {
+        let range = node.range();
+        let line_number = content[..range.start].matches('\n').count() + 1;
+        commands.push(ExtractedShellCommand {
+            text: node.text().to_string(),
+            start: range.start,
+            end: range.end,
+            line_number,
+        });
     }
 
     // Recurse into all children to find nested commands
