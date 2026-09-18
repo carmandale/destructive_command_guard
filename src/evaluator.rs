@@ -2684,6 +2684,19 @@ fn evaluate_heredoc(
         .filter_map(|(i, c)| c.content_range.clone().map(|range| (i, range)))
         .collect();
 
+    // The byte ranges of content that actually REACHED the matchers, in the raw
+    // command's coordinates. The fallback sweep at the bottom of this function
+    // exists for text nobody read, so it must not read these.
+    //
+    // Collected here, inside the loop, and not from `contents`: extraction and
+    // judgement are different events. Six `continue`s below drop an extracted
+    // entry before any matcher sees it (a disabled language, a content
+    // allowlist hit, an inert receiver, a nested-in-inert span, a budget stop,
+    // an AST match error). Masking one of those would be a fail-open -- the
+    // sweep would stop reading a body that nothing else read either
+    // (`.agent-config-dcg-fallback-scans-judged-content-zc6tb`).
+    let mut judged_spans: Vec<std::ops::Range<usize>> = Vec::new();
+
     for (index, content) in contents.iter().enumerate() {
         if inert_body_spans.iter().any(|(owner, span)| {
             *owner != index
@@ -2914,15 +2927,59 @@ fn evaluate_heredoc(
                 branch_context: None,
             });
         }
+
+        // Every match for this content has been judged and none of them ended
+        // the evaluation, so the sweep has nothing left to add about it. A
+        // `content_range` of None means the body could not be located in the
+        // raw command; then nothing is masked and the sweep still reads it,
+        // which is the fail-closed side of the uncertainty.
+        if let Some(range) = content.content_range.clone() {
+            judged_spans.push(range);
+        }
     }
 
     if fallback_needed {
-        if let Some(blocked) = check_fallback_patterns(command) {
+        let unjudged = mask_judged_spans(command, &judged_spans);
+        if let Some(blocked) = check_fallback_patterns(unjudged.as_ref()) {
             return Some(blocked);
         }
     }
 
     None
+}
+
+/// Blank out `spans` in `command`, byte for byte.
+///
+/// Length-preserving on purpose, twice over: later spans stay valid in the same
+/// coordinates, and the readers inside [`check_fallback_patterns`] still see the
+/// shell structure around each body (`cat >> f <<'EOF'` keeps its receiver and
+/// its operator, so `mask_non_executing_heredocs` can still recognise it).
+///
+/// Spaces, not deletion: removing a judged span could butt `rm -r` up against a
+/// stray `f` and MANUFACTURE a match. A space cannot, because every fallback
+/// pattern's flag run is `[a-zA-Z]*`.
+fn mask_judged_spans<'a>(
+    command: &'a str,
+    spans: &[std::ops::Range<usize>],
+) -> std::borrow::Cow<'a, str> {
+    if spans.is_empty() {
+        return std::borrow::Cow::Borrowed(command);
+    }
+
+    let mut masked = command.to_string();
+    for span in spans {
+        let start = span.start.min(command.len());
+        let end = span.end.min(command.len());
+        // Offsets are the raw command's. A span that is empty, inverted or not
+        // on a char boundary is a mapping we do not trust, so it masks nothing
+        // and the sweep keeps reading there.
+        if start >= end || !command.is_char_boundary(start) || !command.is_char_boundary(end) {
+            continue;
+        }
+        masked.replace_range(start..end, &" ".repeat(end - start));
+    }
+
+    std::borrow::Cow::Owned(masked)
 }
 
 #[allow(dead_code)]
