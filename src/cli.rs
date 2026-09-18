@@ -12,7 +12,7 @@ use crate::agent::{DetectionMethod, detect_agent_with_details};
 use crate::config::Config;
 use crate::evaluator::{
     DEFAULT_WINDOW_WIDTH, EvaluationDecision, MatchSource, evaluate_command_with_pack_order,
-    evaluate_command_with_pack_order_deadline_at_path,
+    evaluate_command_with_pack_order_deadline_at_path, resolve_decision_mode,
 };
 use crate::exit_codes::EXIT_DENIED;
 use crate::highlight::{HighlightSpan, format_highlighted_command, should_use_color};
@@ -26,8 +26,8 @@ use crate::interactive::{
 };
 use crate::load_default_allowlists;
 use crate::packs::{
-    DecisionMode, ExternalPackStore, REGISTRY, Severity as PackSeverity, get_external_packs,
-    load_external_packs,
+    DecisionMode, EnabledPacks, ExternalPackStore, REGISTRY, Severity as PackSeverity,
+    get_external_packs, load_external_packs,
 };
 use crate::pending_exceptions::{
     AllowOnceEntry, AllowOnceScopeKind, AllowOnceStore, PendingExceptionRecord,
@@ -534,12 +534,17 @@ pub struct HookCommand {
 pub struct BatchHookOutput {
     /// Index of the input line (0-based)
     pub index: usize,
-    /// Decision: "allow" or "deny"
+    /// Decision the hook would apply: "allow" or "deny" ("skip"/"error" for
+    /// lines that are not evaluated). A rule the policy or confidence only
+    /// warns on or logs is "allow", with `mode` naming it.
     pub decision: &'static str,
-    /// Rule ID if denied (e.g., "core.git:reset-hard")
+    /// The resolved mode of the matched rule: "deny", "warn" or "log".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<&'static str>,
+    /// Rule ID of the matched rule (e.g., "core.git:reset-hard")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rule_id: Option<String>,
-    /// Pack ID if denied
+    /// Pack ID of the matched rule
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pack_id: Option<String>,
     /// Error message if parsing failed
@@ -689,9 +694,13 @@ pub struct TestOutput {
     pub robot_mode: bool,
     /// The command that was tested
     pub command: String,
-    /// The decision: "allow" or "deny"
+    /// The decision the hook would apply: "allow" or "deny". A rule the policy
+    /// or confidence only warns on or logs is "allow", with `mode` naming it.
     pub decision: String,
-    /// Rule ID if blocked (e.g., "core.git:reset-hard")
+    /// The resolved mode of the matched rule: "deny", "warn" or "log".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// Rule ID of the matched rule (e.g., "core.git:reset-hard")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rule_id: Option<String>,
     /// Pack ID that matched (e.g., "core.git")
@@ -700,7 +709,7 @@ pub struct TestOutput {
     /// Pattern name within the pack
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pattern_name: Option<String>,
-    /// Reason for blocking
+    /// Why the matched rule exists
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// Explanation for the match (if available)
@@ -2005,13 +2014,16 @@ fn run_hook_command(config: &Config, cmd: &HookCommand) -> Result<(), Box<dyn st
     let compiled_overrides = config.overrides.compile();
     let allowlists = crate::load_default_allowlists();
     let heredoc_settings = config.heredoc_settings();
-    let enabled_packs = config.enabled_pack_ids();
-    let enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
-    let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
-    let keyword_index = REGISTRY.build_enabled_keyword_index(&ordered_packs);
-
-    // TODO: External pack loading is not yet implemented.
-    // When ExternalPackLoader is implemented, load custom YAML packs here.
+    // The hook's pack set, custom_paths packs included (.agent-config-zpo5q).
+    let EnabledPacks {
+        keywords: enabled_keywords,
+        ordered: ordered_packs,
+        keyword_index,
+        ..
+    } = EnabledPacks::load(
+        config.enabled_pack_ids(),
+        &config.packs.expand_custom_paths(),
+    );
 
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -2043,8 +2055,7 @@ fn run_hook_command(config: &Config, cmd: &HookCommand) -> Result<(), Box<dyn st
                         &compiled_overrides,
                         &allowlists,
                         &heredoc_settings,
-                        config.policy(),
-                        &config.confidence,
+                        config,
                         cmd.continue_on_error,
                     )
                 })
@@ -2073,8 +2084,7 @@ fn run_hook_command(config: &Config, cmd: &HookCommand) -> Result<(), Box<dyn st
                     &compiled_overrides,
                     &allowlists,
                     &heredoc_settings,
-                    config.policy(),
-                    &config.confidence,
+                    config,
                     cmd.continue_on_error,
                 );
                 let json = serde_json::to_string(&result)?;
@@ -2091,6 +2101,7 @@ fn run_hook_command(config: &Config, cmd: &HookCommand) -> Result<(), Box<dyn st
                         let result = BatchHookOutput {
                             index,
                             decision: "error",
+                            mode: None,
                             rule_id: None,
                             pack_id: None,
                             error: Some(format!("IO error: {e}")),
@@ -2112,8 +2123,7 @@ fn run_hook_command(config: &Config, cmd: &HookCommand) -> Result<(), Box<dyn st
                 &compiled_overrides,
                 &allowlists,
                 &heredoc_settings,
-                config.policy(),
-                &config.confidence,
+                config,
                 cmd.continue_on_error,
             );
             let json = serde_json::to_string(&result)?;
@@ -2135,8 +2145,7 @@ fn evaluate_batch_line(
     compiled_overrides: &crate::config::CompiledOverrides,
     allowlists: &crate::allowlist::LayeredAllowlist,
     heredoc_settings: &crate::config::HeredocSettings,
-    policy: &crate::config::PolicyConfig,
-    confidence: &crate::config::ConfidenceConfig,
+    config: &Config,
     continue_on_error: bool,
 ) -> BatchHookOutput {
     // Skip empty lines
@@ -2144,6 +2153,7 @@ fn evaluate_batch_line(
         return BatchHookOutput {
             index,
             decision: "skip",
+            mode: None,
             rule_id: None,
             pack_id: None,
             error: Some("Empty line".to_string()),
@@ -2158,6 +2168,7 @@ fn evaluate_batch_line(
                 return BatchHookOutput {
                     index,
                     decision: "error",
+                    mode: None,
                     rule_id: None,
                     pack_id: None,
                     error: Some(format!("JSON parse error: {e}")),
@@ -2166,6 +2177,7 @@ fn evaluate_batch_line(
             return BatchHookOutput {
                 index,
                 decision: "error",
+                mode: None,
                 rule_id: None,
                 pack_id: None,
                 error: Some(format!("JSON parse error: {e}")),
@@ -2177,6 +2189,7 @@ fn evaluate_batch_line(
         return BatchHookOutput {
             index,
             decision: "skip",
+            mode: None,
             rule_id: None,
             pack_id: None,
             error: Some("Not a supported shell tool invocation or missing command".to_string()),
@@ -2192,8 +2205,8 @@ fn evaluate_batch_line(
         compiled_overrides,
         allowlists,
         heredoc_settings,
-        policy,
-        confidence,
+        config.policy(),
+        &config.confidence,
         None,
         None,
         None, // No deadline for batch mode
@@ -2203,6 +2216,7 @@ fn evaluate_batch_line(
         EvaluationDecision::Allow => BatchHookOutput {
             index,
             decision: "allow",
+            mode: None,
             rule_id: None,
             pack_id: None,
             error: None,
@@ -2222,9 +2236,17 @@ fn evaluate_batch_line(
                         (rule_id, info.pack_id.clone())
                     });
 
+            // The hook's verdict, from the resolver the hook calls: a rule the
+            // policy or confidence only warns on or logs is allowed, as the
+            // hook allows it. This answered "deny" for every match, so a
+            // Medium rule the hook only warns on came back denied
+            // (.agent-config-a56do).
+            let mode = resolve_decision_mode(config, &command, &eval_result);
+            let blocks = mode.is_some_and(|mode| mode.blocks());
             BatchHookOutput {
                 index,
-                decision: "deny",
+                decision: if blocks { "deny" } else { "allow" },
+                mode: mode.map(|mode| mode.label()),
                 rule_id,
                 pack_id,
                 error: None,
@@ -3382,9 +3404,17 @@ fn test_command(
         effective_config.heredoc.languages = Some(langs);
     }
 
-    // Get enabled packs and collect keywords for quick rejection
-    let mut enabled_packs = effective_config.enabled_pack_ids();
-    let mut enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
+    // The hook's pack set: enabled packs plus the custom_paths packs, loaded
+    // and enabled.
+    let EnabledPacks {
+        keywords: enabled_keywords,
+        ordered: ordered_packs,
+        keyword_index,
+        ..
+    } = EnabledPacks::load(
+        effective_config.enabled_pack_ids(),
+        &effective_config.packs.expand_custom_paths(),
+    );
     let heredoc_settings = effective_config.heredoc_settings();
 
     // Compile overrides once (not per-command)
@@ -3393,30 +3423,6 @@ fn test_command(
     // Load allowlists (project/user/system) for parity with hook mode.
     // This is a small file read and only affects decisions when a rule matches.
     let allowlists = load_default_allowlists();
-
-    // Load external packs from custom_paths (glob + tilde expansion).
-    let external_paths = effective_config.packs.expand_custom_paths();
-    let external_store = load_external_packs(&external_paths);
-
-    // Auto-enable external packs and merge their keywords.
-    for id in external_store.pack_ids() {
-        enabled_packs.insert(id.clone());
-    }
-    enabled_keywords.extend(external_store.keywords().iter().copied());
-
-    // Build ordered pack list AFTER external packs are loaded so they're included.
-    let mut ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
-    for id in external_store.pack_ids() {
-        if !ordered_packs.contains(id) {
-            ordered_packs.push(id.clone());
-        }
-    }
-    // Disable keyword index when external packs are present (not covered by index).
-    let keyword_index = if external_store.pack_ids().next().is_some() {
-        None
-    } else {
-        REGISTRY.build_enabled_keyword_index(&ordered_packs)
-    };
 
     // Detect the current AI coding agent for agent-specific profiles
     let detection = detect_agent_with_details();
@@ -3449,10 +3455,19 @@ fn test_command(
         None, // deadline
     );
 
-    // NOTE: External packs from custom_paths are now checked in evaluate_command()
+    // NOTE: External packs from custom_paths are checked by the evaluator
+    // through the `EnabledPacks::load` pack order
     // alongside built-in packs, so no separate fallback check is needed here.
 
     let elapsed = start.elapsed();
+
+    // The mode the hook applies, from the resolver the hook calls. Every output
+    // format and the exit code follow it: a rule the policy or confidence only
+    // warns on or logs is not blocked. The JSON/TOON decision and both exit
+    // codes used to follow the raw match alone (.agent-config-a56do).
+    let resolved_mode = resolve_decision_mode(&effective_config, command, &result);
+    let blocked = result.decision == EvaluationDecision::Deny
+        && resolved_mode.is_some_and(|mode| mode.blocks());
 
     // Handle structured output (JSON/TOON)
     if format.is_structured() {
@@ -3472,6 +3487,7 @@ fn test_command(
                     robot_mode,
                     command: command.to_string(),
                     decision: "allow".to_string(),
+                    mode: None,
                     rule_id: None,
                     pack_id: None,
                     pattern_name: None,
@@ -3530,7 +3546,8 @@ fn test_command(
                     dcg_version: env!("CARGO_PKG_VERSION").to_string(),
                     robot_mode,
                     command: command.to_string(),
-                    decision: "deny".to_string(),
+                    decision: if blocked { "deny" } else { "allow" }.to_string(),
+                    mode: resolved_mode.map(|mode| mode.label().to_string()),
                     rule_id,
                     pack_id,
                     pattern_name,
@@ -3555,7 +3572,7 @@ fn test_command(
             }
             TestFormat::Pretty => unreachable!("handled above"),
         }
-        return result.decision == EvaluationDecision::Deny;
+        return blocked;
     }
 
     // Pretty output (default)
@@ -3596,9 +3613,6 @@ fn test_command(
         println!("Command: {command}");
     }
     println!();
-
-    let resolved_mode =
-        crate::evaluator::resolve_decision_mode(&effective_config, command, &result);
 
     match result.decision {
         EvaluationDecision::Allow => {
@@ -3899,7 +3913,7 @@ fn test_command(
     }
 
     // Return true if the command was blocked (for exit code handling)
-    result.decision == EvaluationDecision::Deny
+    blocked
 }
 
 /// Generate a sample configuration file
@@ -5046,11 +5060,16 @@ fn handle_explain(
         },
     );
 
-    // Get enabled packs and collect keywords
-    let enabled_packs = effective_config.enabled_pack_ids();
-    let enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
-    let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
-    let keyword_index = REGISTRY.build_enabled_keyword_index(&ordered_packs);
+    // The hook's pack set, custom_paths packs included (.agent-config-zpo5q).
+    let EnabledPacks {
+        keywords: enabled_keywords,
+        ordered: ordered_packs,
+        keyword_index,
+        ..
+    } = EnabledPacks::load(
+        effective_config.enabled_pack_ids(),
+        &effective_config.packs.expand_custom_paths(),
+    );
     let heredoc_settings = effective_config.heredoc_settings();
     let compiled_overrides = effective_config.overrides.compile();
     let allowlists = crate::LayeredAllowlist::default();
@@ -5414,6 +5433,11 @@ fn run_single_corpus_test(
         }
     }
 
+    // Built-in packs only, on purpose: the corpus asserts what the built-in
+    // rules decide, which is also why it skips allowlists (it still reads the
+    // rest of the user's config). A user's custom_paths rule could flip a
+    // corpus verdict. Every surface that answers for the user's config uses
+    // `EnabledPacks::load` instead (.agent-config-zpo5q).
     let enabled_packs = effective_config.enabled_pack_ids();
     let enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
     let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
@@ -8929,9 +8953,12 @@ fn is_valid_pack_id(id: &str) -> bool {
 /// Run a quick smoke test to verify the evaluator works.
 ///
 /// Tests both an allow case and a deny case to ensure basic functionality.
-#[allow(dead_code)]
 fn run_smoke_test() -> bool {
     let config = Config::load();
+    // Built-in packs only, on purpose: `dcg doctor` asks whether the evaluator
+    // works, on two built-in commands, and a user's custom_paths rule on
+    // `git status` would turn that into a false "evaluator broken" report
+    // (.agent-config-zpo5q).
     let enabled_packs = config.enabled_pack_ids();
     let enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
     let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
@@ -11043,8 +11070,16 @@ fn dev_debug(config: &Config, command: &str, all_packs: bool) {
     println!("Command: {}", command.yellow());
     println!();
 
-    let enabled_packs = config.enabled_pack_ids();
-    let enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
+    // The hook's pack set, custom_paths packs included (.agent-config-zpo5q).
+    let EnabledPacks {
+        keywords: enabled_keywords,
+        ordered: ordered_packs,
+        external,
+        ..
+    } = EnabledPacks::load(
+        config.enabled_pack_ids(),
+        &config.packs.expand_custom_paths(),
+    );
 
     // Check keyword matching
     println!("{}", "Keyword Matching:".bold());
@@ -11070,10 +11105,9 @@ fn dev_debug(config: &Config, command: &str, all_packs: bool) {
 
     // Check each pack
     println!("{}", "Pack Evaluation:".bold());
-    let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
 
     for pack_id in &ordered_packs {
-        if let Some(pack) = REGISTRY.get(pack_id) {
+        if let Some(pack) = REGISTRY.get(pack_id).or_else(|| external.get(pack_id)) {
             // Check if pack keywords match
             let pack_matches = pack.keywords.iter().any(|k| command_lower.contains(k));
 
@@ -11343,10 +11377,15 @@ mod tests {
         let compiled_overrides = config.overrides.compile();
         let allowlists = crate::allowlist::LayeredAllowlist::default();
         let heredoc_settings = config.heredoc_settings();
-        let enabled_packs = config.enabled_pack_ids();
-        let enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
-        let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
-        let keyword_index = REGISTRY.build_enabled_keyword_index(&ordered_packs);
+        let EnabledPacks {
+            keywords: enabled_keywords,
+            ordered: ordered_packs,
+            keyword_index,
+            ..
+        } = EnabledPacks::load(
+            config.enabled_pack_ids(),
+            &config.packs.expand_custom_paths(),
+        );
 
         BatchEvalContext {
             enabled_keywords,
@@ -11373,8 +11412,7 @@ mod tests {
                     &ctx.compiled_overrides,
                     &ctx.allowlists,
                     &ctx.heredoc_settings,
-                    &crate::config::PolicyConfig::default(),
-                    &crate::config::ConfidenceConfig::default(),
+                    &Config::default(),
                     true,
                 )
             })
@@ -12940,6 +12978,7 @@ exclude = ["target/**"]
             robot_mode: false,
             command: "rm -rf /".to_string(),
             decision: "deny".to_string(),
+            mode: Some("deny".to_string()),
             rule_id: Some("core.filesystem:rm-rf-root".to_string()),
             pack_id: Some("core.filesystem".to_string()),
             pattern_name: Some("rm-rf-root".to_string()),
