@@ -2044,6 +2044,7 @@ fn run_hook_command(config: &Config, cmd: &HookCommand) -> Result<(), Box<dyn st
                         &allowlists,
                         &heredoc_settings,
                         config.policy(),
+                        &config.confidence,
                         cmd.continue_on_error,
                     )
                 })
@@ -2073,6 +2074,7 @@ fn run_hook_command(config: &Config, cmd: &HookCommand) -> Result<(), Box<dyn st
                     &allowlists,
                     &heredoc_settings,
                     config.policy(),
+                    &config.confidence,
                     cmd.continue_on_error,
                 );
                 let json = serde_json::to_string(&result)?;
@@ -2111,6 +2113,7 @@ fn run_hook_command(config: &Config, cmd: &HookCommand) -> Result<(), Box<dyn st
                 &allowlists,
                 &heredoc_settings,
                 config.policy(),
+                &config.confidence,
                 cmd.continue_on_error,
             );
             let json = serde_json::to_string(&result)?;
@@ -2133,6 +2136,7 @@ fn evaluate_batch_line(
     allowlists: &crate::allowlist::LayeredAllowlist,
     heredoc_settings: &crate::config::HeredocSettings,
     policy: &crate::config::PolicyConfig,
+    confidence: &crate::config::ConfidenceConfig,
     continue_on_error: bool,
 ) -> BatchHookOutput {
     // Skip empty lines
@@ -2189,6 +2193,7 @@ fn evaluate_batch_line(
         allowlists,
         heredoc_settings,
         policy,
+        confidence,
         None,
         None,
         None, // No deadline for batch mode
@@ -3570,6 +3575,7 @@ fn test_command(
         &allowlists,
         &heredoc_settings,
         effective_config.policy(),
+        &effective_config.confidence,
         None, // allow_once_audit
         None, // project_path
         None, // deadline
@@ -5302,6 +5308,7 @@ fn handle_explain(
         &allowlists,
         &heredoc_settings,
         effective_config.policy(),
+        &effective_config.confidence,
     );
     collector.end_step(
         "full_evaluation",
@@ -5963,6 +5970,7 @@ fn run_single_corpus_test(
         &allowlists,
         &heredoc_settings,
         effective_config.policy(),
+        &effective_config.confidence,
     );
     let duration_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
 
@@ -9672,6 +9680,7 @@ fn run_smoke_test() -> bool {
         &allowlists,
         &heredoc_settings,
         config.policy(),
+        &config.confidence,
     );
     if !allow_result.is_allowed() {
         return false;
@@ -9687,6 +9696,7 @@ fn run_smoke_test() -> bool {
         &allowlists,
         &heredoc_settings,
         config.policy(),
+        &config.confidence,
     );
     !deny_result.is_allowed()
 }
@@ -12094,6 +12104,7 @@ mod tests {
                     &ctx.allowlists,
                     &ctx.heredoc_settings,
                     &crate::config::PolicyConfig::default(),
+                    &crate::config::ConfidenceConfig::default(),
                     true,
                 )
             })

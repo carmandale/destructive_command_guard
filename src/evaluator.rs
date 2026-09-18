@@ -552,6 +552,76 @@ fn policy_denies(policy: &PolicyConfig, decision: &EvaluationResult) -> bool {
     })
 }
 
+/// Whether a denial survives confidence scoring, asked exactly as the hook asks it.
+///
+/// `[confidence]` is a SECOND downgrade channel, applied after `resolve_mode`, and
+/// [`policy_denies`] cannot see it. So this resolves the command text and its
+/// sanitized twin the one way and hands them to [`apply_confidence_scoring`], the
+/// same function main.rs calls, rather than predicting its answer a second time.
+#[must_use]
+pub fn confidence_result_for(
+    command: &str,
+    decision: &EvaluationResult,
+    mode: crate::packs::DecisionMode,
+    confidence: &crate::config::ConfidenceConfig,
+) -> ConfidenceResult {
+    let sanitized = sanitize_for_pattern_matching(command);
+    let normalized_command = crate::normalize::normalize_command(command);
+    let normalized_sanitized = crate::normalize::normalize_command(sanitized.as_ref());
+
+    let mut confidence_command = command;
+    let mut confidence_sanitized: Option<&str> = None;
+
+    if normalized_command.len() == normalized_sanitized.len() {
+        confidence_command = normalized_command.as_ref();
+        if sanitized.as_ref() != command {
+            confidence_sanitized = Some(normalized_sanitized.as_ref());
+        }
+    }
+
+    apply_confidence_scoring(
+        confidence_command,
+        confidence_sanitized,
+        decision,
+        mode,
+        confidence,
+    )
+}
+
+/// Whether this match actually stops the command, asked with BOTH questions the
+/// hook asks of it: the policy's ([`policy_denies`]) and confidence scoring's.
+///
+/// The policy's answer alone decided which match returns at once and which is
+/// held, and it is only half the hook's answer: main.rs runs
+/// `apply_confidence_scoring` after `resolve_mode` and can still downgrade that
+/// Deny to Warn. So a match the policy denies and confidence downgrades ended the
+/// scan, hid every rule after it, and was THEN downgraded -- including over a
+/// Critical rule that `protect_critical` would have refused to downgrade. With
+/// `[confidence] enabled`, a downgradable High rule in front of a Critical one
+/// warned and the command ran, where that Critical rule on its own was denied
+/// (.agent-config-dcg-confidence-downgrades-early-return-tk1gu). A downgradable
+/// deny is a non-blocking match, so it is held like one and the scan carries on.
+fn decision_blocks(
+    policy: &PolicyConfig,
+    confidence: &crate::config::ConfidenceConfig,
+    command: &str,
+    decision: &EvaluationResult,
+) -> bool {
+    if !policy_denies(policy, decision) {
+        return false;
+    }
+    if !confidence.enabled {
+        return true;
+    }
+    !confidence_result_for(
+        command,
+        decision,
+        crate::packs::DecisionMode::Deny,
+        confidence,
+    )
+    .downgraded
+}
+
 /// [`policy_denies`] for a rule before its match is judged, asked through the
 /// gave-up denial, which names the rule with the same fields a match denial does.
 fn policy_denies_rule(
@@ -1101,6 +1171,7 @@ pub fn evaluate_detailed_with_allowlists(
         allowlists,
         &heredoc_settings,
         config.policy(),
+        &config.confidence,
     );
 
     let evaluation_time_us = start.elapsed().as_micros() as u64;
@@ -1356,6 +1427,7 @@ fn evaluate_config_with_source(
         allowlists,
         &heredoc_settings,
         config.policy(),
+        &config.confidence,
         None,
         None,
         deadline,
@@ -1386,6 +1458,7 @@ pub fn evaluate_command_with_pack_order(
     allowlists: &LayeredAllowlist,
     heredoc_settings: &crate::config::HeredocSettings,
     policy: &PolicyConfig,
+    confidence: &crate::config::ConfidenceConfig,
 ) -> EvaluationResult {
     evaluate_command_with_pack_order_at_path(
         command,
@@ -1396,6 +1469,7 @@ pub fn evaluate_command_with_pack_order(
         allowlists,
         heredoc_settings,
         policy,
+        confidence,
         None,
     )
 }
@@ -1412,6 +1486,7 @@ pub fn evaluate_command_with_pack_order_at_path(
     allowlists: &LayeredAllowlist,
     heredoc_settings: &crate::config::HeredocSettings,
     policy: &PolicyConfig,
+    confidence: &crate::config::ConfidenceConfig,
     project_path: Option<&Path>,
 ) -> EvaluationResult {
     evaluate_command_with_pack_order_deadline_at_path(
@@ -1423,6 +1498,7 @@ pub fn evaluate_command_with_pack_order_at_path(
         allowlists,
         heredoc_settings,
         policy,
+        confidence,
         None,
         project_path,
         None,
@@ -1459,6 +1535,7 @@ pub fn evaluate_command_with_pack_order_deadline(
     allowlists: &LayeredAllowlist,
     heredoc_settings: &crate::config::HeredocSettings,
     policy: &PolicyConfig,
+    confidence: &crate::config::ConfidenceConfig,
     allow_once_audit: Option<&crate::pending_exceptions::AllowOnceAuditConfig<'_>>,
     deadline: Option<&Deadline>,
 ) -> EvaluationResult {
@@ -1471,6 +1548,7 @@ pub fn evaluate_command_with_pack_order_deadline(
         allowlists,
         heredoc_settings,
         policy,
+        confidence,
         allow_once_audit,
         None,
         deadline,
@@ -1493,6 +1571,7 @@ pub fn evaluate_command_with_pack_order_deadline_at_path(
     allowlists: &LayeredAllowlist,
     heredoc_settings: &crate::config::HeredocSettings,
     policy: &PolicyConfig,
+    confidence: &crate::config::ConfidenceConfig,
     allow_once_audit: Option<&crate::pending_exceptions::AllowOnceAuditConfig<'_>>,
     project_path: Option<&Path>,
     deadline: Option<&Deadline>,
@@ -1507,6 +1586,7 @@ pub fn evaluate_command_with_pack_order_deadline_at_path(
         allowlists,
         heredoc_settings,
         policy,
+        confidence,
         allow_once_audit,
         project_path,
         deadline,
@@ -1526,6 +1606,7 @@ fn evaluate_at_path_impl(
     allowlists: &LayeredAllowlist,
     heredoc_settings: &crate::config::HeredocSettings,
     policy: &PolicyConfig,
+    confidence: &crate::config::ConfidenceConfig,
     allow_once_audit: Option<&crate::pending_exceptions::AllowOnceAuditConfig<'_>>,
     project_path: Option<&Path>,
     deadline: Option<&Deadline>,
@@ -1598,6 +1679,7 @@ fn evaluate_at_path_impl(
                     keyword_index,
                     compiled_overrides,
                     policy,
+                    confidence,
                     allow_once_audit,
                 };
                 if let Some(blocked) =
@@ -1676,6 +1758,7 @@ fn evaluate_at_path_impl(
         allowlists,
         keyword_index,
         policy,
+        confidence,
         // The clock, not `None`. Every budget check inside pack evaluation --
         // the per-pack one, the per-pattern one, and the resume loop's -- reads
         // this argument, and this call site passed `None`, so on the path the
@@ -1723,6 +1806,7 @@ fn evaluate_packs_with_allowlists(
     allowlists: &LayeredAllowlist,
     keyword_index: Option<&crate::packs::EnabledKeywordIndex>,
     policy: &PolicyConfig,
+    confidence: &crate::config::ConfidenceConfig,
     deadline: Option<&Deadline>,
     project_path: Option<&Path>,
 ) -> EvaluationResult {
@@ -1925,7 +2009,7 @@ fn evaluate_packs_with_allowlists(
                         )
                     };
 
-                    if policy_denies(policy, &decision) {
+                    if decision_blocks(policy, confidence, original_command, &decision) {
                         return decision;
                     }
                     if pending_non_blocking.is_none() {
@@ -2150,7 +2234,7 @@ fn evaluate_packs_with_allowlists(
                     )
                 };
 
-                let denies = policy_denies(policy, &decision);
+                let denies = decision_blocks(policy, confidence, original_command, &decision);
                 if past_exemption {
                     hold_first_blocking(&mut found_past_exemption, decision, denies);
                     continue;
@@ -2181,7 +2265,7 @@ fn evaluate_packs_with_allowlists(
             };
 
             if past_exemption {
-                let denies = policy_denies(policy, &decision);
+                let denies = decision_blocks(policy, confidence, original_command, &decision);
                 hold_first_blocking(&mut found_past_exemption, decision, denies);
                 continue;
             }
@@ -2325,6 +2409,7 @@ where
                 keyword_index: keyword_index.as_ref(),
                 compiled_overrides,
                 policy: config.policy(),
+                confidence: &config.confidence,
                 allow_once_audit: None,
             };
             if let Some(blocked) = evaluate_heredoc(command, context, &mut heredoc_allowlist_hit) {
@@ -2401,6 +2486,7 @@ where
         allowlists,
         keyword_index.as_ref(),
         config.policy(),
+        &config.confidence,
         None,
         None, // project_path: legacy function, path-aware allowlisting unavailable
     );
@@ -2433,6 +2519,7 @@ struct HeredocEvaluationContext<'a> {
     keyword_index: Option<&'a crate::packs::EnabledKeywordIndex>,
     compiled_overrides: &'a crate::config::CompiledOverrides,
     policy: &'a PolicyConfig,
+    confidence: &'a crate::config::ConfidenceConfig,
     allow_once_audit: Option<&'a crate::pending_exceptions::AllowOnceAuditConfig<'a>>,
 }
 
@@ -2685,6 +2772,7 @@ fn evaluate_heredoc(
                     context.allowlists,
                     context.heredoc_settings,
                     context.policy,
+                    context.confidence,
                     context.allow_once_audit,
                     context.project_path,
                     context.deadline,
@@ -4189,6 +4277,7 @@ mod tests {
                 &allowlists,
                 &heredoc_settings,
                 &PolicyConfig::default(),
+                &crate::config::ConfidenceConfig::default(),
                 None,
                 Some(&deadline),
             );
@@ -4226,6 +4315,7 @@ mod tests {
                 &allowlists,
                 &heredoc_settings,
                 &PolicyConfig::default(),
+                &crate::config::ConfidenceConfig::default(),
                 None,
                 Some(&deadline),
             );
@@ -4260,6 +4350,7 @@ mod tests {
                 &allowlists,
                 &heredoc_settings,
                 &PolicyConfig::default(),
+                &crate::config::ConfidenceConfig::default(),
                 None,
                 None, // No deadline
             );
@@ -4297,6 +4388,7 @@ mod tests {
                 &allowlists,
                 &heredoc_settings,
                 &PolicyConfig::default(),
+                &crate::config::ConfidenceConfig::default(),
                 None,
                 Some(&deadline),
             );

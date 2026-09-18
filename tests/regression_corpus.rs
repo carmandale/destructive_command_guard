@@ -364,6 +364,7 @@ fn keyword_index_matches_legacy_might_match_on_regression_corpus() {
                 &allowlists,
                 &heredoc_settings,
                 config.policy(),
+                &config.confidence,
             ),
         );
         let legacy = EvalSnapshot::from_result(
@@ -377,6 +378,7 @@ fn keyword_index_matches_legacy_might_match_on_regression_corpus() {
                 &allowlists,
                 &heredoc_settings,
                 config.policy(),
+                &config.confidence,
             ),
         );
 
@@ -448,6 +450,7 @@ fn keyword_quick_reject_empty_keywords_is_conservative_end_to_end() {
             &allowlists,
             &heredoc_settings,
             config.policy(),
+            &config.confidence,
         );
         let legacy = evaluate_command_with_pack_order(
             command,
@@ -458,6 +461,7 @@ fn keyword_quick_reject_empty_keywords_is_conservative_end_to_end() {
             &allowlists,
             &heredoc_settings,
             config.policy(),
+            &config.confidence,
         );
 
         assert_eq!(

@@ -60,6 +60,7 @@ fn denying_rule(command: &str) -> Option<String> {
         &allowlists,
         &heredoc,
         config.policy(),
+        &config.confidence,
     );
 
     if !result.is_denied() {

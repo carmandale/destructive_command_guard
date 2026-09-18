@@ -57,6 +57,7 @@ fn is_denied(command: &str) -> bool {
         &allowlists,
         &heredoc,
         config.policy(),
+        &config.confidence,
     )
     .is_denied()
 }

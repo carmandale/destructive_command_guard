@@ -371,6 +371,7 @@ pub fn evaluate_extracted_command(
         &ctx.allowlists,
         &ctx.heredoc_settings,
         config.policy(),
+        &config.confidence,
         project_path.as_deref(),
     );
 

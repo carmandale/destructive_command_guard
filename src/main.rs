@@ -32,6 +32,7 @@ use destructive_command_guard::history::{
 };
 use destructive_command_guard::hook;
 use destructive_command_guard::load_default_allowlists;
+#[cfg(test)]
 use destructive_command_guard::normalize::normalize_command;
 use destructive_command_guard::packs::load_external_packs;
 #[cfg(test)]
@@ -39,7 +40,6 @@ use destructive_command_guard::packs::pack_aware_quick_reject;
 use destructive_command_guard::packs::{DecisionMode, REGISTRY};
 use destructive_command_guard::pending_exceptions::{PendingExceptionStore, log_maintenance};
 use destructive_command_guard::perf::{Deadline, HOOK_EVALUATION_BUDGET};
-use destructive_command_guard::sanitize_for_pattern_matching;
 // Import HookInput for parsing stdin JSON in hook mode
 #[cfg(test)]
 use destructive_command_guard::hook::HookInput;
@@ -599,6 +599,7 @@ fn main() {
         &allowlists,
         &heredoc_settings,
         config.policy(),
+        &config.confidence,
         None, // allow_once_audit
         None, // project_path
         Some(&deadline),
@@ -694,23 +695,11 @@ fn main() {
     // Apply confidence scoring (if enabled) to potentially downgrade Deny to Warn.
     // Only applies to pack/heredoc matches, not config overrides.
     if matches!(info.source, MatchSource::Pack | MatchSource::HeredocAst) {
-        let sanitized = sanitize_for_pattern_matching(&command);
-        let normalized_command = normalize_command(&command);
-        let normalized_sanitized = normalize_command(sanitized.as_ref());
-
-        let mut confidence_command = command.as_str();
-        let mut confidence_sanitized: Option<&str> = None;
-
-        if normalized_command.len() == normalized_sanitized.len() {
-            confidence_command = normalized_command.as_ref();
-            if sanitized.as_ref() != command {
-                confidence_sanitized = Some(normalized_sanitized.as_ref());
-            }
-        }
-
-        let confidence_result = destructive_command_guard::apply_confidence_scoring(
-            confidence_command,
-            confidence_sanitized,
+        // Asked through the evaluator's own helper, so the question it asked
+        // before returning this match and the answer applied here are one
+        // computation (.agent-config-dcg-confidence-downgrades-early-return-tk1gu).
+        let confidence_result = destructive_command_guard::evaluator::confidence_result_for(
+            &command,
             &result,
             mode,
             &config.confidence,

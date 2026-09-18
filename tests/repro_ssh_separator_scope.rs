@@ -77,6 +77,7 @@ fn evaluate(command: &str) -> destructive_command_guard::evaluator::EvaluationRe
         &allowlists,
         &heredoc,
         config.policy(),
+        &config.confidence,
     )
 }
 

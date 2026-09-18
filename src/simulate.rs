@@ -833,6 +833,7 @@ where
             &allowlists,
             &heredoc_settings,
             config.policy(),
+            &config.confidence,
         );
         aggregator.record(&cmd.command, cmd.line_number, &result);
     }

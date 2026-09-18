@@ -163,6 +163,7 @@ fn build_hook_inputs(config: &Config) -> HookBenchInputs {
         compiled_overrides,
         heredoc_settings,
         policy: config.policy().clone(),
+        confidence: config.confidence.clone(),
     }
 }
 
@@ -173,6 +174,7 @@ struct HookBenchInputs {
     compiled_overrides: destructive_command_guard::config::CompiledOverrides,
     heredoc_settings: destructive_command_guard::config::HeredocSettings,
     policy: destructive_command_guard::config::PolicyConfig,
+    confidence: destructive_command_guard::config::ConfidenceConfig,
 }
 
 fn bench_pack_aware_quick_reject(c: &mut Criterion) {
@@ -291,6 +293,7 @@ fn bench_core_pipeline(c: &mut Criterion) {
                         black_box(&allowlists),
                         black_box(&core_inputs.heredoc_settings),
                         black_box(&core_inputs.policy),
+                        black_box(&core_inputs.confidence),
                     );
                     black_box(result);
                 });
@@ -317,6 +320,7 @@ fn bench_core_pipeline(c: &mut Criterion) {
                         black_box(&allowlists),
                         black_box(&docker_inputs.heredoc_settings),
                         black_box(&docker_inputs.policy),
+                        black_box(&docker_inputs.confidence),
                     );
                     black_box(result);
                 });
@@ -344,6 +348,7 @@ fn bench_core_pipeline(c: &mut Criterion) {
                         black_box(&allowlists),
                         black_box(&worst_inputs.heredoc_settings),
                         black_box(&worst_inputs.policy),
+                        black_box(&worst_inputs.confidence),
                     );
                     black_box(result);
                 });
@@ -515,6 +520,7 @@ fn bench_full_pipeline(c: &mut Criterion) {
                         black_box(&allowlists),
                         black_box(&hook_inputs.heredoc_settings),
                         black_box(&hook_inputs.policy),
+                        black_box(&hook_inputs.confidence),
                     )
                 });
             },

@@ -51,6 +51,7 @@ fn denying_rule_with(packs: &[&str], command: &str) -> Option<String> {
         &allowlists,
         &heredoc,
         config.policy(),
+        &config.confidence,
     );
 
     if !result.is_denied() {
