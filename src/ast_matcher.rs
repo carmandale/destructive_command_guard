@@ -487,9 +487,86 @@ static JS_ARRAY_STRING_LITERALS: LazyLock<Regex> = LazyLock::new(|| {
 
 static JS_FIRST_STRING_ARG: LazyLock<Regex> = LazyLock::new(|| {
     // Captures the first string literal argument in a call expression.
+    //
+    // Reads from the FIRST open paren in the match, so it is only correct when
+    // the call the rule matched is the first call in the text. It stays as the
+    // fallback for a match whose call cannot be located; `js_call_arguments`
+    // is the reader for everything else (`.agent-config-rmxds`).
     Regex::new(r#"(?m)\(\s*(?:"(?P<dq>[^"\n]*)"|'(?P<sq>[^'\n]*)')"#)
         .expect("js first string arg regex compiles")
 });
+
+/// The member a call pattern names: `$M.rmSync($$$)` and `rmSync($$$)` both
+/// give `rmSync`, `Deno.remove($$$)` gives `remove`.
+///
+/// Derived from the pattern the rule is compiled from, never from a rule_id ->
+/// member table: a table is a second source that has to be edited in step with
+/// `default_patterns`, and the one that drifts is the one nobody reads
+/// (`.claude/rules/structural-coupling.md`).
+fn pattern_member(pattern_str: &str) -> Option<&str> {
+    let head = pattern_str.split('(').next()?;
+    let member = head.rsplit('.').next()?.trim();
+    (!member.is_empty()
+        && member
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_'))
+    .then_some(member)
+}
+
+/// The argument text of the `member(..)` call inside `matched_text`, starting
+/// just after its open paren.
+///
+/// The point is what it EXCLUDES. A receiver can carry a string literal of its
+/// own -- `require("fs").rmSync("/etc", {recursive: true})` -- and a reader
+/// that starts at the first open paren judges `"fs"` as the target path,
+/// answers "not catastrophic", and lets the call through. Measured
+/// 2026-09-19: that spelling allowed while the `fs.rmSync` spelling denied
+/// (`.agent-config-rmxds`).
+///
+/// Deliberately still LOOSE inside the argument list: the caller takes the
+/// first string literal anywhere in it, so `fs.rmSync(path.join("/etc", "x"),
+/// {recursive: true})` keeps denying. Narrowing to "the literal must be the
+/// first argument" would turn this fix into a weakening; the mutant runner
+/// pins that.
+fn js_call_arguments<'t>(matched_text: &'t str, member: &str) -> Option<&'t str> {
+    let bytes = matched_text.as_bytes();
+    let mut from = 0usize;
+    while let Some(offset) = matched_text.get(from..)?.find(member) {
+        let start = from + offset;
+        let end = start + member.len();
+        let after_word_char = start > 0
+            && (bytes[start - 1].is_ascii_alphanumeric()
+                || bytes[start - 1] == b'_'
+                || bytes[start - 1] == b'$');
+        let rest = matched_text.get(end..)?.trim_start();
+        // A trailing `(` is also the boundary on the right: `rmSyncLater(`
+        // leaves `Later(` here, which is not a call to `rmSync`.
+        if !after_word_char && rest.starts_with('(') {
+            let open = matched_text.len() - rest.len();
+            return matched_text.get(open + 1..);
+        }
+        from = end;
+    }
+    None
+}
+
+/// The literal target path a `heredoc.*.fs_*` / `fspromises_*` / `deno_remove`
+/// match is about, or `None` when the call takes no string literal.
+fn js_literal_target<'t>(meta: &CompiledPattern, matched_text: &'t str) -> Option<&'t str> {
+    match pattern_member(&meta.pattern_str)
+        .and_then(|member| js_call_arguments(matched_text, member))
+    {
+        Some(arguments) => JS_ARRAY_STRING_LITERALS
+            .captures(arguments)
+            .and_then(|caps| string_literal_from_caps(&caps)),
+        // The call could not be located in its own match. Read the whole text,
+        // exactly as this did before: a wrong path here is a false DENY, and
+        // the old reader's failure mode was a false ALLOW.
+        None => JS_FIRST_STRING_ARG
+            .captures(matched_text)
+            .and_then(|caps| string_literal_from_caps(&caps)),
+    }
+}
 
 static RUBY_SYSTEM_EXEC_LITERAL: LazyLock<Regex> = LazyLock::new(|| {
     // Matches:
@@ -593,9 +670,7 @@ fn refine_javascript_match(meta: &CompiledPattern, matched_text: &str) -> Option
     if rule_id.starts_with("heredoc.javascript.fs_")
         || rule_id.starts_with("heredoc.javascript.fspromises_")
     {
-        let path = JS_FIRST_STRING_ARG
-            .captures(matched_text)
-            .and_then(|caps| string_literal_from_caps(&caps));
+        let path = js_literal_target(meta, matched_text);
 
         let recursive_relevant = JS_RECURSIVE_TRUE.is_match(matched_text);
         let catastrophic = path.is_some_and(is_catastrophic_path);
@@ -701,9 +776,7 @@ fn refine_typescript_match(meta: &CompiledPattern, matched_text: &str) -> Option
         || rule_id.starts_with("heredoc.typescript.fspromises_")
         || rule_id == "heredoc.typescript.deno_remove"
     {
-        let path = JS_FIRST_STRING_ARG
-            .captures(matched_text)
-            .and_then(|caps| string_literal_from_caps(&caps));
+        let path = js_literal_target(meta, matched_text);
 
         let recursive_relevant = JS_RECURSIVE_TRUE.is_match(matched_text);
         let catastrophic = path.is_some_and(is_catastrophic_path);
@@ -1625,14 +1698,15 @@ fn gate_admits<D: Doc>(
             // the deny named would still deny under the other
             // (`.agent-config-w9pvb` review round 1).
             //
-            // An INLINE `require("fs").rmSync(..)` is deliberately not
-            // admitted here. Measured 2026-09-18: the receiver is resolvable,
-            // but the payload refinement below reads the FIRST string literal
-            // in the matched text as the target path, which for that spelling
-            // is `"fs"` -- so the match refines to medium and the hook skips
-            // it. Admitting it would add a code path that changes no verdict.
-            // The refinement defect is `.agent-config-rmxds`; when it is
-            // fixed, this is one `require_module_from_text(text)` line.
+            // An inline `require("fs")` names its module outright, so it is
+            // read first: it cannot also be a local binding. It was held back
+            // when this gate landed because the payload refinement then read
+            // the receiver's own `"fs"` as the target path and the match
+            // refined to medium either way; `js_literal_target` fixed that
+            // (`.agent-config-rmxds`), so this line is now load-bearing.
+            if let Some(required) = require_module_from_text(text) {
+                return required == module;
+            }
             if let Some(bound) = bindings.receivers.get(text) {
                 return bound == module;
             }

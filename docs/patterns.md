@@ -221,7 +221,10 @@ Some patterns refine their rule IDs based on detected arguments:
 
 - For JavaScript/TypeScript `fs.*` and `fsPromises.*` patterns, a literal
   catastrophic path appends `.catastrophic` to the rule ID
-  (example: `heredoc.javascript.fs_rmsync.catastrophic`).
+  (example: `heredoc.javascript.fs_rmsync.catastrophic`). The literal is read
+  from the argument list of the call the rule matched -- located by the member
+  the PATTERN names, so there is no rule-ID-to-member table to drift -- and not
+  from the first string in the matched text (`.agent-config-rmxds`).
 - For TypeScript `deno_remove`, a catastrophic path appends `.catastrophic`.
 - For Ruby `FileUtils`/`File`/`Dir` patterns, catastrophic paths append
   `.catastrophic`.
@@ -248,10 +251,12 @@ All derived rule IDs are valid allowlist targets.
   (`fs?.rmSync`, `fs["rmSync"]`) and `import fs = require("fs")` are NOT read.
   Catching them needs a pattern compiled per body, which the hook budget does
   not allow (`.agent-config-artmu`).
-- An inline `require("fs").rmSync(..)` resolves as a receiver but still does
-  not deny: the payload refinement reads the first string literal in the match
-  as the target path, and for that spelling it is `"fs"`
-  (`.agent-config-rmxds`).
+- An inline `require("fs").rmSync(..)` resolves as a receiver and denies: the
+  payload refinement reads the first string literal inside the argument list of
+  the call the rule matched, so a receiver's own string is not judged as the
+  target path (`.agent-config-rmxds`). Inside that argument list the reader is
+  deliberately loose, so `fs.rmSync(path.join("/etc","x"), {recursive:true})`
+  still denies.
 - The fallback regex sweep in `src/evaluator.rs` reads only text the extractor
   says went unread, has no AST and therefore no imports to resolve an alias
   against. It matches the distinctive bare call shapes (`rmtree(`, `rmSync(`,

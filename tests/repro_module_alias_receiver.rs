@@ -39,9 +39,7 @@
 //! the member the pattern spells (`from shutil import rmtree as rt; rt(..)`,
 //! `const { rmSync: r } = require("fs")`), a receiver that is itself an
 //! expression (`fs.promises.rm(..)`), a computed or optional member
-//! (`fs?.rmSync`, `fs["rmSync"]`), `import fs = require("fs")`, and an inline
-//! `require("fs").rmSync(..)` whose target the payload refinement misreads
-//! (`.agent-config-rmxds`). Catching
+//! (`fs?.rmSync`, `fs["rmSync"]`), and `import fs = require("fs")`. Catching
 //! those needs a pattern compiled per body, which the hook budget does not
 //! have. An UNTERMINATED body is read only by the fallback regex sweep, which
 //! names receivers too; that is this bead's second half and is pinned by
@@ -281,14 +279,16 @@ fn an_aliased_fs_module_denies() {
 }
 
 #[test]
-fn an_inline_require_is_recorded_as_unread_not_claimed() {
-    // NOT a fix, and not a gate failure: the receiver `require('fs')` IS
-    // resolvable, but the payload refinement reads the FIRST string literal in
-    // the matched text as the target path, which for this spelling is `'fs'`.
-    // Admitting it in the gate would add a code path that changes no verdict.
-    // Measured 2026-09-18 and filed as `.agent-config-rmxds`; this row is the
-    // record, and it flips to a deny the moment that bead lands.
-    assert_allowed(&node("require('fs').rmSync('/etc', { recursive: true });"));
+fn an_inline_require_rm_sync_denies() {
+    // This row was `assert_allowed` when this file landed, with a comment
+    // saying it flips the moment `.agent-config-rmxds` does. It has: the
+    // receiver was always resolvable, and the payload refinement now reads the
+    // argument of the call the rule matched instead of the first string in the
+    // text, so `'fs'` is no longer judged as the target path.
+    assert_denied_by(
+        &node("require('fs').rmSync('/etc', { recursive: true });"),
+        JS_RMSYNC,
+    );
 }
 
 #[test]
