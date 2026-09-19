@@ -2176,6 +2176,76 @@ fn operator_line_start(command: &str, heredoc_start: usize) -> usize {
         .map_or(0, |i| i + 1)
 }
 
+/// The git subcommands that take a MESSAGE, and can take it on stdin.
+///
+/// Deliberately three. `git` as a word is not a data sink -- the question is
+/// always which spelling -- and these are the ones this fleet writes: `commit`,
+/// `tag -a`, and `notes add`.
+const GIT_MESSAGE_SUBCOMMANDS: &[&str] = &["commit", "tag", "notes"];
+
+/// Does the receiver read this body as a MESSAGE rather than as code?
+///
+/// `git commit -F -` hands stdin to git's message path: the body is stored in
+/// the object database and never executed. `is_non_executing_heredoc_command`
+/// cannot answer that, because the receiver WORD is `git`, and putting `git`
+/// in the data-sink list would claim every subcommand at once. Only the stdin
+/// message spellings are a sink, so only they are asked for here
+/// (`.agent-config-dcg-git-commit-f-stdin-heredoc-fp-2kp4c`: an agent's own
+/// commit message was denied by `core.filesystem:rm-rf-general` for describing
+/// a recursive delete).
+///
+/// This is the receiver clause of the veto set, not a fifth veto: a body that
+/// reaches an executor some other way (`git commit -F - <<'EOF' ... | bash`)
+/// is still judged, because the four vetoes below it still run.
+///
+/// Reuses `operator_line_start` and `tokenize_backwards` -- the same line
+/// bound and the same tokenizer `extract_heredoc_target_command` resolves the
+/// receiver with -- so there is no second reading of the receiver's words.
+fn receiver_reads_stdin_as_a_message(command: &str, heredoc_start: usize) -> bool {
+    let line_start = operator_line_start(command, heredoc_start);
+    let Some(before) = command.get(line_start..heredoc_start) else {
+        return false;
+    };
+    let tokens = tokenize_backwards(before.trim_end());
+    let ordered: Vec<&str> = tokens.iter().rev().map(String::as_str).collect();
+
+    // `/usr/bin/git`, and `sudo git` alike: the name is the last path segment.
+    let Some(git_at) = ordered
+        .iter()
+        .position(|t| t.rsplit('/').next() == Some("git"))
+    else {
+        return false;
+    };
+    let rest = &ordered[git_at + 1..];
+
+    // The SUBCOMMAND is the first word that is not a global option, and
+    // `-C <dir>`, `-c k=v` and friends take a value that is not one either.
+    // `crate::context::git_global_option_takes_value` is where this repository
+    // already knows which ones do (`.agent-config-5cw2y`); asking it here is
+    // what keeps the two readers of git's grammar from drifting apart.
+    let mut expect_value = false;
+    let subcommand = rest.iter().find(|t| {
+        if expect_value {
+            expect_value = false;
+            return false;
+        }
+        if t.starts_with('-') {
+            expect_value = crate::context::git_global_option_takes_value(t);
+            return false;
+        }
+        true
+    });
+    if !subcommand.is_some_and(|s| GIT_MESSAGE_SUBCOMMANDS.contains(&s.trim_matches(['\'', '"']))) {
+        return false;
+    }
+
+    // `-F -`, `--file -`, `--file=-`, `-F-`: every spelling git's parse-options
+    // accepts for "the message is on stdin".
+    rest.windows(2)
+        .any(|w| matches!(w[0], "-F" | "--file") && w[1] == "-")
+        || rest.iter().any(|t| matches!(*t, "--file=-" | "-F-"))
+}
+
 /// Extract the command that receives a heredoc or here-string.
 ///
 /// Looks backwards from the heredoc operator position to find the command word.
@@ -3775,7 +3845,8 @@ pub fn heredoc_body_is_inert(
     // a pipe on the heredoc's line, a pipe on the enclosing compound's line, a
     // substitution splicing the body into a command that runs its argument, and
     // a redirection writing it into a file whose extension says it will be run.
-    target_command.is_some_and(is_non_executing_heredoc_command)
+    (target_command.is_some_and(is_non_executing_heredoc_command)
+        || receiver_reads_stdin_as_a_message(command, heredoc_start))
         && !heredoc_output_reaches_executor(command, heredoc_start)
         && !compound_output_reaches_executor(command, body_end)
         && !heredoc_substitution_result_is_executed(command, heredoc_start)
@@ -6067,31 +6138,41 @@ fi"#;
         );
     }
 
-    /// #136 data-sink half, AS SHIPPED. Upstream `76b2a57` masks the body of
+    /// #136 data-sink half, AS SHIPPED — and the deliberate act the previous
+    /// version of this test asked for. Upstream `76b2a57` masks the body of
     /// `git commit -F -` / `--file=-` / `git hash-object --stdin`, on the
     /// grounds that git reads stdin as a commit message or object content and
-    /// never executes it. THIS BUILD DELIBERATELY DOES NOT CARRY THAT FEATURE.
-    /// Spec 333's `u06z-build-recipe.md` rejects both `|| is_git_stdin_data_sink(…)`
-    /// call sites on purpose — "that feature **widens** allow, so excluding it
-    /// keeps this candidate strictly narrower than upstream". `d45752f` landed
-    /// the definition unused; the merge `e57d922` dropped even that. `git` is
-    /// not in `NON_EXECUTING_HEREDOC_COMMANDS`, so a `git …` receiver is an
-    /// unknown command and its body stays visible to the matcher.
+    /// never executes it. Spec 333's `u06z-build-recipe.md` rejected both
+    /// `|| is_git_stdin_data_sink(…)` call sites, and said why: hand-porting
+    /// hunks that would not cherry-pick "would be writing new code", and the
+    /// omitted feature "**widens** allow, so excluding it makes B strictly
+    /// narrower than v0.5.7". That was a scoping decision for a measurement
+    /// candidate, not a verdict that the shape is code.
     ///
-    /// The TEST did not go with the feature. It asserted masking, so it failed
-    /// on main from `e57d922` onward and was read as a delimiter-quoting
-    /// problem (`.agent-config-3kpp5`). Quoting the delimiters is necessary and
-    /// not sufficient: on a `git` receiver masking never happens at all. This
-    /// pins the shipped contract instead, so re-adding the feature is a
-    /// deliberate act that turns this red — not a silent widening of allow.
-    /// Formerly `mask_git_stdin_data_sink_136`.
+    /// The spec then met the shape itself. Its own receipt calls
+    /// `git commit -F - <<'MSG'` with `rm -rf` in the message "the purest
+    /// specimen of the whole spec: it blocked this receipt's own commit", and
+    /// names `is_git_stdin_data_sink` as what upstream wrote to fix it. Two
+    /// beads filed it again from real use
+    /// (`.agent-config-dcg-git-commit-f-stdin-heredoc-fp-2kp4c`,
+    /// `.agent-config-dcg-captured-commit-message-fp-8dczm`).
+    ///
+    /// So the MESSAGE sinks now mask, and this test pins the new contract from
+    /// both sides. It stays narrower than upstream: `receiver_reads_stdin_as_a_message`
+    /// asks for a message subcommand AND a stdin spelling, so
+    /// `git hash-object --stdin` and a bare `git commit` are still unknown
+    /// receivers whose bodies the matcher reads.
+    /// Formerly `mask_git_stdin_data_sink_136`, then
+    /// `git_stdin_data_sink_136_is_deliberately_not_masked`.
     #[test]
-    fn git_stdin_data_sink_136_is_deliberately_not_masked() {
+    fn git_stdin_message_sinks_mask_and_the_rest_of_git_does_not() {
         let reset_hard = format!("{}{}", "reset --", "hard");
 
         // Every delimiter here is QUOTED on purpose. With `<<EOF` the spec 333 /
         // `.agent-config-u06z` gate declines to mask for the delimiter's sake,
         // and each row below would hold without saying anything about `git`.
+        //
+        // A message read on stdin is stored, never run, so it masks.
         for (cmd, shape) in [
             (
                 format!("git commit -F - <<'EOF'\ndocs: {reset_hard} notes\nEOF"),
@@ -6101,9 +6182,22 @@ fi"#;
                 format!("git commit --file=- <<'EOF'\ndocs: {reset_hard} notes\nEOF"),
                 "--file=- (glued form)",
             ),
+        ] {
+            let m = mask_non_executing_heredocs(&cmd);
+            assert!(
+                !m.contains(&reset_hard),
+                "a git message read on stdin is data, so the body must be masked \
+                 [{shape}]: {m:?}"
+            );
+        }
+
+        // The rest of `git` is still an unknown receiver. These two are what
+        // keeps this build narrower than upstream's `is_git_stdin_data_sink`,
+        // which masks object content too.
+        for (cmd, shape) in [
             (
                 format!("git hash-object --stdin <<'EOF'\ngit {reset_hard} .\nEOF"),
-                "--stdin (object content)",
+                "--stdin (object content, not a message)",
             ),
             (
                 format!("git commit <<'EOF'\n{reset_hard}\nEOF"),
@@ -6113,8 +6207,8 @@ fi"#;
             let m = mask_non_executing_heredocs(&cmd);
             assert!(
                 m.contains(&reset_hard),
-                "a `git` heredoc receiver is not a data sink in this build, so the \
-                 body must stay visible to the matcher [{shape}]: {m:?}"
+                "only the message spellings are a sink, so this body must stay \
+                 visible to the matcher [{shape}]: {m:?}"
             );
         }
 

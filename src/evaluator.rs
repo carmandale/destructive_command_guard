@@ -2791,6 +2791,22 @@ fn evaluate_heredoc(
     // nested entry must still be judged. That is the `| bash` control in
     // tests/repro_heredoc_nested_operator_in_prose.rs.
     //
+    // Keyed on where the nested operator STARTS, not on containing it whole.
+    // A quoted here-string stays inside the body it is written in, which is why
+    // whole-range containment held for `.agent-config-v5f37`. A quoted HEREDOC
+    // does not: `find_heredoc_terminator` gives its body the first line equal to
+    // its delimiter, and prose quoting `<<'EOF'` inside a body that ITSELF ends
+    // at `EOF` gets the enclosing terminator. Measured on the real commit
+    // message of dcg 71b04bbd: the nested entry is 245..1092 while the body that
+    // encloses its operator is 18..1088, so `end <= span.end` was false by four
+    // bytes and a commit message denied by `core.filesystem:rm-rf-general`
+    // (`.agent-config-dcg-captured-commit-message-fp-8dczm`). An operator spelled
+    // inside data is prose wherever dcg then thinks its body ends.
+    //
+    // Nothing real is lost by the wider key: text after the enclosing
+    // terminator is a live command line that the pack scan reads on its own,
+    // and the fallback sweep still reads whatever this skip left unjudged.
+    //
     // Reuses `heredoc_body_is_inert` rather than asking a new question, so the
     // veto set keeps the single reader `.agent-config-c29fn` gave it.
     let inert_body_spans: Vec<(usize, std::ops::Range<usize>)> = contents
@@ -2824,7 +2840,7 @@ fn evaluate_heredoc(
         if inert_body_spans.iter().any(|(owner, span)| {
             *owner != index
                 && span.start <= content.byte_range.start
-                && content.byte_range.end <= span.end
+                && content.byte_range.start < span.end
         }) {
             tracing::trace!(
                 target_command = ?content.target_command,

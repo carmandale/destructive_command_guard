@@ -44,6 +44,20 @@
 //!   rule and denies first. That single row is the whole earned keep of the
 //!   `heredoc_body_is_inert` call, so do not delete it as a duplicate of its
 //!   neighbours -- it is the only one that is not.
+//!
+//! Reopened 2026-09-19 by `.agent-config-dcg-captured-commit-message-fp-8dczm`:
+//! the same defect, one spelling further on. v5f37 skipped a nested entry only
+//! when the enclosing inert body CONTAINED it whole, which a quoted here-string
+//! always is. A quoted HEREDOC is not: its body ends at the first line equal to
+//! its delimiter, so prose quoting `<<'EOF'` inside a message that itself ends
+//! at `EOF` yields an entry running four bytes past the body that encloses its
+//! operator (measured 245..1092 against 18..1088 on a real commit message).
+//! The skip is now keyed on where the operator STARTS, and the two rows named
+//! below are the ones that were red for it:
+//! `a_nested_operator_whose_delimiter_matches_the_enclosing_one_is_prose` and
+//! `the_matching_delimiter_case_through_a_command_substitution`.
+//! `a_command_after_the_enclosing_terminator_is_still_judged` is the fail-open
+//! control the widening earns.
 
 use destructive_command_guard::heredoc::mask_non_executing_heredocs;
 use destructive_command_guard::{Config, LayeredAllowlist, evaluate_command, packs::REGISTRY};
@@ -155,9 +169,52 @@ fn a_nested_heredoc_operator_is_the_same_case_as_a_nested_here_string() {
     // Kept as a control, not as proof: the two operators have separate
     // extractors, and if `extract_heredocs` ever learns to recover an
     // unterminated body this row is where that shows up as a new denial.
+    //
+    // "prose never spells the closing delimiter" is true only while the quoted
+    // delimiter DIFFERS from the enclosing one. The next two rows are where it
+    // is false, and they were red (`.agent-config-dcg-captured-commit-message-fp-8dczm`).
     let quoted = format!("run `cat <<'INNER' | bash` with {TRIGGER} in the body");
     let cmd = format!("cat <<'EOF'\n{quoted}\nEOF");
     assert_allowed(&cmd, "the inner << is quoted inside data");
+}
+
+/// A quoted delimiter that MATCHES the enclosing one is closed by the
+/// enclosing terminator, so the second content really is produced -- and it
+/// runs PAST the body that encloses its operator. Both delimiters are `EOF`
+/// in almost every message this fleet writes, so this is the common spelling,
+/// not the exotic one. RED before the fix: DENY.
+#[test]
+fn a_nested_operator_whose_delimiter_matches_the_enclosing_one_is_prose() {
+    let body = format!("the walk reads `cat <<'EOF' | bash` as a pipeline\n{TRIGGER}\n${{..}}");
+    let cmd = format!("MSG=$(cat <<'EOF'\n{body}\nEOF\n) && git commit -q -m \"$MSG\" -- f.rs");
+    assert_allowed(&cmd, "the message is stored, and its operator is prose");
+}
+
+/// The same shape written the way `.agent-config-v5f37` found it: the message
+/// arrives through a command substitution rather than a variable. RED before
+/// the fix: DENY.
+#[test]
+fn the_matching_delimiter_case_through_a_command_substitution() {
+    let body = format!("the walk reads `cat <<'EOF' | bash` as a pipeline\n{TRIGGER}\n${{..}}");
+    let cmd = format!("git commit -q -m \"$(cat <<'EOF'\n{body}\nEOF\n)\" -- f.rs");
+    assert_allowed(&cmd, "same nesting, the substitution spelling");
+}
+
+/// The widened key is "the operator STARTS inside inert data", so a reader has
+/// to ask what happens to text AFTER the enclosing terminator. It is a live
+/// command line, the pack scan reads it directly, and it still denies. This is
+/// the fail-open control for that widening.
+#[test]
+fn a_command_after_the_enclosing_terminator_is_still_judged() {
+    let cmd = format!("cat <<'EOF' > notes.txt\nquoting <<'EOF' in prose\nEOF\n{TRIGGER}");
+    assert_denied(&cmd, "the line after the terminator is a real command");
+}
+
+/// Inertness still scopes it, for the matching-delimiter spelling too.
+#[test]
+fn a_matching_delimiter_inside_a_body_that_reaches_bash_is_still_code() {
+    let cmd = format!("cat <<'EOF' | bash\n<<'EOF'\n{TRIGGER}\n${{..}}\nEOF");
+    assert_denied(&cmd, "the enclosing body is executed, so its text is code");
 }
 
 #[test]

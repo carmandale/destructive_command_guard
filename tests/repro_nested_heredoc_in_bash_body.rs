@@ -199,7 +199,16 @@ fn an_unterminated_nested_rmtree_in_a_bash_body_is_denied() {
 /// Cold review of 97303189 (false-positive lens): prose that dcg guesses is
 /// bash, quoting an unterminated heredoc operator, was swept by the fallback
 /// and hard-denied. main 639a354b allows both rows.
-const COMMIT_PROSE_QUOTING_A_HEREDOC: &str = "git commit -F - <<'MSG'\n\
+///
+/// CARRIER: `-F msg.txt`, not `-F -`, since
+/// `.agent-config-dcg-git-commit-f-stdin-heredoc-fp-2kp4c` — a message read on
+/// STDIN is now inert, so `-F -` would mask this prose out of the matcher
+/// entirely and every row below would pass while reading nothing. The file
+/// spelling leaves the body judged, which is the state these rows are about.
+/// `a_warned_reset_hard_in_prose_quoting_a_heredoc_only_warns` is what proves
+/// the carrier still reaches the matcher: it requires the warned rule to be
+/// REPORTED, which an inert body cannot do.
+const COMMIT_PROSE_QUOTING_A_HEREDOC: &str = "git commit -F msg.txt <<'MSG'\n\
      fix(dcg): judge nested heredoc bodies\n\
      \n\
      The guard skipped the python3 <<'PY' body nested in a bash body,\n\
@@ -219,7 +228,7 @@ fn commit_prose_quoting_an_unterminated_heredoc_is_allowed() {
 
 #[test]
 fn a_warned_reset_hard_in_prose_quoting_a_heredoc_only_warns() {
-    let cmd = "git commit -F - <<'MSG'\n\
+    let cmd = "git commit -F msg.txt <<'MSG'\n\
          fix: judge ${nested} bodies\n\
          A python3 <<'PY' body nested in bash was read by nothing.\n\
          The test pins git reset --hard as a warning.\n\
@@ -265,7 +274,7 @@ fn a_warned_nested_rule_does_not_hide_a_later_hard_denied_sibling() {
 /// this row is about the second operator and not about the prose is
 /// `prose_with_one_shift_operator_is_allowed` below -- it stays green when the
 /// drop is reverted, which is what makes this row a real pin.
-const PROSE_WITH_A_SECOND_SHIFT: &str = "git commit -F - <<'MSG'\n\
+const PROSE_WITH_A_SECOND_SHIFT: &str = "git commit -F msg.txt <<'MSG'\n\
      fix(heredoc): judge ${nested} bodies\n\
      The python3 <<'PY' body that called os.remove was unread.\n\
      It computed flags as 1 << 4 first.\n\
@@ -288,7 +297,7 @@ fn prose_with_a_second_shift_operator_is_not_swept() {
 /// reverted -- that is the point of keeping it.
 #[test]
 fn prose_with_one_shift_operator_is_allowed() {
-    let cmd = "git commit -F - <<'MSG'\n\
+    let cmd = "git commit -F msg.txt <<'MSG'\n\
          fix(heredoc): judge ${nested} bodies\n\
          The python3 body that called os.remove was unread.\n\
          MSG";
@@ -305,7 +314,7 @@ fn prose_with_one_shift_operator_is_allowed() {
 /// one of them a `cat <<X`. Base d022cf8c: ALLOW under both policies.
 #[test]
 fn prose_naming_two_heredoc_operators_is_not_swept() {
-    let cmd = "git commit -F - <<'MSG'\n\
+    let cmd = "git commit -F msg.txt <<'MSG'\n\
          fix(heredoc): judge ${nested} bodies\n\
          A cat <<X body nested in bash, then python3 <<'PY' was read by nothing.\n\
          The repro calls os.remove on a scratch file.\n\
@@ -325,7 +334,7 @@ fn prose_naming_two_heredoc_operators_is_not_swept() {
 /// warning rather than promote it to a deny.
 #[test]
 fn a_warned_reset_hard_in_prose_with_a_second_shift_only_warns() {
-    let cmd = "git commit -F - <<'MSG'\n\
+    let cmd = "git commit -F msg.txt <<'MSG'\n\
          fix(heredoc): judge ${nested} bodies\n\
          The python3 <<'PY' body ran before git reset --hard.\n\
          It computed flags as 1 << 4 first.\n\
