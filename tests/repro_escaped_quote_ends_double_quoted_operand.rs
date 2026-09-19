@@ -175,27 +175,40 @@ fn an_escaped_quote_does_not_end_a_double_quoted_dash_c() {
 
 /// The here-string half of the same capture defect.
 ///
-/// Asserted at the extractor and not through the hook on purpose: on this tree
-/// a here-string body is labelled `ScriptLanguage::Bash` regardless of its
-/// receiver, so no python rule can reach it end-to-end and a hook row would
-/// assert nothing about the capture. What the capture owns is the CONTENT, and
-/// that is what this reads. When the receiver-language work lands, the body
-/// this row pins is the body that reaches the python matcher.
+/// Asserted at the extractor: what the capture owns is the CONTENT. Since
+/// `.agent-config-7vu4q` a here-string to an interpreter carries two readings,
+/// bash and the receiver's, and both must hold the unescaped body -- the python
+/// one is what the python matcher reads. The end-to-end hook row is
+/// `an_escaped_quote_in_a_double_quoted_operand_is_read_as_python` in
+/// tests/repro_herestring_language_from_receiver.rs.
 #[test]
 fn an_escaped_quote_does_not_end_a_double_quoted_herestring() {
     let body = rmtree_body("\\\"");
     let command = format!("python3 <<< \"{body}\"");
     let entries = extracted_entries(&command);
-    let herestring = entries
+    let herestrings: Vec<_> = entries
         .iter()
-        .find(|e| e.heredoc_type.is_some())
-        .unwrap_or_else(|| panic!("no here-string entry for {command:?}: {entries:?}"));
+        .filter(|e| e.heredoc_type.is_some())
+        .collect();
+    let mut languages: Vec<String> = herestrings
+        .iter()
+        .map(|e| format!("{:?}", e.language))
+        .collect();
+    languages.sort();
     assert_eq!(
-        herestring.content,
-        rmtree_body("\""),
-        "the here-string body must run to its closing unescaped quote, with \
-         \\\" unescaped for the matcher"
+        languages,
+        ["Bash", "Python"],
+        "want the bash and the python reading for {command:?}: {entries:?}"
     );
+    for herestring in herestrings {
+        assert_eq!(
+            herestring.content,
+            rmtree_body("\""),
+            "the here-string body must run to its closing unescaped quote, with \
+             \\\" unescaped for the matcher ({:?} reading)",
+            herestring.language
+        );
+    }
 }
 
 /// The same assertion for the `-c` operand, one layer below the hook.

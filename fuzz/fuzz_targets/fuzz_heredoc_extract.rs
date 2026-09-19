@@ -37,9 +37,23 @@ fuzz_target!(|data: &[u8]| {
                 command
             );
 
+            // The cap counts CONSTRUCTS: a here-string to an interpreter is one
+            // construct read twice (bash and its receiver), two entries sharing
+            // one byte range (`.agent-config-7vu4q`).
+            let mut constructs: Vec<_> = contents.iter().map(|c| c.byte_range.clone()).collect();
+            constructs.sort_by_key(|r| (r.start, r.end));
+            constructs.dedup();
             assert!(
-                contents.len() <= limits.max_heredocs,
-                "Extracted {} heredocs > max_heredocs {} for: {:?}",
+                constructs.len() <= limits.max_heredocs,
+                "Extracted {} constructs > max_heredocs {} for: {:?}",
+                constructs.len(),
+                limits.max_heredocs,
+                command
+            );
+            // And at most two readings of each.
+            assert!(
+                contents.len() <= 2 * limits.max_heredocs,
+                "Extracted {} readings > 2 * max_heredocs {} for: {:?}",
                 contents.len(),
                 limits.max_heredocs,
                 command

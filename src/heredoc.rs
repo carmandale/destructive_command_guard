@@ -1363,6 +1363,24 @@ fn record_heredoc_limit(limits: &ExtractionLimits, skip_reasons: &mut Vec<SkipRe
     });
 }
 
+/// How many constructs `extracted` holds -- what `max_heredocs` caps.
+///
+/// A here-string to an interpreter yields TWO entries for ONE construct: its
+/// bash reading and its receiver's (`herestring_receiver_language`). Counting
+/// entries let five harmless `python3 <<< 'print(1)'` fill a cap of ten, so a
+/// sixth construct, `bash <<< '<git clean -fdx>'`, went unread where the
+/// single-reading extractor had read it (`.agent-config-7vu4q` cold review).
+/// The receiver reading is exactly the here-string entry not labelled `Bash`:
+/// the bash reading always is, and the receiver reading never is.
+fn admitted_constructs(extracted: &[ExtractedContent]) -> usize {
+    extracted
+        .iter()
+        .filter(|c| {
+            c.heredoc_type != Some(HeredocType::HereString) || c.language == ScriptLanguage::Bash
+        })
+        .count()
+}
+
 /// The byte ranges of `command` that no extractor read, when they can be
 /// accounted for.
 ///
@@ -1482,7 +1500,7 @@ fn extract_inline_scripts(
     if record_timeout_if_needed(start_time, timeout, limits.timeout_ms, skip_reasons) {
         return;
     }
-    if extracted.len() >= limits.max_heredocs {
+    if admitted_constructs(extracted) >= limits.max_heredocs {
         record_heredoc_limit(limits, skip_reasons);
         return;
     }
@@ -1494,7 +1512,7 @@ fn extract_inline_scripts(
             if record_timeout_if_needed(start_time, timeout, limits.timeout_ms, skip_reasons) {
                 return;
             }
-            if extracted.len() >= limits.max_heredocs {
+            if admitted_constructs(extracted) >= limits.max_heredocs {
                 hit_limit = true;
                 break;
             }
@@ -1575,7 +1593,7 @@ fn extract_herestrings(
     if record_timeout_if_needed(start_time, timeout, limits.timeout_ms, skip_reasons) {
         return;
     }
-    if extracted.len() >= limits.max_heredocs {
+    if admitted_constructs(extracted) >= limits.max_heredocs {
         record_heredoc_limit(limits, skip_reasons);
         return;
     }
@@ -1588,7 +1606,7 @@ fn extract_herestrings(
             if record_timeout_if_needed(start_time, timeout, limits.timeout_ms, skip_reasons) {
                 return;
             }
-            if extracted.len() >= limits.max_heredocs {
+            if admitted_constructs(extracted) >= limits.max_heredocs {
                 hit_limit = true;
                 break;
             }
@@ -1606,22 +1624,62 @@ fn extract_herestrings(
             // Extract the command that receives the here-string
             let target_cmd = extract_heredoc_target_command(command, full_match.start());
 
+            // Unescaped before either reading or the language reader sees it:
+            // for a one-segment operand, both readings and the content
+            // heuristics `heredoc_language` falls back to read what bash hands
+            // the receiver (a multi-segment or escaped unquoted operand is not
+            // dequoted yet, `.agent-config-bjjic`).
             let content = if unescape {
                 unescape_double_quoted(content)
             } else {
                 content.to_string()
             };
+            let receiver_language = herestring_receiver_language(
+                command,
+                full_match.range(),
+                target_cmd.as_deref(),
+                &content,
+            );
 
-            extracted.push(ExtractedContent {
+            // The receiver reading rides on the construct the cap already
+            // admitted (`admitted_constructs`), so the cap admits exactly what
+            // it did when a here-string had one reading. Reserving a slot for
+            // each reading instead dropped BOTH when one was left, and a
+            // stdin-to-shell `git clean -fdx` the bash reading had denied went
+            // to the fallback sweep, which has no pattern for it.
+            let bash_reading = ExtractedContent {
                 content,
-                language: ScriptLanguage::Bash, // Here-strings are bash-specific
+                language: ScriptLanguage::Bash,
                 delimiter: None,
                 byte_range: full_match.start()..full_match.end(),
                 content_range: content_match.map(|m| m.start()..m.end()),
                 quoted: is_quoted,
                 heredoc_type: Some(HeredocType::HereString),
                 target_command: target_cmd,
+            };
+            // No `content_range` of its own, for two reasons, each pinned by a
+            // hook row:
+            // - A judged entry's range is masked from the fallback sweep, and
+            //   this one shares its bytes with the bash reading. With
+            //   `[heredoc] languages = ["python"]` the bash reading is dropped
+            //   unread; when the extraction is also Partial with no locatable
+            //   unread extents, the judged python reading's range hid a
+            //   stdin-to-shell `rm -rf` the sweep had denied (cold review 2,
+            //   B4). Now only the bash reading can mask, as when it was the
+            //   only reading.
+            // - A match with a span is confidence-scored, and a span inside
+            //   the operand's quotes scores as quoted data: under `[confidence]
+            //   protect_critical = false` the python deny became a WARN while
+            //   the heredoc twin denied (cold review 3, B3). No span, no score.
+            // The cost: the deny keeps its text preview but loses the caret
+            // under the match (`map_heredoc_span` needs the range).
+            let receiver_reading = receiver_language.map(|language| ExtractedContent {
+                language,
+                content_range: None,
+                ..bash_reading.clone()
             });
+            extracted.push(bash_reading);
+            extracted.extend(receiver_reading);
         }
     };
 
@@ -1633,6 +1691,63 @@ fn extract_herestrings(
 
     if hit_limit {
         record_heredoc_limit(limits, skip_reasons);
+    }
+}
+
+/// The second language a here-string's content is read in: that of the
+/// interpreter that RECEIVES it, when that is not a shell.
+///
+/// `<<<` is a bash operator, but the bytes it carries are read by the command
+/// on its left. Labelling every here-string `Bash` only ("Here-strings are
+/// bash-specific", since Tier 2 landed) handed `python3 <<< "import shutil;
+/// shutil.rmtree(..)"` to the bash readers, no python rule ran, and it was
+/// allowed while the same body as a heredoc or `-c` denied
+/// (`.agent-config-7vu4q`).
+///
+/// An ADDED reading, never a replacement. Measured on 76d93747: relabelling
+/// the here-string python instead of bash turned `python3 -c 'import os,sys;
+/// os.system(sys.stdin.read())' <<< '<rm -rf>'` from deny to allow, and the
+/// perl `system(<STDIN>)` spelling with it -- the bash reading is what catches
+/// a program that hands its stdin to a shell. The double-quoted `"$(...)"`
+/// expansion the bead worried about is not what needs it: that denies from
+/// the ordinary pack evaluation, which reads the unmasked command text.
+///
+/// The language comes from `heredoc_language`, the reader heredoc bodies use:
+/// the receiver word, then the pipeline from the first `|` after the operand
+/// (`cat <<< .. | python3`), then `ScriptLanguage::detect` from the start of
+/// the operator's line. One reader, so its residuals are this path's too:
+/// `sudo -u node python3` resolves to sudo's user (`.agent-config-a09gf`), a
+/// pipeline past `;` or `&&` can name the language (`.agent-config-y2d40`), so
+/// can the program consuming the receiver's OUTPUT (`.agent-config-y031o`),
+/// any text `detect` reads from the start of the operator's line on
+/// (`.agent-config-vp3z1`), and a wrapper the head reader does not strip
+/// (`.agent-config-dze56`).
+///
+/// `None` when that names no language, or names bash: the bash reading is
+/// already there, so a second one would add nothing.
+fn herestring_receiver_language(
+    command: &str,
+    herestring: std::ops::Range<usize>,
+    receiver: Option<&str>,
+    content: &str,
+) -> Option<ScriptLanguage> {
+    // The pipeline stage is read from the first `|` after the operand to the
+    // end of the line the operand ends on. Not from inside the operand as the
+    // here-string regex bounds it (an operand bash joins from adjacent quoted
+    // segments is bounded early, `.agent-config-bjjic`), and not from the
+    // arguments before that `|`: in `python3 - <<< '..' node | cat`, `node` is
+    // an argument, yet as the head of the span's first segment it named the
+    // language. A heredoc's first segment is its operator, which names nothing,
+    // so this is the span its twin effectively reads.
+    let line_end = command[herestring.end..]
+        .find(['\n', '\r'])
+        .map_or(command.len(), |i| herestring.end + i);
+    let pipe = command[herestring.end..line_end]
+        .find('|')
+        .map_or(line_end, |i| herestring.end + i);
+    match heredoc_language(command, herestring.start, pipe..line_end, receiver, content) {
+        ScriptLanguage::Unknown | ScriptLanguage::Bash => None,
+        language => Some(language),
     }
 }
 
@@ -1648,7 +1763,7 @@ fn extract_heredocs(
     if record_timeout_if_needed(start_time, timeout, limits.timeout_ms, skip_reasons) {
         return;
     }
-    if extracted.len() >= limits.max_heredocs {
+    if admitted_constructs(extracted) >= limits.max_heredocs {
         record_heredoc_limit(limits, skip_reasons);
         return;
     }
@@ -1658,7 +1773,7 @@ fn extract_heredocs(
         if record_timeout_if_needed(start_time, timeout, limits.timeout_ms, skip_reasons) {
             return;
         }
-        if extracted.len() >= limits.max_heredocs {
+        if admitted_constructs(extracted) >= limits.max_heredocs {
             hit_limit = true;
             break;
         }
@@ -1726,7 +1841,7 @@ fn extract_heredocs(
                 let language = heredoc_language(
                     command,
                     full_match.start(),
-                    start_pos,
+                    full_match.start()..start_pos,
                     target_cmd.as_deref(),
                     &content,
                 );
@@ -1779,10 +1894,21 @@ fn extract_heredocs(
 /// cannot resolve AND a different interpreter earlier on the same line
 /// (`node -e 1; sudo -u root python3 <<'PY'`) still reads the earlier one, as
 /// every heredoc did before this function existed.
+///
+/// `pipeline` is the span the pipeline stage is read from. For a heredoc that
+/// is its operator to the end of the operator's line; the body is on later
+/// lines and never in it. A here-string's operand IS on that line, so it
+/// passes the span from the first `|` after the operand: in the pipeline
+/// stage, a `|` inside quoted code (`os.system("ls | node x.js")`) no longer
+/// picks the language (`.agent-config-7vu4q`). The last step still can: its
+/// `detect` reads from the line start to the end of the input -- operand,
+/// heredoc body and later lines included -- when the line's head names no
+/// interpreter (`cd /srv && sudo -u root python3 ...`); that residual is
+/// shared by both forms (`.agent-config-vp3z1`).
 fn heredoc_language(
     command: &str,
     heredoc_start: usize,
-    operator_line_end: usize,
+    pipeline: std::ops::Range<usize>,
     receiver: Option<&str>,
     content: &str,
 ) -> ScriptLanguage {
@@ -1791,7 +1917,7 @@ fn heredoc_language(
         .filter(|lang| *lang != ScriptLanguage::Unknown)
         .or_else(|| {
             command
-                .get(heredoc_start..operator_line_end)
+                .get(pipeline)
                 .and_then(ScriptLanguage::from_pipe_destinations)
         })
         .unwrap_or_else(|| {
