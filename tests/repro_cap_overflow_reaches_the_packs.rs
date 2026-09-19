@@ -86,6 +86,45 @@ fn hook(command: &str) -> Option<(String, String)> {
     Some((rule, stdout))
 }
 
+/// The same, with the hook budget the caller names rather than the suite's
+/// generous one: the only way to reach the branches that fire when the budget
+/// runs out mid-command.
+fn hook_with_budget(command: &str, budget_ms: &str) -> Option<(String, String)> {
+    let sandbox = spawn::sandbox();
+    let mut cmd = spawn::dcg_in(&sandbox);
+    cmd.env("DCG_HOOK_TIMEOUT_MS", budget_ms);
+    let input = payload::pre_tool_use(sandbox.root(), command).to_string();
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn dcg process");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(input.as_bytes())
+        .expect("write hook input");
+    let output = child.wait_with_output().expect("wait for dcg");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    assert!(
+        output.status.success(),
+        "dcg exited {:?}: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if stdout.trim().is_empty() {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("hook output is JSON");
+    let rule = json["hookSpecificOutput"]["ruleId"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    Some((rule, stdout))
+}
+
 fn assert_denied_by(command: &str, rule_id: &str, why: &str) {
     match hook(command) {
         Some((rule, stdout)) => assert_eq!(
@@ -207,6 +246,37 @@ fn destructive_python_past_the_cap_still_denies() {
         &command,
         "",
         "the sweep (no ruleId) reads python past the cap; the AST pass does not",
+    );
+}
+
+/// The overflow reader is bounded by COUNT, not just by the clock: past
+/// `max_heredocs * PAST_CAP_MULTIPLE` the fallback sweep is the reader again,
+/// as it was for everything past the cap before this bead.
+///
+/// This row states the boundary rather than hiding it. Reading every construct
+/// instead cost ×8 on a benign 2000-construct command and, at the shipped
+/// 200ms budget, spent the budget the capped constructs needed.
+#[test]
+fn past_the_bound_the_sweep_is_the_reader_again() {
+    assert_allowed(
+        &format!("{}bash <<< '{}'", "cat <<< x; ".repeat(25), clean()),
+        "25 pads put the payload past max_heredocs * 2; the sweep has no git clean pattern",
+    );
+}
+
+/// Running out of budget mid-command never allows.
+///
+/// The suite runs at a generous budget, so without this row neither
+/// budget branch the overflow reader added can fire at all.
+#[test]
+fn an_exhausted_budget_never_allows() {
+    let command = format!("{}bash <<< '{}'", "cat <<< x; ".repeat(200), clean());
+    let (rule, stdout) = hook_with_budget(&command, "1")
+        .unwrap_or_else(|| panic!("ALLOWED on an exhausted budget: {command:?}"));
+    assert!(
+        stdout.contains("\"permissionDecision\":\"deny\"")
+            || stdout.contains("\"permissionDecision\": \"deny\""),
+        "an exhausted budget must fail closed, got {rule:?}: {stdout}"
     );
 }
 

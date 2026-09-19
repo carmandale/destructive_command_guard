@@ -3222,14 +3222,27 @@ fn evaluate_heredoc(
     None
 }
 
-/// `capped` followed by every construct the `max_heredocs` cap left unread, and
+/// How many constructs the second pass may read, as a multiple of
+/// `max_heredocs`: the cap again, and no more.
+///
+/// A bound in TIME alone is not a bound. Reading every construct cost ×8 on a
+/// benign 2000-construct command (2.3s -> 19s measured under load) and, at the
+/// shipped 200ms hook budget, spent the budget the capped constructs needed --
+/// the padded command came back `core.limits:evaluation-timeout` instead of the
+/// rule the capped pass had already matched (cold review of
+/// `.agent-config-dcg-cap-overflow-fallback-lacks-packs-nvs11`, B1). Past
+/// `max_heredocs * PAST_CAP_MULTIPLE` the fallback sweep is the reader again,
+/// exactly as it was for everything past the cap before.
+const PAST_CAP_MULTIPLE: usize = 2;
+
+/// `capped` followed by the constructs the `max_heredocs` cap left unread, and
 /// the index where those start.
 ///
-/// A second extraction without the count cap. It gets half the time left, so it
-/// cannot spend the budget the capped constructs -- which the AST still reads --
-/// need. When it does not reproduce `capped` as its prefix (it timed out first,
-/// say), `capped` comes back alone: a partial re-read never replaces what the
-/// capped pass found.
+/// A second extraction whose count cap is `PAST_CAP_MULTIPLE` times the first's,
+/// with half the time left: bounded in both, so it cannot spend what the capped
+/// constructs -- which the AST still reads -- need. When it does not reproduce
+/// `capped` as its prefix (it timed out first, say), `capped` comes back alone:
+/// a partial re-read never replaces what the capped pass found.
 fn with_constructs_past_the_cap(
     command: &str,
     deadline: Option<&Deadline>,
@@ -3238,7 +3251,7 @@ fn with_constructs_past_the_cap(
 ) -> (Vec<crate::heredoc::ExtractedContent>, usize) {
     let capped_len = capped.len();
     let uncapped = crate::heredoc::ExtractionLimits {
-        max_heredocs: usize::MAX,
+        max_heredocs: limits.max_heredocs.saturating_mul(PAST_CAP_MULTIPLE),
         timeout_ms: u64::try_from((sub_step_budget(deadline) / 2).as_millis()).unwrap_or(u64::MAX),
         ..limits
     };
