@@ -231,6 +231,139 @@ fn a_warned_reset_hard_in_prose_quoting_a_heredoc_only_warns() {
     );
 }
 
+/// Cold review 2 (fail-open under the live policy shape): the nested statement
+/// is emitted ahead of the sibling after it, so a warned rule in the nested
+/// body, returned first, turned main's DENY of the later `rm -rf` into a WARN.
+/// A nested denial is held until nothing else denies.
+#[test]
+fn a_warned_nested_rule_does_not_hide_a_later_hard_denied_sibling() {
+    let cmd = "bash <<'EOF'\npython3 <<'PY'\nimport shutil; shutil.rmtree('/srv/cache')\nPY\n\
+               rm -rf /srv/data\nEOF";
+    let (stdout, stderr, exit_code) = run_with_warned_rules(cmd);
+    assert!(
+        stdout.contains("rm-rf"),
+        "the sibling's rule decides, not the warned nested one\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert_denied(
+        cmd,
+        (stdout, stderr, exit_code),
+        "main denies this command; reading the nested body must not weaken it",
+    );
+}
+
+/// Cold review 2, material 2. A statement is emitted whole so its nested body
+/// is judged, but the INNER extraction is context-free: a second `<<` anywhere
+/// in that text -- a prose `1 << 4`, a second quoted operator -- reads as an
+/// unterminated heredoc, extraction goes Partial, and the inner
+/// `check_fallback_patterns` sweeps the statement's own text. That text was
+/// already judged at the OUTER level, where zc6tb's mask covers it, so the
+/// sweep hard-denied commit prose main allows -- with no ruleId, past
+/// `[policy.rules]`. A `LegacyPattern` denial from this reader is therefore
+/// dropped rather than held.
+///
+/// Measured on base d022cf8c: ALLOW under both policies. The control that says
+/// this row is about the second operator and not about the prose is
+/// `prose_with_one_shift_operator_is_allowed` below -- it stays green when the
+/// drop is reverted, which is what makes this row a real pin.
+const PROSE_WITH_A_SECOND_SHIFT: &str = "git commit -F - <<'MSG'\n\
+     fix(heredoc): judge ${nested} bodies\n\
+     The python3 <<'PY' body that called os.remove was unread.\n\
+     It computed flags as 1 << 4 first.\n\
+     MSG";
+
+#[test]
+fn prose_with_a_second_shift_operator_is_not_swept() {
+    let (stdout, stderr, exit_code) = run_default(PROSE_WITH_A_SECOND_SHIFT);
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    assert_eq!(
+        decision(&stdout),
+        None,
+        "the inner sweep must not read a statement the outer pass already judged\nstdout: \
+         {stdout}\nstderr: {stderr}"
+    );
+}
+
+/// The same prose without the second `<<`: extraction stays complete, so no
+/// inner sweep runs. ALLOW on base and with the fix, and ALLOW with the drop
+/// reverted -- that is the point of keeping it.
+#[test]
+fn prose_with_one_shift_operator_is_allowed() {
+    let cmd = "git commit -F - <<'MSG'\n\
+         fix(heredoc): judge ${nested} bodies\n\
+         The python3 body that called os.remove was unread.\n\
+         MSG";
+    let (stdout, stderr, exit_code) = run_default(cmd);
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    assert_eq!(
+        decision(&stdout),
+        None,
+        "control: one `<<` leaves extraction complete\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+/// Cold review 2, material 2 (c): the two operators named on separate lines,
+/// one of them a `cat <<X`. Base d022cf8c: ALLOW under both policies.
+#[test]
+fn prose_naming_two_heredoc_operators_is_not_swept() {
+    let cmd = "git commit -F - <<'MSG'\n\
+         fix(heredoc): judge ${nested} bodies\n\
+         A cat <<X body nested in bash, then python3 <<'PY' was read by nothing.\n\
+         The repro calls os.remove on a scratch file.\n\
+         MSG";
+    let (stdout, stderr, exit_code) = run_default(cmd);
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    assert_eq!(
+        decision(&stdout),
+        None,
+        "two operators on separate lines are still prose\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+/// Cold review 2, material 2 (b): the same prose carrying a policy-WARNED
+/// `git reset --hard`. A sweep denial has no ruleId, so it is unsoftenable -- the
+/// policy never gets asked. Base d022cf8c warns; the fix must keep it a
+/// warning rather than promote it to a deny.
+#[test]
+fn a_warned_reset_hard_in_prose_with_a_second_shift_only_warns() {
+    let cmd = "git commit -F - <<'MSG'\n\
+         fix(heredoc): judge ${nested} bodies\n\
+         The python3 <<'PY' body ran before git reset --hard.\n\
+         It computed flags as 1 << 4 first.\n\
+         MSG";
+    assert_only_warned(
+        cmd,
+        run_with_warned_rules(cmd),
+        "base warns here; an inner unjudged-content sweep must not promote it to a deny",
+    );
+}
+
+/// Cold review 2, minor 3, re-derived against base d022cf8c rather than
+/// inherited from f92dd5de. At f92dd5de this read "base WARN -> cand DENY". On
+/// today's base it warns under the warned policy and denies under the default
+/// one -- and so does its own no-shift control, so the `<<` shift no longer
+/// distinguishes the two. What is left to pin is that the fix does not move it.
+#[test]
+fn a_warned_reset_hard_on_a_nested_operator_line_still_only_warns() {
+    let cmd =
+        "bash <<'EOF'\npython3 <<'PY' && git reset --hard\nflags = 1 << 3\nprint(flags)\nPY\nEOF";
+    assert_only_warned(
+        cmd,
+        run_with_warned_rules(cmd),
+        "a shift in the nested body must not turn the warned rule into a hard deny",
+    );
+}
+
+/// The same shape with no shift in the body -- the control for the row above.
+#[test]
+fn a_warned_reset_hard_on_a_nested_operator_line_without_a_shift_only_warns() {
+    let cmd = "bash <<'EOF'\npython3 <<'PY' && git reset --hard\nprint(1)\nPY\nEOF";
+    assert_only_warned(
+        cmd,
+        run_with_warned_rules(cmd),
+        "control: the same row without the shift",
+    );
+}
+
 #[test]
 fn an_unterminated_nested_cat_body_is_allowed() {
     let cmd = "bash <<'EOF'\ncat <<X\nnotes: os.remove is used by the cleanup step\nEOF";

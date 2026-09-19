@@ -4245,7 +4245,13 @@ use ast_grep_language::SupportLang;
 /// fed to the evaluator for destructive pattern matching.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtractedShellCommand {
-    /// The full command text (reconstructed from AST).
+    /// The command as bash runs it, reconstructed from the AST.
+    ///
+    /// For a statement carrying an OPEN heredoc this is not a substring of the
+    /// content: bash runs such a body to the end of its input, so the body is
+    /// written out with a synthesized terminator line and `text` ends with a
+    /// delimiter absent from `content[start..end]`. `start` and `end` stay in
+    /// content coordinates (`.agent-config-0awpo`, cold review 2 minor 6).
     pub text: String,
     /// Byte offset in the original content.
     pub start: usize,
