@@ -256,6 +256,12 @@ fn destructive_python_past_the_cap_still_denies() {
 /// This row states the boundary rather than hiding it. Reading every construct
 /// instead cost ×8 on a benign 2000-construct command and, at the shipped
 /// 200ms budget, spent the budget the capped constructs needed.
+///
+/// What it also states, and what this bead therefore did NOT finish: 20
+/// constructs still buy a payload the packs would deny (`git clean`,
+/// `stash clear`, `push --force` -- none of them in the sweep's list). The
+/// bypass cost went from 10 constructs to 20. That debt is
+/// `.agent-config-dcg-sweep-list-is-a-shorter-rulebook-past-the-bo-jg2of`.
 #[test]
 fn past_the_bound_the_sweep_is_the_reader_again() {
     assert_allowed(
@@ -266,8 +272,13 @@ fn past_the_bound_the_sweep_is_the_reader_again() {
 
 /// Running out of budget mid-command never allows.
 ///
-/// The suite runs at a generous budget, so without this row neither
-/// budget branch the overflow reader added can fire at all.
+/// A FLOOR, not a kill: this denies on origin/main too, where neither of the
+/// overflow reader's budget branches exists, because `deny_unevaluated`
+/// (src/main.rs) fails closed whatever spends the budget. Measured across 6
+/// shapes x 17 budgets (3-200ms), no spelling reaches those two `break`s in a
+/// way the hook boundary can tell apart from the budget allow, so they stay
+/// unpinned and this row says only what it asserts: an exhausted budget is
+/// never an allow.
 #[test]
 fn an_exhausted_budget_never_allows() {
     let command = format!("{}bash <<< '{}'", "cat <<< x; ".repeat(200), clean());
