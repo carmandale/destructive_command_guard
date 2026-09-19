@@ -1053,6 +1053,13 @@ static PY_STRING_LITERAL: LazyLock<Regex> = LazyLock::new(|| {
 /// target still names itself (`os.path.join("/srv", "data")` yields `/srv`),
 /// and a guard that reads less than it could is the defect this rule exists
 /// to fix. `None` only when there is no list, or nothing literal inside it.
+///
+/// The HEAD is no exception (.agent-config-dcg-argv-command-head-dxnfo): in
+/// `[tool, <rm>, <-rf>, "/srv"]` the unread head is absent and the words after
+/// it are judged, which is the verdict the shell pack gives the same words as
+/// text (`"$TOOL" <rm> <-rf> /srv` denies, `"$TOOL" <-rf> /srv` allows).
+/// Bailing out on an unreadable head would make the list spelling of that
+/// command weaker than its string spelling again.
 fn python_argv_list(matched_text: &str) -> Option<Vec<&str>> {
     let caps = PY_CALL_ARGV_LIST.captures(matched_text)?;
     let items = caps.name("items")?.as_str();
