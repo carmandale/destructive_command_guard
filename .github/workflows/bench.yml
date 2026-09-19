@@ -4,7 +4,8 @@ name: bench
 #
 # This workflow:
 # 1. Runs criterion benchmarks on PRs and pushes to main
-# 2. Compares results against baseline (when available)
+# 2. Benches the base commit first, on the same runner, and compares this
+#    commit against it
 # 3. Fails on significant regressions
 # 4. Uploads benchmark results as artifacts
 #
@@ -17,6 +18,7 @@ on:
       - 'benches/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - '.github/workflows/bench.yml'
   # `master` is deliberately absent. It is a stale duplicate ref (it sat at
   # f170d642 while main moved on) and listing it fired a second full cold
   # build for every commit -- 03:42:53 on main and 03:42:54 on master were the
@@ -28,11 +30,13 @@ on:
       - 'benches/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - '.github/workflows/bench.yml'
   # Allow manual trigger
   workflow_dispatch:
-  # Run on schedule for baseline tracking
-  schedule:
-    - cron: '0 6 * * 1'  # Weekly on Monday at 6am UTC
+  # No weekly schedule. It ran "for baseline tracking", and the baseline is now
+  # made per run from the base commit (below), so a scheduled run would only
+  # re-measure the tip against its parent -- which that commit's own push run
+  # already did.
 
 env:
   CARGO_TERM_COLOR: always
@@ -43,6 +47,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The base commit is benched too, so it has to be here.
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@nightly
 
@@ -62,16 +69,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-bench-registry-
 
-      - name: Cache benchmark baseline
-        uses: actions/cache@v4
-        with:
-          path: target/criterion
-          key: ${{ runner.os }}-criterion-baseline-${{ github.ref_name }}
-          restore-keys: |
-            ${{ runner.os }}-criterion-baseline-main
-            ${{ runner.os }}-criterion-baseline-master
-            ${{ runner.os }}-criterion-baseline-
-
       # There is no separate build step. `cargo build --release --benches` used
       # to stand here and it is what died at exit 143 ten runs running. It built
       # both bench targets under the `release` profile while the step below runs
@@ -83,10 +80,47 @@ jobs:
           # what it had, so the next death names its own cause.
           nproc && free -m && df -h /
 
+      # The baseline is made on THIS runner, from the base commit, so the
+      # comparison below measures the commit and not the machine. It used to be
+      # a cached `target/criterion` under the fixed key
+      # `criterion-baseline-main`. An exact-key hit is never re-saved, so that
+      # cache held the one run that created it, and every later run, on
+      # whatever runner it got, was compared with it. Against that one baseline
+      # pack_aware_quick_reject/worst_case/no_match -- code no commit in
+      # 8df226c4..56f22bc2 changed -- read -62%, -18%, +69% and +117% on four
+      # runs, and the last two failed the gate; the +117% failed fe91868e, a
+      # behaviour-preserving refactor (.agent-config-qjafi).
+      - name: Benchmark the base commit on this runner
+        env:
+          # Push only: a pull_request `synchronize` also carries `before` (the
+          # previous PR head), which is not what a PR is measured against.
+          PUSH_BEFORE: ${{ github.event_name == 'push' && github.event.before || '' }}
+        run: |
+          HEAD_SHA=$(git rev-parse HEAD)
+          # A push is compared with the tip it replaced, so a push of several
+          # commits is measured whole. Everything else uses HEAD~1: for a pull
+          # request HEAD is the merge commit, whose first parent is the base it
+          # was built on. A push that creates a ref carries 0000000.
+          BASE="$PUSH_BEFORE"
+          if [ -z "$BASE" ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            BASE=$(git rev-parse HEAD~1)
+          fi
+          echo "Base commit: \`$BASE\`" >> "$GITHUB_STEP_SUMMARY"
+          git checkout --quiet "$BASE"
+          if ! cargo bench --bench heredoc_perf -- --noplot --save-baseline base > base-output.txt 2>&1; then
+            echo "::warning::base commit $BASE did not bench, so nothing below is compared"
+            tail -20 base-output.txt
+          fi
+          # --force: without --locked, cargo may have rewritten a stale
+          # Cargo.lock at the base, and a plain checkout refuses to overwrite
+          # it -- a red run with nothing measured.
+          git checkout --quiet --force "$HEAD_SHA"
+
       - name: Run benchmarks
         run: |
-          # Run benchmarks and capture output
-          cargo bench --bench heredoc_perf -- --noplot 2>&1 | tee bench-output.txt
+          # Compare with the base commit's run above. Lenient: a benchmark the
+          # base does not have is reported without a comparison, not an error.
+          cargo bench --bench heredoc_perf -- --noplot --baseline-lenient base 2>&1 | tee bench-output.txt
 
           # Extract timing summary for CI
           echo "## Benchmark Results" >> $GITHUB_STEP_SUMMARY
@@ -119,20 +153,18 @@ jobs:
             exit 1
           fi
 
+      # always(): a red run is the one whose numbers someone needs, and it
+      # used to upload nothing (the step was skipped on fe91868e's red).
       - name: Upload benchmark results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-results
           path: |
+            base-output.txt
             bench-output.txt
             target/criterion
           retention-days: 30
-
-      - name: Save baseline (main branch only)
-        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
-        run: |
-          echo "Saving benchmark baseline for future comparisons"
-          # The criterion cache will be saved automatically
 
   # This job is pull-request only, so a push to main never reaches it -- that
   # skip is the `if` below, not a failure. It also does not compare anything:
