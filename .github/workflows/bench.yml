@@ -35,8 +35,8 @@ on:
   workflow_dispatch:
   # No weekly schedule. It ran "for baseline tracking", and the baseline is now
   # made per run from the base commit (below), so a scheduled run would only
-  # re-measure the tip against its parent -- which that commit's own push run
-  # already did.
+  # repeat what the tip's own push run measured, or -- when the tip changed no
+  # benchmarked path -- compare the code with itself.
 
 env:
   CARGO_TERM_COLOR: always
@@ -88,8 +88,12 @@ jobs:
       # whatever runner it got, was compared with it. Against that one baseline
       # pack_aware_quick_reject/worst_case/no_match -- code no commit in
       # 8df226c4..56f22bc2 changed -- read -62%, -18%, +69% and +117% on four
-      # runs, and the last two failed the gate; the +117% failed fe91868e, a
-      # behaviour-preserving refactor (.agent-config-qjafi).
+      # runs, and the +69% and +117% readings failed the gate; the +117% failed
+      # fe91868e, a behaviour-preserving refactor. Most of that spread was the
+      # benchmark itself: its keyword list came out in a random order per
+      # process until collect_enabled_keywords took a fixed one, so even this
+      # same-runner comparison read +468% on identical code before that fix
+      # (.agent-config-qjafi).
       - name: Benchmark the base commit on this runner
         env:
           # Push only: a pull_request `synchronize` also carries `before` (the
