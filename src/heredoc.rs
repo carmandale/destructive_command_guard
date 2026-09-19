@@ -963,52 +963,69 @@ static HEREDOC_EXTRACTOR: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"<<([-~])?\s*(?:'([^']*)'|"([^"]*)"|([\w.-]+))"#).expect("heredoc regex compiles")
 });
 
-/// Regex for here-string extraction with single quotes (<<<).
-static HERESTRING_SINGLE_QUOTE: LazyLock<Regex> = LazyLock::new(|| {
-    // Matches: <<< 'content' - content can contain double quotes
-    // Group 1: content
-    Regex::new(r"<<<\s*'([^']*)'").expect("herestring single-quote regex compiles")
+// A here-string or `-c` operand is one shell WORD, and bash builds a word from
+// adjacent segments with no space between them, removing each segment's
+// quoting: `'a'\''b'` -- the standard way to put a `'` inside single quotes --
+// is the word `a'b`, and so is `'a'"'"'b'`.
+//
+// One regex per quoting style captured ONE segment, so the operand ended at its
+// first closing quote: the matcher read a fragment, the pipeline reader started
+// inside the real operand, and an escaped unquoted operand kept the backslashes
+// bash removes. `python3 <<< 'import shutil; p='\''/srv/data'\''; ...'` allowed
+// while its heredoc twin denied (`.agent-config-bjjic`).
+//
+// These are the segment kinds. The word patterns repeat them to find where the
+// word ends, and `read_shell_word` walks the same kinds to dequote it, so the
+// bound and the reading are one grammar.
+
+/// `'...'`: literal, no escapes of any kind.
+const SEGMENT_SINGLE: &str = r"'[^']*'";
+/// `"..."`: a backslash and the character after it are one unit, so only an
+/// UNESCAPED quote closes (`.agent-config-gt800`). The two branches share no
+/// first character, so there is nothing to backtrack.
+const SEGMENT_DOUBLE: &str = r#""(?:[^"\\]|\\[\s\S])*""#;
+/// `$'...'`: ANSI-C quoting, where `\'` does not close (`.agent-config-fmeow`).
+const SEGMENT_ANSI_C: &str = r"\$'(?:[^'\\]|\\[\s\S])*'";
+/// An unquoted backslash, which quotes the character after it.
+const SEGMENT_ESCAPE: &str = r"\\[\s\S]";
+/// A run of unquoted characters, up to whitespace or a `|&;<>()` that ends the
+/// word, or a backtick: in `` `python3 -c '..'` `` it closes the enclosing
+/// substitution, and a substitution's output cannot be read here anyway. `$` is
+/// left out of the run and matched alone, after `SEGMENT_ANSI_C` has had its
+/// chance, so `abc$'x'` is `abc` and an ANSI-C segment rather than `abc$` and a
+/// single-quoted one.
+const SEGMENT_BARE: &str = r#"[^\s'"\\|&;<>()$`]+|\$"#;
+
+/// Regex for here-string extraction (<<<).
+static HERESTRING: LazyLock<Regex> = LazyLock::new(|| {
+    // Matches: <<< WORD, in any quoting. Group 1: the word, raw.
+    Regex::new(&format!(
+        r"<<<\s*((?:{SEGMENT_SINGLE}|{SEGMENT_DOUBLE}|{SEGMENT_ANSI_C}|{SEGMENT_ESCAPE}|{SEGMENT_BARE})+)"
+    ))
+    .expect("herestring regex compiles")
 });
 
-/// Regex for here-string extraction with double quotes (<<<).
-static HERESTRING_DOUBLE_QUOTE: LazyLock<Regex> = LazyLock::new(|| {
-    // Matches: <<< "content" - content can contain single quotes, and
-    // BACKSLASH-ESCAPED double quotes. Group 1: content.
-    //
-    // `[^"]*` cannot tell `\"` from `"`, so it ended the operand at the first
-    // ESCAPED quote and handed the matcher a fragment of the real body
-    // (`.agent-config-gt800`). `(?:[^"\\]|\\[\s\S])*` consumes a backslash and
-    // whatever follows it as one unit, so only an UNESCAPED quote closes. The
-    // two branches share no first character, so there is nothing to backtrack.
-    Regex::new(r#"<<<\s*"((?:[^"\\]|\\[\s\S])*)""#).expect("herestring double-quote regex compiles")
-});
-
-/// Regex for here-string extraction without quotes (<<<).
-static HERESTRING_UNQUOTED: LazyLock<Regex> = LazyLock::new(|| {
-    // Matches: <<< word - unquoted single word (NOT starting with quote)
-    // Group 1: content
-    // [^'\x22\s] ensures we don't match quoted forms
-    Regex::new(r"<<<\s*([^'\x22\s]\S*)").expect("herestring unquoted regex compiles")
-});
-
-/// Regex for inline script flag extraction with single quotes.
-static INLINE_SCRIPT_SINGLE_QUOTE: LazyLock<Regex> = LazyLock::new(|| {
-    // Matches: command -c/-e/-p/-E/-r followed by single-quoted content
-    // Groups: (1) interpreter, (2) optional "js" suffix for node, (3) flag, (4) content
+/// Regex for inline script flag extraction.
+static INLINE_SCRIPT: LazyLock<Regex> = LazyLock::new(|| {
+    // Matches: command -c/-e/-p/-E/-r followed by a word that STARTS quoted --
+    // an unquoted operand was never extracted, and still is not -- and runs to
+    // the end of the shell word like a here-string's.
+    // Groups: (1) interpreter, (2) optional "js" suffix for node, (3) flag, (4) the word, raw
     // Supports versioned interpreters: python3.11, ruby3.0, perl5.36, node18, nodejs20, etc.
     // Supports Windows .exe extensions: python.exe, python3.11.exe, etc.
-    Regex::new(r"\b(python[0-9.]*(?:\.exe)?|ruby[0-9.]*(?:\.exe)?|irb[0-9.]*(?:\.exe)?|perl[0-9.]*(?:\.exe)?|node(js)?[0-9.]*(?:\.exe)?|php[0-9.]*(?:\.exe)?|lua[0-9.]*(?:\.exe)?|sh(?:\.exe)?|bash(?:\.exe)?|zsh(?:\.exe)?|fish(?:\.exe)?)\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+(-[A-Za-z]*[ceEpr][A-Za-z]*)\s*'([^']*)'")
-        .expect("inline script single-quote regex compiles")
+    Regex::new(&format!(
+        r"\b(python[0-9.]*(?:\.exe)?|ruby[0-9.]*(?:\.exe)?|irb[0-9.]*(?:\.exe)?|perl[0-9.]*(?:\.exe)?|node(js)?[0-9.]*(?:\.exe)?|php[0-9.]*(?:\.exe)?|lua[0-9.]*(?:\.exe)?|sh(?:\.exe)?|bash(?:\.exe)?|zsh(?:\.exe)?|fish(?:\.exe)?)\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+(-[A-Za-z]*[ceEpr][A-Za-z]*)\s*((?:{SEGMENT_SINGLE}|{SEGMENT_DOUBLE}|{SEGMENT_ANSI_C})(?:{SEGMENT_SINGLE}|{SEGMENT_DOUBLE}|{SEGMENT_ANSI_C}|{SEGMENT_ESCAPE}|{SEGMENT_BARE})*)"
+    ))
+    .expect("inline script regex compiles")
 });
 
-/// Regex for inline script flag extraction with double quotes.
-static INLINE_SCRIPT_DOUBLE_QUOTE: LazyLock<Regex> = LazyLock::new(|| {
-    // Matches: command -c/-e/-p/-E/-r followed by double-quoted content
-    // Groups: (1) interpreter, (2) optional "js" suffix for node, (3) flag, (4) content
-    // Supports versioned interpreters: python3.11, ruby3.0, perl5.36, node18, nodejs20, etc.
-    // Supports Windows .exe extensions: python.exe, python3.11.exe, etc.
-    Regex::new(r#"\b(python[0-9.]*(?:\.exe)?|ruby[0-9.]*(?:\.exe)?|irb[0-9.]*(?:\.exe)?|perl[0-9.]*(?:\.exe)?|node(js)?[0-9.]*(?:\.exe)?|php[0-9.]*(?:\.exe)?|lua[0-9.]*(?:\.exe)?|sh(?:\.exe)?|bash(?:\.exe)?|zsh(?:\.exe)?|fish(?:\.exe)?)\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+(-[A-Za-z]*[ceEpr][A-Za-z]*)\s*"((?:[^"\\]|\\[\s\S])*)""#)
-        .expect("inline script double-quote regex compiles")
+/// The segment kinds, one capture group each, in the order the word patterns
+/// try them: (1) single, (2) double, (3) ANSI-C, (4) escape, (5) bare.
+static SHELL_WORD_SEGMENT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(
+        "({SEGMENT_SINGLE})|({SEGMENT_DOUBLE})|({SEGMENT_ANSI_C})|({SEGMENT_ESCAPE})|({SEGMENT_BARE})"
+    ))
+    .expect("shell word segment regex compiles")
 });
 
 /// Undo bash's double-quote escapes, so the matcher reads what the interpreter
@@ -1023,8 +1040,8 @@ static INLINE_SCRIPT_DOUBLE_QUOTE: LazyLock<Regex> = LazyLock::new(|| {
 /// runs `shutil.rmtree("/srv")`, and a matcher handed the backslashes sees a
 /// string that is not python. But `python3 -c "re.compile(\d)"` really does
 /// pass `\d` through, so unescaping it would be inventing a different program.
-/// Applied ONLY to double-quoted operands: single-quoted bash strings have no
-/// escapes at all, and unquoted here-strings are word-split, not dequoted.
+/// Applied ONLY to double-quoted segments (`read_shell_word`): single-quoted
+/// segments have no escapes at all, and an unquoted backslash is its own kind.
 fn unescape_double_quoted(content: &str) -> String {
     if !content.contains('\\') {
         return content.to_string();
@@ -1054,9 +1071,151 @@ fn unescape_double_quoted(content: &str) -> String {
     out
 }
 
+/// A shell word as bash hands it to the command.
+struct ShellWord {
+    /// Each segment with its quoting removed, joined.
+    text: String,
+    /// From the first segment's content to the last segment's, in the command.
+    /// For a one-segment quoted word that is the inside of its quotes -- what
+    /// the one-segment patterns reported -- so the caret under a match
+    /// (`map_heredoc_span`) still lands on every word it landed on before.
+    range: std::ops::Range<usize>,
+    /// Whether any segment was quoted.
+    quoted: bool,
+}
+
+/// Dequote a word that `HERESTRING` or `INLINE_SCRIPT` matched, segment by
+/// segment, the way bash's quote removal does.
+fn read_shell_word(word: regex::Match<'_>) -> ShellWord {
+    let mut text = String::with_capacity(word.len());
+    let mut quoted = false;
+    let mut bounds: Option<std::ops::Range<usize>> = None;
+    for segment in SHELL_WORD_SEGMENT.captures_iter(word.as_str()) {
+        let Some(whole) = segment.get(0) else {
+            continue;
+        };
+        let raw = whole.as_str();
+        let kind = (1..=5).find(|&kind| segment.get(kind).is_some());
+        quoted |= matches!(kind, Some(1..=3));
+        let inner = match kind {
+            Some(1) => {
+                text.push_str(&raw[1..raw.len() - 1]);
+                whole.start() + 1..whole.end() - 1
+            }
+            Some(2) => {
+                text.push_str(&unescape_double_quoted(&raw[1..raw.len() - 1]));
+                whole.start() + 1..whole.end() - 1
+            }
+            Some(3) => {
+                text.push_str(&decode_ansi_c(&raw[2..raw.len() - 1]));
+                whole.start() + 2..whole.end() - 1
+            }
+            Some(4) => {
+                // A backslash-newline is a line continuation: both go.
+                if &raw[1..] != "\n" {
+                    text.push_str(&raw[1..]);
+                }
+                whole.range()
+            }
+            _ => {
+                text.push_str(raw);
+                whole.range()
+            }
+        };
+        bounds = Some(bounds.map_or_else(|| inner.clone(), |b| b.start..inner.end));
+    }
+    let bounds = bounds.unwrap_or(0..word.len());
+    ShellWord {
+        text,
+        range: word.start() + bounds.start..word.start() + bounds.end,
+        quoted,
+    }
+}
+
+/// Decode the body of a `$'...'` segment as bash does.
+///
+/// Bash's documented escapes: `\a \b \e \E \f \n \r \t \v`, `\\ \' \" \?`, one
+/// to three octal digits, `\x` with one or two hex digits, `\u` and `\U` with up
+/// to four and eight, and `\cX` for a control character. Any other backslash is
+/// kept with the character after it, as bash keeps it. Built as bytes, because
+/// `\xHH` can produce any byte, then read as UTF-8 like every other operand.
+fn decode_ansi_c(body: &str) -> String {
+    /// Up to `max` more digits in `radix`, folded into `value`.
+    fn digits(
+        chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+        radix: u32,
+        max: usize,
+        mut value: Option<u32>,
+    ) -> Option<u32> {
+        for _ in 0..max {
+            let Some(digit) = chars.peek().and_then(|c| c.to_digit(radix)) else {
+                break;
+            };
+            chars.next();
+            value = Some(value.unwrap_or(0) * radix + digit);
+        }
+        value
+    }
+    fn push(out: &mut Vec<u8>, c: char) {
+        out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
+    }
+
+    let mut out = Vec::with_capacity(body.len());
+    let mut chars = body.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            push(&mut out, c);
+            continue;
+        }
+        let Some(escape) = chars.next() else {
+            out.push(b'\\');
+            break;
+        };
+        match escape {
+            'a' => out.push(0x07),
+            'b' => out.push(0x08),
+            'e' | 'E' => out.push(0x1b),
+            'f' => out.push(0x0c),
+            'n' => out.push(b'\n'),
+            'r' => out.push(b'\r'),
+            't' => out.push(b'\t'),
+            'v' => out.push(0x0b),
+            '\\' | '\'' | '"' | '?' => push(&mut out, escape),
+            '0'..='7' => {
+                let value = digits(&mut chars, 8, 2, escape.to_digit(8)).unwrap_or(0);
+                // An eight-bit character: bash keeps the low byte of `\777`.
+                out.push(value.to_le_bytes()[0]);
+            }
+            'x' => match digits(&mut chars, 16, 2, None) {
+                Some(value) => out.push(value.to_le_bytes()[0]),
+                None => out.extend_from_slice(b"\\x"),
+            },
+            'u' | 'U' => {
+                let max = if escape == 'u' { 4 } else { 8 };
+                match digits(&mut chars, 16, max, None).and_then(char::from_u32) {
+                    Some(decoded) => push(&mut out, decoded),
+                    None => {
+                        out.push(b'\\');
+                        push(&mut out, escape);
+                    }
+                }
+            }
+            'c' => match chars.next().and_then(|ctl| u8::try_from(ctl).ok()) {
+                Some(ctl) => out.push(ctl & 0x1f),
+                None => out.extend_from_slice(b"\\c"),
+            },
+            other => {
+                out.push(b'\\');
+                push(&mut out, other);
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Compile every extraction pattern, so no caller pays for it later.
 ///
-/// All seven pattern statics are [`LazyLock`], so whichever command arrives
+/// Every pattern static is a [`LazyLock`], so whichever command arrives
 /// first in a process compiles them. That compilation is one-time process
 /// startup, not work the command asked for — and [`extract_content`] used to
 /// run it *inside* its own time budget, charging the first command for it.
@@ -1078,11 +1237,9 @@ fn unescape_double_quoted(content: &str) -> String {
 pub fn warm_extraction_patterns() {
     LazyLock::force(&HEREDOC_TRIGGERS);
     LazyLock::force(&HEREDOC_EXTRACTOR);
-    LazyLock::force(&HERESTRING_SINGLE_QUOTE);
-    LazyLock::force(&HERESTRING_DOUBLE_QUOTE);
-    LazyLock::force(&HERESTRING_UNQUOTED);
-    LazyLock::force(&INLINE_SCRIPT_SINGLE_QUOTE);
-    LazyLock::force(&INLINE_SCRIPT_DOUBLE_QUOTE);
+    LazyLock::force(&HERESTRING);
+    LazyLock::force(&INLINE_SCRIPT);
+    LazyLock::force(&SHELL_WORD_SEGMENT);
 }
 
 // ============================================================================
@@ -1431,13 +1588,7 @@ fn unread_extents(
 
     let mut spans: Vec<std::ops::Range<usize>> = Vec::new();
 
-    for pattern in [
-        &*INLINE_SCRIPT_SINGLE_QUOTE,
-        &*INLINE_SCRIPT_DOUBLE_QUOTE,
-        &*HERESTRING_SINGLE_QUOTE,
-        &*HERESTRING_DOUBLE_QUOTE,
-        &*HERESTRING_UNQUOTED,
-    ] {
+    for pattern in [&*INLINE_SCRIPT, &*HERESTRING] {
         for m in pattern.find_iter(command) {
             if !judged(m.start()) {
                 spans.push(m.start()..m.end());
@@ -1508,7 +1659,7 @@ fn extract_inline_scripts(
 
     // Helper to extract from a given regex pattern
     let mut hit_limit = false;
-    let mut extract_from_pattern = |pattern: &Regex, unescape: bool| {
+    let mut extract_from_pattern = |pattern: &Regex| {
         for cap in pattern.captures_iter(command) {
             if record_timeout_if_needed(start_time, timeout, limits.timeout_ms, skip_reasons) {
                 return;
@@ -1520,9 +1671,10 @@ fn extract_inline_scripts(
 
             let cmd_name = cap.get(1).map_or("", |m| m.as_str());
             let flag = cap.get(3).map_or("", |m| m.as_str());
-            // Content is in group 4: (1) interpreter, (2) optional "js", (3) flag, (4) content
-            let content_match = cap.get(4);
-            let content = content_match.map_or("", |m| m.as_str());
+            // The word is in group 4: (1) interpreter, (2) optional "js", (3) flag, (4) word
+            let Some(word) = cap.get(4) else {
+                continue;
+            };
 
             // The regex covers multiple interpreters; validate that the matched flag actually
             // implies inline code for this interpreter (e.g. bash needs -c, perl needs -e/-E).
@@ -1548,34 +1700,28 @@ fn extract_inline_scripts(
             }
 
             // Enforce content size limit
-            if content.len() > limits.max_body_bytes {
+            if word.len() > limits.max_body_bytes {
                 // Skip but don't add to skip_reasons (would be too noisy)
                 continue;
             }
 
             let full_match = cap.get(0).unwrap();
-            let content = if unescape {
-                unescape_double_quoted(content)
-            } else {
-                content.to_string()
-            };
+            let word = read_shell_word(word);
 
             extracted.push(ExtractedContent {
-                content,
+                content: word.text,
                 language: ScriptLanguage::from_command(cmd_name),
                 delimiter: None,
                 byte_range: full_match.start()..full_match.end(),
-                content_range: content_match.map(|m| m.start()..m.end()),
-                quoted: true, // -c/-e content is always in quotes
+                content_range: Some(word.range),
+                quoted: true, // the -c/-e word always starts quoted
                 heredoc_type: None,
                 target_command: Some(cmd_name.to_string()), // -c/-e content is executed by the interpreter
             });
         }
     };
 
-    // Extract from both single-quoted and double-quoted patterns
-    extract_from_pattern(&INLINE_SCRIPT_SINGLE_QUOTE, false);
-    extract_from_pattern(&INLINE_SCRIPT_DOUBLE_QUOTE, true);
+    extract_from_pattern(&INLINE_SCRIPT);
 
     if hit_limit {
         record_heredoc_limit(limits, skip_reasons);
@@ -1601,8 +1747,8 @@ fn extract_herestrings(
 
     let mut hit_limit = false;
 
-    // Helper to extract from a given pattern (quoted patterns have content in group 1)
-    let mut extract_quoted = |pattern: &Regex, is_quoted: bool, unescape: bool| {
+    // Helper to extract from a given pattern (the word is in group 1)
+    let mut extract_quoted = |pattern: &Regex| {
         for cap in pattern.captures_iter(command) {
             if record_timeout_if_needed(start_time, timeout, limits.timeout_ms, skip_reasons) {
                 return;
@@ -1612,11 +1758,11 @@ fn extract_herestrings(
                 break;
             }
 
-            // Content is in group 1 for all our here-string patterns
-            let content_match = cap.get(1);
-            let content = content_match.map_or("", |m| m.as_str());
+            let Some(word) = cap.get(1) else {
+                continue;
+            };
 
-            if content.len() > limits.max_body_bytes {
+            if word.len() > limits.max_body_bytes {
                 continue;
             }
 
@@ -1625,21 +1771,15 @@ fn extract_herestrings(
             // Extract the command that receives the here-string
             let target_cmd = extract_heredoc_target_command(command, full_match.start());
 
-            // Unescaped before either reading or the language reader sees it:
-            // for a one-segment operand, both readings and the content
-            // heuristics `heredoc_language` falls back to read what bash hands
-            // the receiver (a multi-segment or escaped unquoted operand is not
-            // dequoted yet, `.agent-config-bjjic`).
-            let content = if unescape {
-                unescape_double_quoted(content)
-            } else {
-                content.to_string()
-            };
+            // Dequoted before either reading or the language reader sees it:
+            // both readings and the content heuristics `heredoc_language` falls
+            // back to read what bash hands the receiver.
+            let word = read_shell_word(word);
             let receiver_language = herestring_receiver_language(
                 command,
                 full_match.range(),
                 target_cmd.as_deref(),
-                &content,
+                &word.text,
             );
 
             // The receiver reading rides on the construct the cap already
@@ -1649,12 +1789,12 @@ fn extract_herestrings(
             // stdin-to-shell `git clean -fdx` the bash reading had denied went
             // to the fallback sweep, which has no pattern for it.
             let bash_reading = ExtractedContent {
-                content,
+                content: word.text,
                 language: ScriptLanguage::Bash,
                 delimiter: None,
                 byte_range: full_match.start()..full_match.end(),
-                content_range: content_match.map(|m| m.start()..m.end()),
-                quoted: is_quoted,
+                content_range: Some(word.range),
+                quoted: word.quoted,
                 heredoc_type: Some(HeredocType::HereString),
                 target_command: target_cmd,
             };
@@ -1684,11 +1824,7 @@ fn extract_herestrings(
         }
     };
 
-    // Extract from single-quoted, double-quoted, then unquoted patterns
-    // Quoted patterns first to avoid unquoted matching the outer quotes
-    extract_quoted(&HERESTRING_SINGLE_QUOTE, true, false);
-    extract_quoted(&HERESTRING_DOUBLE_QUOTE, true, true);
-    extract_quoted(&HERESTRING_UNQUOTED, false, false);
+    extract_quoted(&HERESTRING);
 
     if hit_limit {
         record_heredoc_limit(limits, skip_reasons);
@@ -1733,9 +1869,9 @@ fn herestring_receiver_language(
     content: &str,
 ) -> Option<ScriptLanguage> {
     // The pipeline stage is read from the first `|` after the operand to the
-    // end of the line the operand ends on. Not from inside the operand as the
-    // here-string regex bounds it (an operand bash joins from adjacent quoted
-    // segments is bounded early, `.agent-config-bjjic`), and not from the
+    // end of the line the operand ends on. Not from inside the operand -- the
+    // here-string regex bounds it at the end of the shell word, so a `|` quoted
+    // in a later segment is not a pipe (`.agent-config-bjjic`) -- and not from the
     // arguments before that `|`: in `python3 - <<< '..' node | cat`, `node` is
     // an argument, yet as the head of the span's first segment it named the
     // language. A heredoc's first segment is its operator, which names nothing,

@@ -55,6 +55,10 @@
 //! the third one exists, and why `an_escaped_backslash_still_ends_the_operand`
 //! is here: it is the only row the capture mutants leave green, so without it
 //! the unescape could be deleted and this file would still pass.
+//!
+//! The table names the patterns as they were then. Since `.agent-config-bjjic`
+//! both captures read one shell-word grammar: the double-quoted segment is
+//! `SEGMENT_DOUBLE`, and the unescape is `read_shell_word`'s double-quoted arm.
 
 #![allow(clippy::doc_markdown, clippy::uninlined_format_args)]
 
