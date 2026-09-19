@@ -2135,6 +2135,30 @@ fn heredoc_language(
         .map(ScriptLanguage::from_command)
         .filter(|lang| *lang != ScriptLanguage::Unknown)
         .or_else(|| {
+            // The pipeline step assumes the stage after the operator RECEIVES
+            // the body. That holds only while the receiver passes its stdin
+            // THROUGH -- `cat <<'EOF' | python3` writes the body to python's
+            // stdin. A receiver that EXECUTES the body has already consumed
+            // stdin, so the stage after it reads that program's OUTPUT, and
+            // naming the body from it is how `python3 <<'PY' | sh` -- python
+            // emitting shell, an ordinary idiom -- came to be matched as bash
+            // and skipped every `heredoc.python` rule (`.agent-config-y031o`).
+            //
+            // `is_some_and`, not `is_none_or`: a receiver this reader could not
+            // resolve at all comes back as None, and None is UNKNOWN, not
+            // "nothing consumes the body". `python3.11 <<'PY' | node fmt.js`
+            // is exactly that case. Asking the allowlist this repository
+            // already keeps for masking avoids a second list of interpreters,
+            // which is the list that cannot be kept complete.
+            //
+            // Nothing is lost when this declines: the fallback below runs
+            // `detect`, whose Priority 1 is the wrapper-aware head reader (it
+            // resolves both `python3.11` and `sudo -u root python3`) and whose
+            // Priority 1b still consults pipe destinations, so a heredoc with
+            // no receiver at all (`<<'EOF' | python3`) keeps its language.
+            if !receiver.is_some_and(is_non_executing_heredoc_command) {
+                return None;
+            }
             command
                 .get(pipeline)
                 .and_then(ScriptLanguage::from_pipe_destinations)
