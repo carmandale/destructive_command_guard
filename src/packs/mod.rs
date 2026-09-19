@@ -1274,9 +1274,16 @@ impl PackRegistry {
     ///
     /// This is a **metadata-only** operation - does not instantiate packs.
     /// Keywords are accessed from static `PackEntry` metadata.
+    ///
+    /// The order is the ordered pack expansion's, not a `HashSet`'s. Order
+    /// never changes which command matches, but `pack_aware_quick_reject`
+    /// stops at the first keyword it finds, so it decides the cost: from a
+    /// `HashSet` it was reseeded per process -- `git` sat at 0, 7, 12, 64 and
+    /// 72 of 132 keywords across six runs -- and the benchmark timing it read
+    /// anywhere from 0.8 to 5.2 us on unchanged code (.agent-config-qjafi).
     #[must_use]
     pub fn collect_enabled_keywords(&self, enabled_packs: &HashSet<String>) -> Vec<&'static str> {
-        let expanded = self.expand_enabled(enabled_packs);
+        let expanded = self.expand_enabled_ordered(enabled_packs);
         let mut keywords = Vec::new();
 
         for pack_id in &expanded {
@@ -2416,6 +2423,40 @@ pub fn pack_aware_quick_reject_with_normalized<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each call builds its own `HashSet`s, and each gets a fresh hash seed, so
+    /// an order taken from one differs between calls in this one process -- the
+    /// same way it differed between hook processes (.agent-config-qjafi).
+    #[test]
+    fn collect_enabled_keywords_has_one_order() {
+        let enabled: HashSet<String> = [
+            "database",
+            "containers",
+            "kubernetes",
+            "cloud",
+            "infrastructure",
+            "system",
+            "strict_git",
+            "package_managers",
+            "cicd",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let first = REGISTRY.collect_enabled_keywords(&enabled);
+        assert!(
+            first.len() > 100,
+            "the probe needs many packs' keywords to be able to reorder them, got {}",
+            first.len()
+        );
+        for _ in 0..4 {
+            assert_eq!(
+                REGISTRY.collect_enabled_keywords(&enabled),
+                first,
+                "collect_enabled_keywords returned a different order for the same packs"
+            );
+        }
+    }
 
     #[test]
     fn pack_aware_quick_reject_empty_keywords_is_conservative() {
