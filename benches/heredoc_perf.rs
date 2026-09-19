@@ -33,6 +33,13 @@ use std::hint::black_box;
 /// Simple command without any heredoc markers.
 const SIMPLE_COMMAND: &str = "git status --short";
 
+/// Command containing none of the enabled keywords. Two properties of the
+/// literal are load-bearing, and the setup below asserts both: it holds no
+/// whitespace, so a keyword of two or more parts can never match it; and no
+/// quote or backslash, so the quick reject takes its early return instead of
+/// falling through to normalize and classify.
+const NO_KEYWORD: &str = "uptime";
+
 /// Command with inline Python script.
 const INLINE_PYTHON: &str = r#"python3 -c "import os; os.system('rm -rf /')" "#;
 
@@ -199,8 +206,58 @@ fn bench_pack_aware_quick_reject(c: &mut Criterion) {
     ];
     let worst_inputs = build_hook_inputs(&worst_case);
 
+    // A command holding none of the enabled keywords makes the quick reject run
+    // its full first-pass scan, then return early. The case it replaces,
+    // "no_match", timed SIMPLE_COMMAND -- the same matching command as
+    // "match_git" -- so nothing measured a full scan (.agent-config-qt6k2).
+    // Not the function's whole worst case: a command with no keyword AND a
+    // quote or backslash scans everything and then falls through to normalize
+    // and classify, which nothing times yet (.agent-config-z2jx4).
+
+    // The literal's own two invariants, so an edit to it fails here rather than
+    // quietly timing something else under an id that still says "no_keyword".
+    assert!(
+        !NO_KEYWORD.bytes().any(|b| b.is_ascii_whitespace()),
+        "{NO_KEYWORD:?} holds whitespace, so the check below no longer models the whitespace pass"
+    );
+    assert!(
+        !NO_KEYWORD
+            .bytes()
+            .any(|b| matches!(b, b'\\' | b'\'' | b'"')),
+        "{NO_KEYWORD:?} holds a quote or backslash, so this times normalize and classify, not the early return"
+    );
+
+    for keywords in [
+        &core_inputs.enabled_keywords,
+        &worst_inputs.enabled_keywords,
+    ] {
+        // Empty would make the filter below vacuous, and would send the quick
+        // reject down its conservative branch, which scans nothing at all.
+        assert!(!keywords.is_empty(), "no enabled keywords to scan");
+        // Trimmed of ASCII whitespace, matching keyword_contains_whitespace
+        // exactly: that predicate, not "is it multi-word", is what routes a
+        // keyword into the second pass, and split_keyword_parts then drops the
+        // empty parts. So "time " is ONE part there and matches "uptime" byte
+        // for byte while plain contains says no. Trimming makes this check
+        // exact for every single-part keyword; a keyword of two or more parts
+        // needs a whitespace run in the haystack, which NO_KEYWORD has none of.
+        // An all-whitespace keyword trims to "" and fires here where the real
+        // function matches nothing -- deliberate, it is already a bug.
+        let found: Vec<&str> = keywords
+            .iter()
+            .copied()
+            .filter(|keyword| {
+                NO_KEYWORD.contains(keyword.trim_matches(|c: char| c.is_ascii_whitespace()))
+            })
+            .collect();
+        assert!(
+            found.is_empty(),
+            "{NO_KEYWORD:?} contains enabled keywords {found:?}, so no_keyword no longer times a full scan"
+        );
+    }
+
     let cases = [
-        ("no_match", SIMPLE_COMMAND),
+        ("no_keyword", NO_KEYWORD),
         ("match_git", "git status --short"),
     ];
 
