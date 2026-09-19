@@ -1032,8 +1032,13 @@ fn refine_ruby_match(meta: &CompiledPattern, matched_text: &str) -> Option<Refin
 /// The first argument of a python call, when that argument is a LIST literal.
 ///
 /// `[^\]]*` spans newlines, so a list broken across lines is still read.
-/// A nested list does not match, and an unmatched call falls back to the
-/// pattern's own Medium meta -- the behaviour before this rule existed.
+/// An unmatched call falls back to the pattern's own Medium meta -- the
+/// behaviour before this rule existed.
+///
+/// The list ends at the FIRST `]`, whatever opened it: a nested list matches,
+/// truncated there, and an element holding a subscript (`os.environ["X"]`,
+/// `sys.argv[1]`) ends the list before the words after it are ever read
+/// (.agent-config-xyi3s).
 static PY_CALL_ARGV_LIST: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\(\s*\[(?P<items>[^\]]*)\]").expect("python argv list regex compiles")
 });
@@ -1061,17 +1066,71 @@ static PY_STRING_LITERAL: LazyLock<Regex> = LazyLock::new(|| {
 /// text (`"$TOOL" <rm> <-rf> /srv` denies, `"$TOOL" <-rf> /srv` allows).
 /// Bailing out on an unreadable head would make the list spelling of that
 /// command weaker than its string spelling again.
-fn python_argv_list(matched_text: &str) -> Option<Vec<&str>> {
+///
+/// The skeleton comes back with a second, POSITIONAL reading
+/// (.agent-config-2uqwz): one word per list element -- the literal when the
+/// element is one, [`PY_UNREAD_ELEMENT`] when it is not -- so the words after
+/// an unread element keep their place. In `["sudo", "-u", user, <rm>, ...]`
+/// the skeleton hands `<rm>` to `-u` as its value; the positional reading does
+/// not. A literal nested in an element (`os.environ.get("SUDO_USER", "root")`)
+/// is part of that element: the skeleton reads it, the positional reading
+/// counts the element once. Neither reading is right alone -- in
+/// `["env", spec, <rm>, ...]` the stand-in is what `env` would run, so only
+/// the skeleton finds `<rm>` -- and the caller judges both, as
+/// [`detect_spawn_argv`] does its two readings. Only elements BETWEEN literals
+/// get a stand-in: a leading one is the head, decided above, and a trailing
+/// one has nothing after it to move.
+///
+/// Elements are counted by the list-level commas between two list-level
+/// literals, less the one that separates neighbours; a comma or a literal
+/// inside a bracket is a call's, not the list's. The depth runs across the
+/// whole list and never goes below the list's own, so a stray closer cannot
+/// underflow it.
+fn python_argv_list(matched_text: &str) -> Option<(Vec<&str>, Vec<&str>)> {
     let caps = PY_CALL_ARGV_LIST.captures(matched_text)?;
     let items = caps.name("items")?.as_str();
 
-    let argv: Vec<&str> = PY_STRING_LITERAL
-        .captures_iter(items)
-        .filter_map(|caps| string_literal_from_caps(&caps))
-        .collect();
+    let mut skeleton = Vec::new();
+    let mut positional = Vec::new();
+    let mut depth = 0_usize;
+    let mut commas = 0_usize;
+    let mut previous_end = 0;
+    for caps in PY_STRING_LITERAL.captures_iter(items) {
+        let (Some(whole), Some(literal)) = (caps.get(0), string_literal_from_caps(&caps)) else {
+            continue;
+        };
+        for c in items[previous_end..whole.start()].chars() {
+            match c {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => commas += 1,
+                _ => {}
+            }
+        }
+        previous_end = whole.end();
+        skeleton.push(literal);
+        if depth == 0 {
+            if !positional.is_empty() {
+                let unread = commas.saturating_sub(1);
+                positional.extend(std::iter::repeat_n(PY_UNREAD_ELEMENT, unread));
+            }
+            positional.push(literal);
+            commas = 0;
+        }
+    }
 
-    if argv.is_empty() { None } else { Some(argv) }
+    if skeleton.is_empty() {
+        None
+    } else {
+        Some((skeleton, positional))
+    }
 }
+
+/// Stands in for a list element that is not a literal. Empty, so it is never
+/// a flag, a `NAME=value`, a wrapper or a destructive command: as a command
+/// word it judges nothing. As a delete's TARGET it is not a catastrophic path
+/// either, so the worst it can reach is the non-blocking `rm_rf`.
+const PY_UNREAD_ELEMENT: &str = "";
 
 /// Upgrade a `subprocess` call that was handed a destructive argv.
 ///
@@ -1087,7 +1146,9 @@ fn python_argv_list(matched_text: &str) -> Option<Vec<&str>> {
 /// reader here: an argv list goes to execve, not to a shell, so it must not be
 /// re-joined into text and split again on metacharacters it never had -- a
 /// semicolon inside an element is a character in an argument and starts no
-/// second command.
+/// second command. Both readings [`python_argv_list`] gives are judged, and the
+/// more severe hit decides; the skeleton goes first, so among equals the
+/// verdict is the one this rule gave before the positional reading existed.
 fn refine_python_match(meta: &CompiledPattern, matched_text: &str) -> RefinedMatchMeta {
     let rule_id = meta.rule_id.as_str();
 
@@ -1097,9 +1158,12 @@ fn refine_python_match(meta: &CompiledPattern, matched_text: &str) -> RefinedMat
             | "heredoc.python.subprocess_call"
             | "heredoc.python.subprocess_popen"
     ) {
-        if let Some(hit) = python_argv_list(matched_text)
-            .and_then(|argv| detect_command_words(argv.iter().copied()))
-        {
+        if let Some(hit) = python_argv_list(matched_text).and_then(|(skeleton, positional)| {
+            strongest_hit([
+                detect_command_words(skeleton.iter().copied()),
+                detect_command_words(positional.iter().copied()),
+            ])
+        }) {
             return RefinedMatchMeta {
                 rule_id: format!("{rule_id}.{}", hit.rule_suffix),
                 reason: hit.reason.to_string(),
