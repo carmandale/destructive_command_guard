@@ -2677,9 +2677,9 @@ fn evaluate_heredoc(
         .unwrap_or(u64::MAX),
         ..context.heredoc_settings.limits
     };
-    let (contents, fallback_needed, unread) =
+    let (contents, fallback_needed, unread, over_cap) =
         match extract_content(command, &deadline_bounded_extraction_limits) {
-            ExtractionResult::Extracted(contents) => (contents, false, None),
+            ExtractionResult::Extracted(contents) => (contents, false, None, false),
             ExtractionResult::NoContent => return None,
             ExtractionResult::Skipped(reasons) => {
                 let is_timeout = reasons
@@ -2760,8 +2760,11 @@ fn evaluate_heredoc(
                 // fidelity). Then, because the rest went UNREAD, run the fallback
                 // check over the whole raw command -- whatever the reason was.
                 let fallback_needed = !skipped.is_empty();
+                let over_cap = skipped
+                    .iter()
+                    .any(|r| matches!(r, SkipReason::ExceededHeredocLimit { .. }));
 
-                (extracted, fallback_needed, unread)
+                (extracted, fallback_needed, unread, over_cap)
             }
             ExtractionResult::Failed(err) => {
                 if !context.heredoc_settings.fallback_on_parse_error {
@@ -2809,6 +2812,28 @@ fn evaluate_heredoc(
     //
     // Reuses `heredoc_body_is_inert` rather than asking a new question, so the
     // veto set keeps the single reader `.agent-config-c29fn` gave it.
+    // The `max_heredocs` cap bounds the per-language AST pass. It used to end
+    // the READING as well: a construct past it met only the fallback sweep, a
+    // short fixed list with no `git clean` in it, so ten harmless
+    // here-strings in front of `bash <<< 'git clean -fdx'` allowed what the
+    // payload alone denies by core.git:clean-force
+    // (`.agent-config-dcg-cap-overflow-fallback-lacks-packs-nvs11`). So the
+    // constructs past the cap are located again, and the loop below gives each
+    // everything but the AST pass: the inert and nested-in-inert skips, and
+    // for shell content the Tier 2.5 pack reading. They join no judged span,
+    // so the sweep still reads their text exactly as it did.
+    let (contents, overflow_from) = if over_cap {
+        with_constructs_past_the_cap(
+            command,
+            context.deadline,
+            deadline_bounded_extraction_limits,
+            contents,
+        )
+    } else {
+        let capped = contents.len();
+        (contents, capped)
+    };
+
     let inert_body_spans: Vec<(usize, std::ops::Range<usize>)> = contents
         .iter()
         .enumerate()
@@ -2836,7 +2861,7 @@ fn evaluate_heredoc(
     // (`.agent-config-dcg-fallback-scans-judged-content-zc6tb`).
     let mut judged_spans: Vec<std::ops::Range<usize>> = Vec::new();
 
-    for (index, content) in contents.iter().enumerate() {
+    'contents: for (index, content) in contents.iter().enumerate() {
         if inert_body_spans.iter().any(|(owner, span)| {
             *owner != index
                 && span.start <= content.byte_range.start
@@ -2853,6 +2878,12 @@ fn evaluate_heredoc(
         if deadline_exceeded(context.deadline)
             || remaining_below(context.deadline, &crate::perf::FULL_HEREDOC_PIPELINE)
         {
+            // Past the cap, running out is not an allow: nothing here was read
+            // before this reader existed, and the sweep below still reads it.
+            // Returning the budget allow would let padding buy one.
+            if index >= overflow_from {
+                break;
+            }
             return Some(EvaluationResult::allowed_due_to_budget());
         }
 
@@ -2926,6 +2957,9 @@ fn evaluate_heredoc(
             let inner_commands = crate::heredoc::extract_shell_commands(&content.content);
             for inner in inner_commands {
                 if deadline_exceeded(context.deadline) {
+                    if index >= overflow_from {
+                        break 'contents;
+                    }
                     return Some(EvaluationResult::allowed_due_to_budget());
                 }
 
@@ -3027,6 +3061,12 @@ fn evaluate_heredoc(
                     }
                 }
             }
+        }
+
+        // Past the cap: no AST pass -- the one cost the cap exists to bound --
+        // and no judged span, so the sweep below still reads this text.
+        if index >= overflow_from {
+            continue;
         }
 
         let matches = match DEFAULT_MATCHER.find_matches_within(
@@ -3180,6 +3220,46 @@ fn evaluate_heredoc(
     }
 
     None
+}
+
+/// `capped` followed by every construct the `max_heredocs` cap left unread, and
+/// the index where those start.
+///
+/// A second extraction without the count cap. It gets half the time left, so it
+/// cannot spend the budget the capped constructs -- which the AST still reads --
+/// need. When it does not reproduce `capped` as its prefix (it timed out first,
+/// say), `capped` comes back alone: a partial re-read never replaces what the
+/// capped pass found.
+fn with_constructs_past_the_cap(
+    command: &str,
+    deadline: Option<&Deadline>,
+    limits: crate::heredoc::ExtractionLimits,
+    capped: Vec<crate::heredoc::ExtractedContent>,
+) -> (Vec<crate::heredoc::ExtractedContent>, usize) {
+    let capped_len = capped.len();
+    let uncapped = crate::heredoc::ExtractionLimits {
+        max_heredocs: usize::MAX,
+        timeout_ms: u64::try_from((sub_step_budget(deadline) / 2).as_millis()).unwrap_or(u64::MAX),
+        ..limits
+    };
+    let all = match extract_content(command, &uncapped) {
+        ExtractionResult::Extracted(all) | ExtractionResult::Partial { extracted: all, .. } => all,
+        ExtractionResult::NoContent
+        | ExtractionResult::Skipped(_)
+        | ExtractionResult::Failed(_) => {
+            return (capped, capped_len);
+        }
+    };
+    let reproduces = all.len() > capped_len
+        && all
+            .iter()
+            .zip(&capped)
+            .all(|(a, c)| a.byte_range == c.byte_range && a.language == c.language);
+    if reproduces {
+        (all, capped_len)
+    } else {
+        (capped, capped_len)
+    }
 }
 
 /// The ranges of `0..len` that `spans` does not cover.
