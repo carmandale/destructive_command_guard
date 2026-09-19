@@ -2767,17 +2767,10 @@ pub fn heredoc_output_reaches_executor(command: &str, heredoc_start: usize) -> b
             // `echo`'s argument. Treating it as an OPENING quote swallowed
             // `| bash` whole. So a quote with no partner closes the span the scan
             // started inside, and scanning continues after it.
-            b'\'' | b'"' => {
-                let quote = b[i];
-                let mut j = i + 1;
-                while j < b.len() && b[j] != quote {
-                    if quote == b'"' && b[j] == b'\\' {
-                        j += 1;
-                    }
-                    j += 1;
-                }
-                i = if j < b.len() { j + 1 } else { i + 1 };
-            }
+            //
+            // The partner is not simply the next bare quote either: see
+            // `skip_quoted_span` for the substitutions a `" "` span can hold.
+            b'\'' | b'"' => i = skip_quoted_span(b, i).unwrap_or(i + 1),
             // A substitution is its own command list. The `;` in `$(true;)` and
             // the `|` in `` `a | b` `` belong to that inner list, not to this
             // pipeline; reading them as this pipeline's separators ends the scan
@@ -2924,8 +2917,49 @@ pub fn compound_output_reaches_executor(command: &str, body_end: usize) -> bool 
     closed_a_compound && !separator_since_closer && heredoc_output_reaches_executor(command, i)
 }
 
-/// Index just past the `)` matching the `(` at `open`, or the end of input.
+/// Index just past the quote closing the span that opens at `open`, or `None`
+/// if it never closes.
+///
+/// A `' '` span ends at the next `'`. A `" "` span does not simply end at the
+/// next `"`: a backslash escapes the byte after it, and `$(`, `${` and a
+/// backtick each open a construct whose quotes are its own. In
+/// `"$(printf "a;b")"` the second `"` opens a string INSIDE the substitution.
+/// Ending the span there left `;b")"` outside it, the `;` ended the pipeline,
+/// and the `| bash` after the argument was never read: the body reached a shell
+/// with the veto cleared
+/// (`.agent-config-dcg-walk-nested-dquote-veto-bypass-xr4v2`). The substitution
+/// scanner already opens a level on `$(` inside `" "`; this is the walk
+/// agreeing with it.
+fn skip_quoted_span(b: &[u8], open: usize) -> Option<usize> {
+    let quote = b[open];
+    let mut i = open + 1;
+    while i < b.len() {
+        match b[i] {
+            c if c == quote => return Some(i + 1),
+            _ if quote == b'\'' => i += 1,
+            b'\\' => i += 2,
+            b'$' if matches!(b.get(i + 1), Some(b'(' | b'{')) => {
+                i = skip_balanced_paren(b, i + 1);
+            }
+            b'`' => i = skip_backticks(b, i),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Index just past the `)` matching the `(` at `open` -- or the `}` matching a
+/// `{`, for `${...}` -- or the end of input.
+///
+/// The brace form is not a paren count with a different name: in
+/// `"${X:-)"a;b"}"` the `)` is a literal in the default word, and only the `}`
+/// closes the expansion.
 fn skip_balanced_paren(b: &[u8], open: usize) -> usize {
+    let (opener, closer) = if b.get(open) == Some(&b'{') {
+        (b'{', b'}')
+    } else {
+        (b'(', b')')
+    };
     let mut depth = 0usize;
     let mut i = open;
     while i < b.len() {
@@ -2935,11 +2969,17 @@ fn skip_balanced_paren(b: &[u8], open: usize) -> usize {
                 let quote = b[i];
                 i += 1;
                 while i < b.len() && b[i] != quote {
+                    // `\"` does not close a `" "` span here either: in
+                    // `"$(printf "a\";b")"` it did, and the `;` behind it ended
+                    // the pipeline.
+                    if quote == b'"' && b[i] == b'\\' {
+                        i += 1;
+                    }
                     i += 1;
                 }
             }
-            b'(' => depth += 1,
-            b')' => {
+            c if c == opener => depth += 1,
+            c if c == closer => {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
                     return i + 1;
