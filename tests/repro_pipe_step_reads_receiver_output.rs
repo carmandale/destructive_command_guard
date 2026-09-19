@@ -31,19 +31,19 @@
 //! Here-strings reach the same reader since `.agent-config-7vu4q` (`7f51cca9`),
 //! so their twins are pinned here too.
 //!
-//! WHICH ROW IS A KILL. Measured on this tree: mutant M2 below restores the
-//! unconditional step 2, which is byte-for-byte what `origin/main` 7f51cca9
-//! does, so M2's reds ARE the pre-fix reds. Hook mode via `spawn::dcg()`.
+//! WHICH ROW IS A KILL, measured on `origin/main` 71b04bbd by mutant M2 below,
+//! which restores the unconditional step 2 and is therefore byte-equivalent to
+//! unfixed main. Hook mode via `spawn::dcg()`.
 //!
 //! ```text
-//!   row                                                   | pre-fix | post-fix
-//!   -------------------------------------------------------|---------|---------
-//!   an_output_consumer_does_not_name_the_language_...       | RED     | green
-//!   an_output_consumer_naming_another_interpreter_...       | RED     | green
-//!   a_redirection_before_the_output_consumer_...            | RED     | green
+//!   row                                                   | unfixed | fixed
+//!   -------------------------------------------------------|---------|------
 //!   a_versioned_receiver_is_not_overridden_by_a_consumer    | RED     | green
-//!   a_herestring_twin_is_not_overridden_either              | RED     | green
 //!   a_versioned_herestring_twin_is_not_overridden_either    | RED     | green
+//!   an_output_consumer_does_not_name_the_language_...       | green   | green
+//!   an_output_consumer_naming_another_interpreter_...       | green   | green
+//!   a_redirection_before_the_output_consumer_...            | green   | green
+//!   a_herestring_twin_is_not_overridden_either              | green   | green
 //!   a_data_sink_receiver_still_takes_...                    | green   | green
 //!   a_tee_receiver_still_takes_...                          | green   | green
 //!   a_receiverless_heredoc_still_takes_...                  | green   | green
@@ -53,35 +53,57 @@
 //!   a_benign_body_behind_a_data_sink_still_allows           | green   | green
 //! ```
 //!
-//! The six RED rows are the kill. The three `still_takes` rows are the control
-//! that matters most: they prove step 2 still fires where it is earned, so a
-//! green kill row means the reader changed and not that step 2 was deleted.
+//! ONLY TWO ROWS ARE KILLS TODAY, and saying otherwise would overstate this
+//! change. The four `sudo -u root python3` rows WERE red -- measured on
+//! `7f51cca9`, before `.agent-config-a09gf` landed, where M2 turned six rows
+//! red. a09gf taught the receiver reader to resolve THROUGH a wrapper's
+//! options, so `sudo -u root python3` now resolves at step 1 and never reaches
+//! step 2. Those four rows are kept as REGRESSION GUARDS, not as evidence for
+//! this fix: they go red again the moment that resolution regresses, and they
+//! are the only rows that would notice.
+//!
+//! What a09gf could not reach is a receiver the reader returns None for.
+//! `python3.11` is that case, and it is why this bead stayed open after a09gf:
+//! the two surviving kill rows are both versioned-interpreter rows.
+//!
+//! The three `still_takes` rows are the control that matters most: they prove
+//! step 2 still fires where it is earned, so a green kill row means the reader
+//! changed and not that step 2 was deleted.
 //! `a_receiverless_heredoc_still_takes_...` pins the guard from the other side
 //! -- it passes only because `detect`'s Priority 1b still consults pipe
 //! destinations. The two benign rows are the fail-open guards: the fix must not
 //! buy its green by denying every piped heredoc.
 //!
-//! THE MUTANTS, each run on this tree and each restored after:
+//! THE MUTANTS, each run on `origin/main` 71b04bbd and each restored after:
 //!
 //! ```text
 //!   mutant                                    | rows it turns red
-//!   -------------------------------------------|--------------------------------
-//!   M1  `is_some_and` -> `is_none_or`          | the two versioned rows only (2)
-//!   M2  delete the guard (unconditional        | all six kill rows (6)
-//!         step 2, i.e. origin/main)            |
+//!   -------------------------------------------|-------------------------------
+//!   M1  `is_some_and` -> `is_none_or`          | the two versioned rows (2)
+//!   M2  delete the guard (unconditional        | the two versioned rows (2)
+//!         step 2, i.e. unfixed main)           |
 //! ```
 //!
-//! M1 is the reason the two versioned rows are here at all. It is the mutant a
-//! reviewer would expect to be equivalent, and it is not: `sudo -u root python3`
-//! resolves its receiver to `Some("root")`, so `is_none_or` still returns false
-//! and those four rows stay green under it. Only a receiver the reader returns
-//! None for -- `python3.11` -- separates the two spellings. Without those two
-//! rows, `is_none_or` would ship and half the class would still be open.
+//! M1 and M2 are caught by the same two rows on this tree, so M1 adds no
+//! discriminating power HERE -- it is kept because it is the mutant a reviewer
+//! would expect to be equivalent and is not. On the pre-a09gf tree the two
+//! differ: M2 turned all six red while M1 turned only these two, because
+//! `sudo -u root python3` resolved its receiver to `Some("root")` and
+//! `is_none_or` still returned false for it. That is the measurement that chose
+//! `is_some_and`: treating a None receiver as pass-through would have shipped a
+//! fix that left both surviving kill rows open.
 //!
-//! NOT FIXED HERE, and not a regression of this change: `cat <<< BODY | python3`
-//! allows on both binaries -- a here-string behind a data-sink receiver is
-//! masked as inert and the pipeline veto does not reach it. Its heredoc twin
-//! (`a_data_sink_receiver_still_takes_...`) denies. Filed as its own bead.
+//! A NOTE THAT WAS HERE IS GONE, and why, because the trap it fell into is the
+//! one `rmtree_body_dq` below exists to prevent. It claimed
+//! `cat <<< BODY | python3` was an unfixed data-sink hole, from a probe row
+//! that spelled the body single-quoted INSIDE a single-quoted here-string.
+//! Bash dequotes that to `shutil.rmtree(/srv/data)` -- a SyntaxError, not a
+//! call -- so the ALLOW was correct and measured nothing. With the
+//! double-quoted body that row denies, and
+//! `receivers_the_word_reader_misses_are_read_like_their_heredoc_twins` in
+//! `repro_herestring_language_from_receiver.rs` already pins it.
+//! Caught by the `.agent-config-dcg-herestring-datasink-pipe-veto-mv3na` lane
+//! and re-measured here before removal.
 
 #![allow(clippy::doc_markdown, clippy::uninlined_format_args)]
 
