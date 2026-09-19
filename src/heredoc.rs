@@ -971,9 +971,15 @@ static HERESTRING_SINGLE_QUOTE: LazyLock<Regex> = LazyLock::new(|| {
 
 /// Regex for here-string extraction with double quotes (<<<).
 static HERESTRING_DOUBLE_QUOTE: LazyLock<Regex> = LazyLock::new(|| {
-    // Matches: <<< "content" - content can contain single quotes
-    // Group 1: content
-    Regex::new(r#"<<<\s*"([^"]*)""#).expect("herestring double-quote regex compiles")
+    // Matches: <<< "content" - content can contain single quotes, and
+    // BACKSLASH-ESCAPED double quotes. Group 1: content.
+    //
+    // `[^"]*` cannot tell `\"` from `"`, so it ended the operand at the first
+    // ESCAPED quote and handed the matcher a fragment of the real body
+    // (`.agent-config-gt800`). `(?:[^"\\]|\\[\s\S])*` consumes a backslash and
+    // whatever follows it as one unit, so only an UNESCAPED quote closes. The
+    // two branches share no first character, so there is nothing to backtrack.
+    Regex::new(r#"<<<\s*"((?:[^"\\]|\\[\s\S])*)""#).expect("herestring double-quote regex compiles")
 });
 
 /// Regex for here-string extraction without quotes (<<<).
@@ -1000,9 +1006,52 @@ static INLINE_SCRIPT_DOUBLE_QUOTE: LazyLock<Regex> = LazyLock::new(|| {
     // Groups: (1) interpreter, (2) optional "js" suffix for node, (3) flag, (4) content
     // Supports versioned interpreters: python3.11, ruby3.0, perl5.36, node18, nodejs20, etc.
     // Supports Windows .exe extensions: python.exe, python3.11.exe, etc.
-    Regex::new(r#"\b(python[0-9.]*(?:\.exe)?|ruby[0-9.]*(?:\.exe)?|irb[0-9.]*(?:\.exe)?|perl[0-9.]*(?:\.exe)?|node(js)?[0-9.]*(?:\.exe)?|php[0-9.]*(?:\.exe)?|lua[0-9.]*(?:\.exe)?|sh(?:\.exe)?|bash(?:\.exe)?|zsh(?:\.exe)?|fish(?:\.exe)?)\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+(-[A-Za-z]*[ceEpr][A-Za-z]*)\s*"([^"]*)""#)
+    Regex::new(r#"\b(python[0-9.]*(?:\.exe)?|ruby[0-9.]*(?:\.exe)?|irb[0-9.]*(?:\.exe)?|perl[0-9.]*(?:\.exe)?|node(js)?[0-9.]*(?:\.exe)?|php[0-9.]*(?:\.exe)?|lua[0-9.]*(?:\.exe)?|sh(?:\.exe)?|bash(?:\.exe)?|zsh(?:\.exe)?|fish(?:\.exe)?)\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+(-[A-Za-z]*[ceEpr][A-Za-z]*)\s*"((?:[^"\\]|\\[\s\S])*)""#)
         .expect("inline script double-quote regex compiles")
 });
+
+/// Undo bash's double-quote escapes, so the matcher reads what the interpreter
+/// will run.
+///
+/// Inside double quotes bash keeps a backslash special before exactly four
+/// characters -- `$`, `` ` ``, `"`, `\` -- and before a newline, where the pair
+/// is a line continuation and disappears. Every other backslash is a literal
+/// backslash that reaches the interpreter unchanged.
+///
+/// That distinction is the whole point. `python3 -c "shutil.rmtree(\"/srv\")"`
+/// runs `shutil.rmtree("/srv")`, and a matcher handed the backslashes sees a
+/// string that is not python. But `python3 -c "re.compile(\d)"` really does
+/// pass `\d` through, so unescaping it would be inventing a different program.
+/// Applied ONLY to double-quoted operands: single-quoted bash strings have no
+/// escapes at all, and unquoted here-strings are word-split, not dequoted.
+fn unescape_double_quoted(content: &str) -> String {
+    if !content.contains('\\') {
+        return content.to_string();
+    }
+    let mut out = String::with_capacity(content.len());
+    let mut chars = content.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            // The four characters a backslash escapes inside double quotes.
+            Some(next @ ('$' | '`' | '"' | '\\')) => out.push(next),
+            // A line continuation: both characters are removed.
+            Some('\n') => {}
+            // Everything else: the backslash is a literal, and so is what
+            // follows it.
+            Some(next) => {
+                out.push('\\');
+                out.push(next);
+            }
+            // A trailing backslash is a literal backslash.
+            None => out.push('\\'),
+        }
+    }
+    out
+}
 
 /// Compile every extraction pattern, so no caller pays for it later.
 ///
@@ -1440,7 +1489,7 @@ fn extract_inline_scripts(
 
     // Helper to extract from a given regex pattern
     let mut hit_limit = false;
-    let mut extract_from_pattern = |pattern: &Regex| {
+    let mut extract_from_pattern = |pattern: &Regex, unescape: bool| {
         for cap in pattern.captures_iter(command) {
             if record_timeout_if_needed(start_time, timeout, limits.timeout_ms, skip_reasons) {
                 return;
@@ -1486,8 +1535,14 @@ fn extract_inline_scripts(
             }
 
             let full_match = cap.get(0).unwrap();
+            let content = if unescape {
+                unescape_double_quoted(content)
+            } else {
+                content.to_string()
+            };
+
             extracted.push(ExtractedContent {
-                content: content.to_string(),
+                content,
                 language: ScriptLanguage::from_command(cmd_name),
                 delimiter: None,
                 byte_range: full_match.start()..full_match.end(),
@@ -1500,8 +1555,8 @@ fn extract_inline_scripts(
     };
 
     // Extract from both single-quoted and double-quoted patterns
-    extract_from_pattern(&INLINE_SCRIPT_SINGLE_QUOTE);
-    extract_from_pattern(&INLINE_SCRIPT_DOUBLE_QUOTE);
+    extract_from_pattern(&INLINE_SCRIPT_SINGLE_QUOTE, false);
+    extract_from_pattern(&INLINE_SCRIPT_DOUBLE_QUOTE, true);
 
     if hit_limit {
         record_heredoc_limit(limits, skip_reasons);
@@ -1528,7 +1583,7 @@ fn extract_herestrings(
     let mut hit_limit = false;
 
     // Helper to extract from a given pattern (quoted patterns have content in group 1)
-    let mut extract_quoted = |pattern: &Regex, is_quoted: bool| {
+    let mut extract_quoted = |pattern: &Regex, is_quoted: bool, unescape: bool| {
         for cap in pattern.captures_iter(command) {
             if record_timeout_if_needed(start_time, timeout, limits.timeout_ms, skip_reasons) {
                 return;
@@ -1551,8 +1606,14 @@ fn extract_herestrings(
             // Extract the command that receives the here-string
             let target_cmd = extract_heredoc_target_command(command, full_match.start());
 
+            let content = if unescape {
+                unescape_double_quoted(content)
+            } else {
+                content.to_string()
+            };
+
             extracted.push(ExtractedContent {
-                content: content.to_string(),
+                content,
                 language: ScriptLanguage::Bash, // Here-strings are bash-specific
                 delimiter: None,
                 byte_range: full_match.start()..full_match.end(),
@@ -1566,9 +1627,9 @@ fn extract_herestrings(
 
     // Extract from single-quoted, double-quoted, then unquoted patterns
     // Quoted patterns first to avoid unquoted matching the outer quotes
-    extract_quoted(&HERESTRING_SINGLE_QUOTE, true);
-    extract_quoted(&HERESTRING_DOUBLE_QUOTE, true);
-    extract_quoted(&HERESTRING_UNQUOTED, false);
+    extract_quoted(&HERESTRING_SINGLE_QUOTE, true, false);
+    extract_quoted(&HERESTRING_DOUBLE_QUOTE, true, true);
+    extract_quoted(&HERESTRING_UNQUOTED, false, false);
 
     if hit_limit {
         record_heredoc_limit(limits, skip_reasons);
