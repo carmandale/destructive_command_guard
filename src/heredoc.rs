@@ -720,19 +720,8 @@ impl ScriptLanguage {
 
         // Priority 1b: Check pipe destinations (e.g. "cat <<EOF | python")
         // This handles cases where the heredoc consumer is later in the pipeline
-        if cmd.contains('|') {
-            for segment in cmd.split('|') {
-                let segment = segment.trim();
-                if segment.is_empty() {
-                    continue;
-                }
-                if let Some(interpreter) = Self::extract_head_interpreter(segment) {
-                    let lang = Self::from_command(&interpreter);
-                    if lang != Self::Unknown {
-                        return (lang, DetectionConfidence::CommandPrefix);
-                    }
-                }
-            }
+        if let Some(lang) = Self::from_pipe_destinations(cmd) {
+            return (lang, DetectionConfidence::CommandPrefix);
         }
 
         // Priority 2: Shebang detection
@@ -747,6 +736,19 @@ impl ScriptLanguage {
 
         // Priority 4: Unknown
         (Self::Unknown, DetectionConfidence::Unknown)
+    }
+
+    /// The first `|`-separated segment of `cmd` whose head names an interpreter.
+    fn from_pipe_destinations(cmd: &str) -> Option<Self> {
+        if !cmd.contains('|') {
+            return None;
+        }
+        cmd.split('|')
+            .map(str::trim)
+            .filter(|segment| !segment.is_empty())
+            .filter_map(Self::extract_head_interpreter)
+            .map(|interpreter| Self::from_command(&interpreter))
+            .find(|lang| *lang != Self::Unknown)
     }
 
     /// Extract the interpreter name from the head of a command string.
@@ -1658,9 +1660,15 @@ fn extract_heredocs(
             timeout,
         ) {
             Ok((content, end_pos, body_start_abs, body_end_abs)) => {
-                let (language, _confidence) = ScriptLanguage::detect(command, &content);
                 // Extract the command that receives the heredoc
                 let target_cmd = extract_heredoc_target_command(command, full_match.start());
+                let language = heredoc_language(
+                    command,
+                    full_match.start(),
+                    start_pos,
+                    target_cmd.as_deref(),
+                    &content,
+                );
                 extracted.push(ExtractedContent {
                     content,
                     language,
@@ -1686,6 +1694,58 @@ fn extract_heredocs(
     }
 }
 
+/// The language a heredoc body is read as: that of the command that RECEIVES
+/// it, not of whatever command happens to start the line or the input.
+///
+/// `ScriptLanguage::detect(command, ..)` takes Priority 1 from the command's
+/// first word, and it used to be handed the WHOLE command. So every heredoc took
+/// the language of the input's first interpreter: in `node -e '1'; python3
+/// <<'PY' ... PY` the python body was read as javascript, met no python rule,
+/// and was allowed -- while `echo hi; python3 <<'PY'` denied, because `echo`
+/// names no language and content heuristics found the `import`
+/// (`.agent-config-w7xjw`). A newline did not help: `node -e '1'` on the line
+/// before gave the same allow.
+///
+/// So the receiver decides first, then the first pipeline stage on the
+/// operator's own line that names an interpreter (`cat <<'EOF' | python3`).
+/// Only when neither names one does the old chain run, and then from the
+/// operator's line on rather than from the start of the input -- no earlier
+/// line can hold this heredoc's receiver. That fallback is kept on
+/// purpose rather than dropped for content heuristics: the receiver reader does
+/// not know `sudo -u USER`, so `sudo -u root python3 <<'PY'` resolves its
+/// receiver to `root`, and only the wrapper-aware head reader still finds
+/// `python3` there. The residual is stated, not hidden: a receiver the reader
+/// cannot resolve AND a different interpreter earlier on the same line
+/// (`node -e 1; sudo -u root python3 <<'PY'`) still reads the earlier one, as
+/// every heredoc did before this function existed.
+fn heredoc_language(
+    command: &str,
+    heredoc_start: usize,
+    operator_line_end: usize,
+    receiver: Option<&str>,
+    content: &str,
+) -> ScriptLanguage {
+    receiver
+        .map(ScriptLanguage::from_command)
+        .filter(|lang| *lang != ScriptLanguage::Unknown)
+        .or_else(|| {
+            command
+                .get(heredoc_start..operator_line_end)
+                .and_then(ScriptLanguage::from_pipe_destinations)
+        })
+        .unwrap_or_else(|| {
+            let line_start = operator_line_start(command, heredoc_start);
+            ScriptLanguage::detect(&command[line_start..], content).0
+        })
+}
+
+/// Start of the physical line holding the heredoc operator at `heredoc_start`.
+fn operator_line_start(command: &str, heredoc_start: usize) -> usize {
+    command[..heredoc_start]
+        .rfind(['\n', '\r'])
+        .map_or(0, |i| i + 1)
+}
+
 /// Extract the command that receives a heredoc or here-string.
 ///
 /// Looks backwards from the heredoc operator position to find the command word.
@@ -1709,9 +1769,7 @@ fn extract_heredoc_target_command(command: &str, heredoc_start: usize) -> Option
     // sink) and mask the executing `bash` body: a false negative. Limiting the
     // scan to the current line risks only a false positive, never a false
     // negative (the conservative direction for a security guard).
-    let line_start = command[..heredoc_start]
-        .rfind(['\n', '\r'])
-        .map_or(0, |i| i + 1);
+    let line_start = operator_line_start(command, heredoc_start);
     let before = &command[line_start..heredoc_start];
 
     // Trim trailing whitespace before the heredoc operator
