@@ -1739,12 +1739,60 @@ where
     match cmd.rsplit('/').next().unwrap_or(cmd) {
         "git" => detect_git_destructive(words),
         "rm" => detect_rm_rf_destructive(words),
-        "sh" | "bash" | "zsh" | "dash" => match (words.next(), words.next()) {
-            (Some("-c"), Some(script)) => detect_shell_payload(script),
-            _ => None,
-        },
+        "sh" | "bash" | "zsh" | "dash" => shell_c_script(words).and_then(detect_shell_payload),
         _ => None,
     }
+}
+
+/// Long options a shell takes as one word after a single dash as well as two
+/// (`-norc`, `--norc`), so their letters are not read as a short-flag cluster.
+const SHELL_LONG_OPTIONS: [&str; 9] = [
+    "norc",
+    "noprofile",
+    "noediting",
+    "login",
+    "posix",
+    "restricted",
+    "verbose",
+    "debugger",
+    "version",
+];
+
+/// Long options that take the next word as their value.
+const SHELL_LONG_OPTIONS_WITH_VALUE: [&str; 3] = ["rcfile", "init-file", "emulate"];
+
+/// The script of `sh -c <script>` in bash's option grammar, applied to
+/// sh/bash/zsh/dash (.agent-config-wx4ny). It extends heredoc.rs's inline-script
+/// trigger, which skips flags only, with option values and end-of-options:
+/// options are read until the first operand, `--` or a lone `-`; a `-` or `+`
+/// cluster holding `c` (`-c`, `-lc`, `+c`) makes that first operand the script,
+/// and without one it is a script FILE, which is not read. Each `o`/`O` in a
+/// cluster takes the next word (`-o pipefail`, `-oO a b`), as do `--rcfile`,
+/// `--init-file` and zsh's `--emulate`. Not zsh's own grammar: an attached
+/// `-oNAME` and a value-less `-O` are misread there.
+fn shell_c_script<'a>(mut words: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    let mut command_mode = false;
+    while let Some(word) = words.next() {
+        if word == "--" || word == "-" {
+            return words.next().filter(|_| command_mode);
+        }
+        let Some(flags) = word.strip_prefix(['-', '+']) else {
+            return command_mode.then_some(word);
+        };
+        let long = flags.strip_prefix('-').unwrap_or(flags);
+        if SHELL_LONG_OPTIONS_WITH_VALUE.contains(&long) {
+            words.next();
+            continue;
+        }
+        if flags.starts_with('-') || SHELL_LONG_OPTIONS.contains(&long) {
+            continue;
+        }
+        command_mode |= flags.contains('c');
+        for _ in flags.matches(['o', 'O']) {
+            words.next();
+        }
+    }
+    None
 }
 
 fn detect_git_destructive<'a, I>(tokens: I) -> Option<ShellPayloadHit>
@@ -4031,6 +4079,41 @@ mod tests {
                 got, expected_len,
                 "all default patterns should compile for {lang:?}"
             );
+        }
+    }
+
+    #[test]
+    fn shell_c_script_reads_combined_and_interleaved_flags() {
+        // .agent-config-wx4ny: options until the first operand; that operand is
+        // the script only under a `-` or `+` cluster holding `c`.
+        for (words, script) in [
+            (&["-c", "x"][..], Some("x")),
+            (&["-lc", "x"][..], Some("x")),
+            (&["-e", "-c", "x"][..], Some("x")),
+            (&["-c", "-e", "x"][..], Some("x")),
+            (&["-c", "--", "x"][..], Some("x")),
+            (&["--norc", "-ec", "x"][..], Some("x")),
+            (&["-noprofile", "-c", "x"][..], Some("x")),
+            (&["--rcfile", "f", "-c", "x"][..], Some("x")),
+            (&["-rcfile", "f", "-c", "x"][..], Some("x")),
+            (&["--emulate", "sh", "-c", "x"][..], Some("x")),
+            (&["-o", "pipefail", "-c", "x"][..], Some("x")),
+            (&["-c", "-o", "pipefail", "x"][..], Some("x")),
+            (&["-co", "pipefail", "x"][..], Some("x")),
+            (&["-oO", "a", "b", "-c", "x"][..], Some("x")),
+            (&["+O", "extglob", "-c", "x"][..], Some("x")),
+            // An operand before any `c` flag is a script FILE, and ends the scan.
+            (&["script.sh", "-c", "x"][..], None),
+            (&["-l", "script.sh"][..], None),
+            // `--` and a lone `-` end the options: a later `-c` is a file name.
+            (&["--", "-c", "x"][..], None),
+            (&["-", "-c", "x"][..], None),
+            // `+c` runs the operand too, in every one of these shells.
+            (&["+c", "x"][..], Some("x")),
+            (&["+lc", "x"][..], Some("x")),
+            (&["-c"][..], None),
+        ] {
+            assert_eq!(shell_c_script(words.iter().copied()), script, "{words:?}");
         }
     }
 

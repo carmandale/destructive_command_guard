@@ -255,6 +255,67 @@ fn a_spawn_sync_of_a_shell_script_is_read_as_a_script() {
 }
 
 #[test]
+fn a_shell_given_combined_or_interleaved_flags_is_read_as_a_script() {
+    // `bash -lc`, `sh -ec`, `bash -o pipefail -c` were read as no script at all
+    // (.agent-config-wx4ny). `git reset -q --hard` is a spelling core.git's
+    // raw-text regex misses, so before this change nothing denied these rows.
+    let quiet = format!("{GIT} reset -q --hard");
+    for (call, argv, rule) in [
+        (
+            "spawnSync",
+            format!(r#""bash",["-lc","{quiet}"]"#),
+            "heredoc.javascript:spawnsync.git_reset_hard",
+        ),
+        (
+            "execFileSync",
+            format!(r#""bash",["-o","pipefail","-c","{quiet}"]"#),
+            "heredoc.javascript:execfilesync.git_reset_hard",
+        ),
+        (
+            "spawnSync",
+            format!(r#""bash",["-c","-e","{quiet}"]"#),
+            "heredoc.javascript:spawnsync.git_reset_hard",
+        ),
+        // The bead's own row.
+        (
+            "spawn",
+            format!(r#""sh",["-ec","{GIT} reset --hard"]"#),
+            "heredoc.javascript:spawn.git_reset_hard",
+        ),
+        // `+c` runs the operand as a script too.
+        (
+            "spawnSync",
+            format!(r#""bash",["+c","{quiet}"]"#),
+            "heredoc.javascript:spawnsync.git_reset_hard",
+        ),
+        // The other two shells the arm names read the same grammar.
+        (
+            "spawnSync",
+            format!(r#""zsh",["-lc","{quiet}"]"#),
+            "heredoc.javascript:spawnsync.git_reset_hard",
+        ),
+        (
+            "execFileSync",
+            format!(r#""dash",["+ec","{quiet}"]"#),
+            "heredoc.javascript:execfilesync.git_reset_hard",
+        ),
+    ] {
+        let body = format!(r#"const cp=require("child_process"); cp.{call}({argv})"#);
+        assert_denied_by(&node(&body), rule);
+    }
+    // Controls: without a `c` flag the operand is a script FILE, and an operand
+    // before `-c` ends the options -- neither is read as a script.
+    for argv in [
+        format!(r#""bash",["-l","{quiet}"]"#),
+        format!(r#""bash",["deploy.sh","-c","{quiet}"]"#),
+    ] {
+        assert_allowed(&node(&format!(
+            r#"const cp=require("child_process"); cp.spawnSync({argv})"#
+        )));
+    }
+}
+
+#[test]
 fn a_spawn_sync_through_sudo_still_denies() {
     // The wrapper skip the shell-string reader had must survive the argv reader.
     let body =

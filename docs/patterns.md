@@ -268,7 +268,13 @@ All derived rule IDs are valid allowlist targets.
   rules, which read its shell string but miss spellings this rule reads
   (`git reset -q --hard`).
 - An argv (`spawn*`, `execFile*`) is judged both as words (the command and
-  wrappers compared by basename, an `sh -c` script read) and as the joined
+  wrappers compared by basename, an `sh -c` script read in the shell's option
+  grammar (bash's, also applied to zsh -- whose attached `-oNAME` and
+  value-less `-O` are misread): `bash -lc`, `bash +c`, `sh -e -c`, `bash -c -e`,
+  `-o`/`-O` with their value,
+  `--rcfile`/`--init-file`/`--emulate` with theirs, bash's single-dash long
+  options (`-norc`); options end at the first operand, `--` or `-`, and an
+  operand before any `c` flag is a script file, not read) and as the joined
   shell line (the way `shell: true` runs it, and the spawnSync rule's reading
   before any receiver was widened); the MOST SEVERE hit of either reading, or
   of any segment of a shell line, decides -- a less severe hit never hides a
