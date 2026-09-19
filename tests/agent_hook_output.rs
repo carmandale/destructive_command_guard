@@ -908,6 +908,57 @@ fn test_policy_warned_rule_inside_bash_does_not_hide_the_next_command() {
     );
 }
 
+/// Tier 2.5 recorded only the rule a command node's inner evaluation RETURNED,
+/// and a node can hold several: a held inline script in its arguments comes
+/// back ahead of the pack's match, and the pack scan returns only the first
+/// match it held. Either way a warned twin went unrecorded, and its bash AST
+/// rule denied a line whose every rule the policy warns
+/// (.agent-config-dcg-tier25-single-inner-verdict-jxl8n). Each wrapped line now
+/// answers as its unwrapped twin does; the twin, which no bash AST pass reads,
+/// is asserted first as the control. The git rows need only the two rules the
+/// live config warns.
+#[test]
+fn test_warned_twin_held_behind_another_rule_still_only_warns() {
+    for (wrapped, twin, rule) in [
+        // Behind a held inline script.
+        (
+            "bash -c 'rm -rf ./build $(bash -c \"git stash drop\")'",
+            "rm -rf ./build $(bash -c \"git stash drop\")",
+            "core.git:stash-drop",
+        ),
+        (
+            "bash -c 'git reset --hard origin/main $(bash -c \"git stash drop\")'",
+            "git reset --hard origin/main $(bash -c \"git stash drop\")",
+            "core.git:stash-drop",
+        ),
+        (
+            "bash -c 'git clean -fd ./build $(bash -c \"git stash drop\")'",
+            "git clean -fd ./build $(bash -c \"git stash drop\")",
+            "core.git:stash-drop",
+        ),
+        // Behind the pack scan's first held match: core.filesystem runs
+        // before core.git.
+        (
+            "bash -c 'git reset --hard origin/main $(rm -rf ./build)'",
+            "git reset --hard origin/main $(rm -rf ./build)",
+            "core.filesystem:rm-rf-general",
+        ),
+    ] {
+        assert_warned_by(twin, run_hook_mode_with_warned_rules(twin), rule);
+        assert_warned_by(wrapped, run_hook_mode_with_warned_rules(wrapped), rule);
+    }
+
+    // Control: the node's held rules are recorded, not every bash rule on it
+    // waved through. core.filesystem does not deny a bare `rm -r`, so no twin
+    // is held and `heredoc.bash.rm_r` still decides.
+    let command = "bash -c 'rm -r /srv/data $(bash -c \"git stash drop\")'";
+    assert_denied_by(
+        command,
+        run_hook_mode_with_warned_rules(command),
+        "heredoc.bash:rm_r",
+    );
+}
+
 /// Assert the hook let `command` run with a warning that names `rule`.
 fn assert_warned_by(command: &str, (stdout, stderr, exit_code): (String, String, i32), rule: &str) {
     assert_eq!(

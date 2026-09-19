@@ -1455,6 +1455,7 @@ fn evaluate_config_with_source(
         None,
         None,
         deadline,
+        None,
     )
 }
 
@@ -1614,10 +1615,15 @@ pub fn evaluate_command_with_pack_order_deadline_at_path(
         allow_once_audit,
         project_path,
         deadline,
+        None,
     )
 }
 
 /// The body shared by every entry point, with the allow-once source named.
+///
+/// `held_pack_rules`, when given, receives the `(pack_id, pattern_name)` of
+/// every pack match the pack scan held because it does not block -- not just
+/// the one that comes back. Tier 2.5 asks for it; the entry points do not.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
 fn evaluate_at_path_impl(
@@ -1634,6 +1640,7 @@ fn evaluate_at_path_impl(
     allow_once_audit: Option<&crate::pending_exceptions::AllowOnceAuditConfig<'_>>,
     project_path: Option<&Path>,
     deadline: Option<&Deadline>,
+    held_pack_rules: Option<&mut Vec<(String, String)>>,
 ) -> EvaluationResult {
     let consult_allow_once = allow_once_source == AllowOnceSource::Ambient;
 
@@ -1819,6 +1826,7 @@ fn evaluate_at_path_impl(
         // deadline to pass, and its callers are not the hook.
         deadline,
         project_path,
+        held_pack_rules,
     );
     answer_after_pack_scan(
         result,
@@ -1888,6 +1896,7 @@ fn evaluate_packs_with_allowlists(
     confidence: &crate::config::ConfidenceConfig,
     deadline: Option<&Deadline>,
     project_path: Option<&Path>,
+    mut held_pack_rules: Option<&mut Vec<(String, String)>>,
 ) -> EvaluationResult {
     if deadline_exceeded(deadline) || remaining_below(deadline, &crate::perf::PATTERN_MATCH) {
         return EvaluationResult::allowed_due_to_budget();
@@ -2090,6 +2099,9 @@ fn evaluate_packs_with_allowlists(
 
                     if decision_blocks(policy, confidence, original_command, &decision) {
                         return decision;
+                    }
+                    if let Some(held) = held_pack_rules.as_deref_mut() {
+                        held.push((pack_id.clone(), hit.pattern_name.to_string()));
                     }
                     if pending_non_blocking.is_none() {
                         pending_non_blocking = Some(decision);
@@ -2314,6 +2326,17 @@ fn evaluate_packs_with_allowlists(
                 };
 
                 let denies = decision_blocks(policy, confidence, original_command, &decision);
+                // Only the first match held comes back, so a caller that must
+                // know them all is told each one here: Tier 2.5's twin check
+                // on `git reset --hard origin/main $(rm -rf ./build)` got back
+                // rm-rf-general alone, never the warned reset-hard, and
+                // `heredoc.bash.git_reset_hard` denied the node
+                // (.agent-config-dcg-tier25-single-inner-verdict-jxl8n).
+                if !denies {
+                    if let Some(held) = held_pack_rules.as_deref_mut() {
+                        held.push((pack_id.clone(), pattern_name.to_string()));
+                    }
+                }
                 if past_exemption {
                     hold_first_blocking(&mut found_past_exemption, decision, denies);
                     continue;
@@ -2592,6 +2615,7 @@ where
         &config.confidence,
         None,
         None, // project_path: legacy function, path-aware allowlisting unavailable
+        None,
     );
     answer_after_pack_scan(
         result,
@@ -2870,8 +2894,10 @@ fn evaluate_heredoc(
         // If content is Bash, extract inner commands and feed them back to the full evaluator.
         // This ensures that `kubectl`, `docker`, etc. inside heredocs are checked against their packs.
         // Each held inner denial: the start of its command node in the content,
-        // and the rule that denied it. The AST pass below leaves alone a bash
-        // match on that node that RESTATES that rule (`bash_rule_restates`):
+        // the rule its evaluation returned, and every pack match its pack scan
+        // held (.agent-config-dcg-tier25-single-inner-verdict-jxl8n). The AST
+        // pass below leaves alone a bash match on that node that RESTATES one
+        // of them (`bash_rule_restates`):
         // `heredoc.bash.git_reset_hard` would otherwise deny, under a rule the
         // policy never named, the `git reset --hard` it chose to warn on. The
         // twin is left alone even when the policy does name it: a deny on the
@@ -2887,7 +2913,9 @@ fn evaluate_heredoc(
                     return Some(EvaluationResult::allowed_due_to_budget());
                 }
 
-                let result = evaluate_command_with_pack_order_deadline_at_path(
+                let mut held_pack_rules: Vec<(String, String)> = Vec::new();
+                let result = evaluate_at_path_impl(
+                    AllowOnceSource::Ambient,
                     &inner.text,
                     context.enabled_keywords,
                     context.ordered_packs,
@@ -2900,17 +2928,22 @@ fn evaluate_heredoc(
                     context.allow_once_audit,
                     context.project_path,
                     context.deadline,
+                    Some(&mut held_pack_rules),
                 );
 
                 if result.is_denied() {
-                    // The rule behind the inner denial, read before the relabel.
-                    let held_rule = result.pattern_info.as_ref().and_then(|info| {
-                        Some((
-                            inner.start,
-                            info.pack_id.clone()?,
-                            info.pattern_name.clone()?,
-                        ))
-                    });
+                    // The rules behind the inner denial, read before the
+                    // relabel: the one it returned, which a held nested
+                    // heredoc match can stand in for, and every pack match the
+                    // node's scan held.
+                    let held_rules: Vec<(usize, String, String)> = result
+                        .pattern_info
+                        .as_ref()
+                        .and_then(|info| Some((info.pack_id.clone()?, info.pattern_name.clone()?)))
+                        .into_iter()
+                        .chain(held_pack_rules)
+                        .map(|(pack_id, pattern_name)| (inner.start, pack_id, pattern_name))
+                        .collect();
                     // Propagate denial, wrapping the reason context
                     let found = if let Some(mut info) = result.pattern_info {
                         info.reason = format!(
@@ -2972,7 +3005,7 @@ fn evaluate_heredoc(
                     if heredoc_denial_blocks(&context, command, &found) {
                         return Some(found);
                     }
-                    held_inner_rules.extend(held_rule);
+                    held_inner_rules.extend(held_rules);
                     if held_non_denying.is_none() {
                         *held_non_denying = Some(found);
                     }

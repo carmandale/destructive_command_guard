@@ -205,6 +205,51 @@ fn the_beads_named_input_keeps_denying() {
     );
 }
 
+/// Confidence downgrades `rm -rf ./build` (rm-rf-general, High) and the inline
+/// `git stash drop` in its arguments. Tier 2.5 recorded only the stash drop the
+/// rm node's evaluation returned, never the downgraded rm-rf-general it held,
+/// so `heredoc.bash.rm_rf` denied the wrapped line while the same line
+/// unwrapped warned (.agent-config-dcg-tier25-single-inner-verdict-jxl8n). The
+/// unwrapped twin, which no bash AST pass reads, is the control.
+#[test]
+fn a_downgraded_rm_behind_a_nested_inline_script_inside_bash_still_only_warns() {
+    for command in [
+        "rm -rf ./build $(bash -c \"git stash drop\")",
+        "bash -c 'rm -rf ./build $(bash -c \"git stash drop\")'",
+    ] {
+        let (stdout, stderr, exit_code) =
+            run_hook_with_config(CONFIDENCE_ON, "core.git,core.filesystem", command);
+        assert_eq!(
+            exit_code, 0,
+            "a downgraded match exits 0\ncommand: {command}\nstderr: {stderr}"
+        );
+        assert!(
+            stdout.is_empty(),
+            "every rule on this line is downgraded, so it must warn, not deny\n\
+             command: {command}\nstdout: {stdout}"
+        );
+        assert!(
+            stderr.contains("core.git:stash-drop"),
+            "the warning names the held rule, so the line was judged and not \
+             merely allowed\ncommand: {command}\nstderr: {stderr}"
+        );
+    }
+
+    // Control: a rule confidence may not downgrade still decides in the same
+    // shape. The rm parser reads `/srv/data $(...)` as a root or home path,
+    // Critical and protected, wrapped or not.
+    for command in [
+        "rm -rf /srv/data $(bash -c \"git stash drop\")",
+        "bash -c 'rm -rf /srv/data $(bash -c \"git stash drop\")'",
+    ] {
+        assert_denied_by(
+            command,
+            run_hook_with_config(CONFIDENCE_ON, "core.git,core.filesystem", command),
+            "core.filesystem:rm-rf-root-home",
+        );
+    }
+}
+
 /// The same pair inside `bash -c`. Each inner command is judged on its own
 /// (Tier 2.5), and a downgradable inner denial returned at once hid the
 /// Critical command after it exactly as above
