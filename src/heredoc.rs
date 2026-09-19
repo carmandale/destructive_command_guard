@@ -42,6 +42,7 @@
 //! Uses ast-grep-core for structural pattern matching.
 //! Language-specific patterns for destructive operations.
 
+use crate::normalize;
 use memchr::memchr;
 use regex::RegexSet;
 use std::sync::LazyLock;
@@ -1772,13 +1773,31 @@ fn extract_heredocs(
 /// Only when neither names one does the old chain run, and then from the
 /// operator's line on rather than from the start of the input -- no earlier
 /// line can hold this heredoc's receiver. That fallback is kept on
-/// purpose rather than dropped for content heuristics: the receiver reader does
-/// not know `sudo -u USER`, so `sudo -u root python3 <<'PY'` resolves its
-/// receiver to `root`, and only the wrapper-aware head reader still finds
-/// `python3` there. The residual is stated, not hidden: a receiver the reader
-/// cannot resolve AND a different interpreter earlier on the same line
-/// (`node -e 1; sudo -u root python3 <<'PY'`) still reads the earlier one, as
-/// every heredoc did before this function existed.
+/// purpose rather than dropped for content heuristics: a receiver the reader
+/// cannot resolve at all still has to come from somewhere, and the head reader
+/// is wrapper-aware.
+///
+/// `sudo -u root python3 <<'PY'` is NO LONGER such a case -- the receiver
+/// reader delegates a wrapper's options to `normalize::strip_wrapper_prefixes`
+/// and resolves it to `python3` (`.agent-config-a09gf`). Do not restore that
+/// example: it now resolves before this fallback is reached, and a second
+/// sudo-aware skip would be a fourth copy of the option grammar.
+///
+/// The residual is stated, not hidden. Three shapes still resolve the receiver
+/// to a flag's argument, each measured rather than reasoned about:
+///
+///   * an option `normalize` declines to parse -- `sudo -R dir` with a
+///     slash-free directory (`.agent-config-nehrz`);
+///   * an unambiguous long ABBREVIATION, which getopt_long accepts and the
+///     exact-match tables do not (`sudo --us root`);
+///   * an UNQUOTED expansion as the argument -- `sudo -u $DEPLOY_USER python3`
+///     (`.agent-config-kr9in`). `tokenize_backwards` stops at `$`, so the
+///     wrapper never reaches the token list and the delegation below never
+///     runs. Quoting it (`-u "$DEPLOY_USER"`), or a `$(...)`/backtick
+///     substitution, all resolve correctly.
+///
+/// In each case, with a different interpreter earlier on the same line, the
+/// fallback then reads the earlier one.
 fn heredoc_language(
     command: &str,
     heredoc_start: usize,
@@ -1843,12 +1862,25 @@ fn extract_heredoc_target_command(command: &str, heredoc_start: usize) -> Option
     // the command that owns the heredoc rather than the last argument before
     // the operator.
     let tokens = tokenize_backwards(trimmed);
+    let ordered: Vec<String> = tokens.iter().rev().cloned().collect();
+    resolve_receiver(&ordered, 0)
+}
 
+/// How many times a receiver may be re-resolved through a stripped wrapper.
+///
+/// `strip_wrapper_prefixes` already loops over its own four wrappers, so this
+/// only bounds wrappers it does NOT handle sitting between ones it does
+/// (`sudo nohup env python3`). Each delegation strictly shortens the token
+/// list, so this is a backstop and not the termination argument.
+const MAX_WRAPPER_DELEGATIONS: usize = 8;
+
+/// Walk a simple command's tokens in order and return its command word.
+fn resolve_receiver(ordered: &[String], depth: usize) -> Option<String> {
     // A bare redirection OPERATOR takes the NEXT token as its target, so that
     // token is a filename and not the command word either.
     let mut expect_redirect_target = false;
 
-    for token in tokens.iter().rev() {
+    for (index, token) in ordered.iter().enumerate() {
         if expect_redirect_target {
             expect_redirect_target = false;
             continue;
@@ -1882,8 +1914,39 @@ fn extract_heredoc_target_command(command: &str, heredoc_start: usize) -> Option
             continue;
         }
 
-        // Skip common shell wrappers until we reach the actual target command.
-        if SHELL_WRAPPER_COMMANDS.contains(&token.as_str()) {
+        // A shell wrapper's OPTIONS are a grammar -- `sudo -u root`, `env -u
+        // FOO`, `env -S 'cat -'`, glued `-uroot`, bundled `-Hu`, the `--`
+        // terminator, a path-spelled `/usr/bin/sudo` -- and
+        // `normalize::strip_wrapper_prefixes` is where this repository already
+        // parses it. This reader skipped the wrapper and its FLAGS but never a
+        // flag's ARGUMENT, so `sudo -u root python3 <<'PY'` resolved its
+        // receiver to `root` (`.agent-config-a09gf`). Since `88777c5c` the
+        // receiver is asked FIRST, which made that miss reachable two ways: a
+        // user name that names no language falls back to a scan of the whole
+        // line and takes a DIFFERENT interpreter's language when one starts it,
+        // and a user name that IS an interpreter (`sudo -u node python3`) maps
+        // straight to that language and is never corrected at all.
+        //
+        // Delegate rather than grow a second copy of the option tables here.
+        // One home means the two readers cannot disagree about where the
+        // command word starts -- and `env -S`, whose argument IS the command,
+        // stays correct for free, which a local flag table gets wrong.
+        if is_shell_wrapper(token) {
+            if depth < MAX_WRAPPER_DELEGATIONS {
+                let rest = ordered[index..].join(" ");
+                let normalized = normalize::strip_wrapper_prefixes(&rest);
+                if normalized.was_normalized() {
+                    // Stripping consumed at least the wrapper word, so the
+                    // token list is strictly shorter and this terminates.
+                    let inner = tokenize_backwards(normalized.normalized.trim());
+                    let inner: Vec<String> = inner.iter().rev().cloned().collect();
+                    return resolve_receiver(&inner, depth + 1);
+                }
+            }
+            // `normalize` declines to parse these options (`sudo --user root`
+            // before this bead, `sudo -R dir` still). Skipping only the wrapper
+            // word is what this reader has always done, and the wrapper-aware
+            // fallback in `heredoc_language` is what covers the residual.
             continue;
         }
 
@@ -1937,6 +2000,19 @@ fn extract_heredoc_target_command(command: &str, heredoc_start: usize) -> Option
     }
 
     None
+}
+
+/// Is this token a shell wrapper, however it is spelled?
+///
+/// Compares the BASENAME, so `/usr/bin/sudo` is the wrapper it obviously is.
+/// The exact-token form sent it to the file-path branch below instead, which
+/// returned `sudo` as the receiver -- and `sudo` names no language, so
+/// `node -e '1'; /usr/bin/sudo -u root python3 <<'PY'` read as javascript.
+/// `strip_sudo` and `strip_env` already compare basenames, so this is what
+/// delegating to them requires rather than an added liberty.
+fn is_shell_wrapper(token: &str) -> bool {
+    let basename = token.rsplit('/').next().unwrap_or(token);
+    SHELL_WRAPPER_COMMANDS.contains(&basename)
 }
 
 fn is_shell_env_assignment(token: &str) -> bool {
