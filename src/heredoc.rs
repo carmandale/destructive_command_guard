@@ -980,21 +980,28 @@ static HEREDOC_EXTRACTOR: LazyLock<Regex> = LazyLock::new(|| {
 
 /// `'...'`: literal, no escapes of any kind.
 const SEGMENT_SINGLE: &str = r"'[^']*'";
-/// `"..."`: a backslash and the character after it are one unit, so only an
-/// UNESCAPED quote closes (`.agent-config-gt800`). The two branches share no
-/// first character, so there is nothing to backtrack.
-const SEGMENT_DOUBLE: &str = r#""(?:[^"\\]|\\[\s\S])*""#;
+/// `"..."`, or `$"..."` (bash's locale-translated form, which drops the `$`): a
+/// backslash and the character after it are one unit, so only an UNESCAPED
+/// quote closes (`.agent-config-gt800`). The two branches share no first
+/// character, so there is nothing to backtrack.
+const SEGMENT_DOUBLE: &str = r#"\$?"(?:[^"\\]|\\[\s\S])*""#;
 /// `$'...'`: ANSI-C quoting, where `\'` does not close (`.agent-config-fmeow`).
 const SEGMENT_ANSI_C: &str = r"\$'(?:[^'\\]|\\[\s\S])*'";
 /// An unquoted backslash, which quotes the character after it.
 const SEGMENT_ESCAPE: &str = r"\\[\s\S]";
-/// A run of unquoted characters, up to whitespace or a `|&;<>()` that ends the
+/// A run of unquoted characters, up to a blank or a `|&;<>()` that ends the
 /// word, or a backtick: in `` `python3 -c '..'` `` it closes the enclosing
-/// substitution, and a substitution's output cannot be read here anyway. `$` is
-/// left out of the run and matched alone, after `SEGMENT_ANSI_C` has had its
-/// chance, so `abc$'x'` is `abc` and an ANSI-C segment rather than `abc$` and a
-/// single-quoted one.
-const SEGMENT_BARE: &str = r#"[^\s'"\\|&;<>()$`]+|\$"#;
+/// substitution, and a substitution's output cannot be read here anyway. The
+/// blanks are bash's three -- space, tab, newline -- not `\s`, which also takes
+/// a carriage return, form feed or no-break space that bash keeps INSIDE the
+/// word. `$` is left out of the run and matched alone, after `SEGMENT_ANSI_C`
+/// and `SEGMENT_DOUBLE` have had their chance, so `abc$'x'` is `abc` and an
+/// ANSI-C segment rather than `abc$` and a single-quoted one.
+///
+/// Known short: bash carries a word on through an unquoted `$(..)` or backtick
+/// substitution, which needs balanced parentheses a regex does not have; the
+/// word ends there instead (`.agent-config-dcg-word-through-unquoted-substitution-o62gy`).
+const SEGMENT_BARE: &str = r#"[^ \t\n'"\\|&;<>()$`]+|\$"#;
 
 /// Regex for here-string extraction (<<<).
 static HERESTRING: LazyLock<Regex> = LazyLock::new(|| {
@@ -1082,6 +1089,10 @@ struct ShellWord {
     range: std::ops::Range<usize>,
     /// Whether any segment was quoted.
     quoted: bool,
+    /// Whether a double-quoted segment holds a command substitution (`$(` or a
+    /// backtick), which bash RUNS before the receiver reads anything. Such a
+    /// word is not inert data whatever receives it; see `extract_herestrings`.
+    substitutes: bool,
 }
 
 /// Dequote a word that `HERESTRING` or `INLINE_SCRIPT` matched, segment by
@@ -1089,6 +1100,7 @@ struct ShellWord {
 fn read_shell_word(word: regex::Match<'_>) -> ShellWord {
     let mut text = String::with_capacity(word.len());
     let mut quoted = false;
+    let mut substitutes = false;
     let mut bounds: Option<std::ops::Range<usize>> = None;
     for segment in SHELL_WORD_SEGMENT.captures_iter(word.as_str()) {
         let Some(whole) = segment.get(0) else {
@@ -1103,8 +1115,12 @@ fn read_shell_word(word: regex::Match<'_>) -> ShellWord {
                 whole.start() + 1..whole.end() - 1
             }
             Some(2) => {
-                text.push_str(&unescape_double_quoted(&raw[1..raw.len() - 1]));
-                whole.start() + 1..whole.end() - 1
+                // An escaped `\$(` counts too: it only makes the word read as
+                // code where it was data, never the reverse.
+                substitutes |= raw.contains("$(") || raw.contains('`');
+                let open = if raw.starts_with('$') { 2 } else { 1 };
+                text.push_str(&unescape_double_quoted(&raw[open..raw.len() - 1]));
+                whole.start() + open..whole.end() - 1
             }
             Some(3) => {
                 text.push_str(&decode_ansi_c(&raw[2..raw.len() - 1]));
@@ -1124,12 +1140,42 @@ fn read_shell_word(word: regex::Match<'_>) -> ShellWord {
         };
         bounds = Some(bounds.map_or_else(|| inner.clone(), |b| b.start..inner.end));
     }
+    // Bash hands the command a C string: a NUL -- only `$'\0'` can make one --
+    // ends the word there.
+    if let Some(nul) = text.find('\0') {
+        text.truncate(nul);
+    }
     let bounds = bounds.unwrap_or(0..word.len());
     ShellWord {
         text,
         range: word.start() + bounds.start..word.start() + bounds.end,
         quoted,
+        substitutes,
     }
+}
+
+/// Every match of `pattern` in `haystack`, including one that starts INSIDE an
+/// earlier match.
+///
+/// `captures_iter` resumes after a whole match, and a match now runs to the end
+/// of the operand WORD -- so the `python3 -c '..'` inside `perl -e "system(q(
+/// python3 -c '..'))"`, or glued on as `"$(python3 -c '..')"`, was consumed by
+/// the outer match and never read. While each quoting style had its own pattern
+/// the other pattern found it (`.agent-config-bjjic` cold review, B1). Resuming
+/// one character past each match's start finds it again, and cannot find the
+/// same construct twice: every pattern starts at `<<<` or at a word boundary
+/// before an interpreter name.
+fn overlapping_captures<'h>(
+    pattern: &Regex,
+    haystack: &'h str,
+) -> impl Iterator<Item = regex::Captures<'h>> {
+    let mut at = 0;
+    std::iter::from_fn(move || {
+        let cap = pattern.captures_at(haystack, at)?;
+        let start = cap.get(0)?.start();
+        at = start + haystack[start..].chars().next().map_or(1, char::len_utf8);
+        Some(cap)
+    })
 }
 
 /// Decode the body of a `$'...'` segment as bash does.
@@ -1192,11 +1238,21 @@ fn decode_ansi_c(body: &str) -> String {
             },
             'u' | 'U' => {
                 let max = if escape == 'u' { 4 } else { 8 };
-                match digits(&mut chars, 16, max, None).and_then(char::from_u32) {
+                let mut hex = String::new();
+                while hex.len() < max {
+                    let Some(digit) = chars.next_if(char::is_ascii_hexdigit) else {
+                        break;
+                    };
+                    hex.push(digit);
+                }
+                match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
                     Some(decoded) => push(&mut out, decoded),
+                    // Not a character (a surrogate, or no digits): bash keeps
+                    // the escape as written.
                     None => {
                         out.push(b'\\');
                         push(&mut out, escape);
+                        out.extend_from_slice(hex.as_bytes());
                     }
                 }
             }
@@ -1660,7 +1716,7 @@ fn extract_inline_scripts(
     // Helper to extract from a given regex pattern
     let mut hit_limit = false;
     let mut extract_from_pattern = |pattern: &Regex| {
-        for cap in pattern.captures_iter(command) {
+        for cap in overlapping_captures(pattern, command) {
             if record_timeout_if_needed(start_time, timeout, limits.timeout_ms, skip_reasons) {
                 return;
             }
@@ -1749,7 +1805,7 @@ fn extract_herestrings(
 
     // Helper to extract from a given pattern (the word is in group 1)
     let mut extract_quoted = |pattern: &Regex| {
-        for cap in pattern.captures_iter(command) {
+        for cap in overlapping_captures(pattern, command) {
             if record_timeout_if_needed(start_time, timeout, limits.timeout_ms, skip_reasons) {
                 return;
             }
@@ -1788,12 +1844,19 @@ fn extract_herestrings(
             // each reading instead dropped BOTH when one was left, and a
             // stdin-to-shell `git clean -fdx` the bash reading had denied went
             // to the fallback sweep, which has no pattern for it.
+            //
+            // No span for a word holding a command substitution: a span is
+            // also what marks an inert receiver's body as data, and everything
+            // spelled inside it is skipped as prose. `cat <<< 'x'"$(python3 -c
+            // '..')"` RUNS that python before `cat` reads a byte; with the span
+            // over the whole word, the inner `-c` was skipped and allowed
+            // (`.agent-config-bjjic` cold review, B2).
             let bash_reading = ExtractedContent {
                 content: word.text,
                 language: ScriptLanguage::Bash,
                 delimiter: None,
                 byte_range: full_match.start()..full_match.end(),
-                content_range: Some(word.range),
+                content_range: (!word.substitutes).then_some(word.range),
                 quoted: word.quoted,
                 heredoc_type: Some(HeredocType::HereString),
                 target_command: target_cmd,
@@ -1870,8 +1933,9 @@ fn herestring_receiver_language(
 ) -> Option<ScriptLanguage> {
     // The pipeline stage is read from the first `|` after the operand to the
     // end of the line the operand ends on. Not from inside the operand -- the
-    // here-string regex bounds it at the end of the shell word, so a `|` quoted
-    // in a later segment is not a pipe (`.agent-config-bjjic`) -- and not from the
+    // here-string regex bounds it at the end of the shell word (short of an
+    // unquoted substitution, `SEGMENT_BARE`), so a `|` quoted in a later
+    // segment is not a pipe (`.agent-config-bjjic`) -- and not from the
     // arguments before that `|`: in `python3 - <<< '..' node | cat`, `node` is
     // an argument, yet as the head of the span's first segment it named the
     // language. A heredoc's first segment is its operator, which names nothing,

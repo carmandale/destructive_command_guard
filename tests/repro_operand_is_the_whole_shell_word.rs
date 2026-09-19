@@ -161,14 +161,32 @@ fn a_here_string_joined_around_an_escaped_quote_is_read_whole() {
     );
 }
 
-/// A `|` quoted in a later segment is not a pipe, so `node` names nothing.
+/// A `|` quoted in a later segment is not a pipe, so `node` names nothing:
+/// the language comes from the real pipe after the word.
+///
+/// `cat` is the receiver on purpose. It names no language, so the pipeline
+/// step is what decides -- a receiver that names one decides first and never
+/// reaches it (see the next row).
 #[test]
 fn a_pipe_quoted_in_a_later_segment_does_not_pick_the_language() {
     let r = rmtree();
     assert_denied_like_its_heredoc_twin(
+        &format!("cat <<< '{r}(\"/srv/data\")'' # | node x' | python3"),
+        &format!("cat <<'PY' | python3\n{r}(\"/srv/data\") # | node x\nPY"),
+        "the pipeline reader starts after the whole word, not inside it",
+    );
+}
+
+/// The bead's own spelling of that row. It denies on origin/main too since
+/// `.agent-config-a09gf` resolved `sudo -u root python3` to its interpreter,
+/// which decides before the pipeline step is read; kept as a floor.
+#[test]
+fn the_beads_sudo_row_denies() {
+    let r = rmtree();
+    assert_denied_like_its_heredoc_twin(
         &format!("sudo -u root python3 <<< '{r}(\"/srv/data\")'' # | node x'"),
         &format!("sudo -u root python3 <<'PY'\n{r}(\"/srv/data\") # | node x\nPY"),
-        "the pipeline reader starts after the whole word, not inside it",
+        "a receiver that names an interpreter decides the language",
     );
 }
 
@@ -203,6 +221,96 @@ fn an_ansi_c_here_string_is_read() {
         &format!("python3 <<'PY'\nimport shutil; {r}(\"/srv/data\")\nPY"),
         "<<< $'...' is a here-string like any other",
     );
+}
+
+/// `-c $'...'` is an inline script like any other quoting.
+#[test]
+fn an_ansi_c_dash_c_operand_is_read() {
+    let r = rmtree();
+    assert_denied_like_its_heredoc_twin(
+        &format!("python3 -c $'import shutil; {r}(\"/srv/data\")'"),
+        &format!("python3 <<'PY'\nimport shutil; {r}(\"/srv/data\")\nPY"),
+        "python3 -c $'...' runs its decoded operand",
+    );
+}
+
+/// A carriage return is not a blank to bash: the word, and the python, go on.
+#[test]
+fn a_carriage_return_does_not_end_the_word() {
+    let r = rmtree();
+    assert_denied_like_its_heredoc_twin(
+        &format!("python3 <<< 'x=1'\r'import shutil; {r}(\"/srv/data\")'"),
+        &format!("python3 <<'PY'\nx=1\rimport shutil; {r}(\"/srv/data\")\nPY"),
+        "only space, tab and newline end a bash word",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A construct inside another operand is still read (cold review B1, B2)
+// ---------------------------------------------------------------------------
+
+/// The inner script alone -- the control every row below leans on.
+fn inner_dash_c() -> String {
+    format!("python3 -c 'import shutil; {}(p)'", rmtree())
+}
+
+/// A word runs to its end, so it can hold another interpreter's `-c`. That
+/// inner script is read on its own, as it was when each quoting style had its
+/// own pattern.
+#[test]
+fn an_inline_script_nested_in_another_operand_is_read() {
+    let inner = inner_dash_c();
+    assert_denied_by(&inner, PYTHON_RMTREE, "control: the inner script alone");
+    let r = rmtree();
+    for command in [
+        format!("perl -e \"system(q({inner}))\""),
+        format!("ruby -e 'system(%q(python3 -c \"import shutil; {r}(p)\"))'"),
+        format!("python3 -c 'print(1)'\"$({inner})\""),
+    ] {
+        assert_denied_by(
+            &command,
+            PYTHON_RMTREE,
+            "the inner python3 -c is its own construct",
+        );
+    }
+}
+
+/// A command substitution in a data sink's here-string RUNS before the sink
+/// reads anything, so the word is not inert data.
+#[test]
+fn a_substitution_in_a_data_sinks_here_string_is_read() {
+    let inner = inner_dash_c();
+    for command in [
+        format!("cat <<< 'x'\"$({inner})\""),
+        format!("cat <<< \"$({inner})\""),
+        format!("grep a <<< 'log: '\"$({inner})\""),
+    ] {
+        assert_denied_by(
+            &command,
+            PYTHON_RMTREE,
+            "bash runs the substitution before cat",
+        );
+    }
+}
+
+/// The same text with no substitution is data: `cat` prints it.
+#[test]
+fn a_dash_c_quoted_in_a_data_sinks_here_string_stays_data() {
+    let inner = inner_dash_c();
+    assert_allowed(
+        &format!("cat <<< 'see: '\"{inner}\""),
+        "text quoted into cat's here-string is printed, not run",
+    );
+}
+
+/// Bash hands the receiver a C string: the NUL ends it, and `sh` never sees
+/// what follows.
+#[test]
+fn an_ansi_c_nul_ends_the_word() {
+    let command = format!("sh <<< $'echo hi\\x00; {} -rf /srv/data'", "rm");
+    assert_allowed(&command, "sh receives only `echo hi`");
+    let readings = herestring_readings(&command);
+    assert_eq!(readings[0].content, "echo hi");
 }
 
 // ---------------------------------------------------------------------------
@@ -254,6 +362,12 @@ fn every_segment_kind_is_dequoted_in_place() {
 fn ansi_c_escapes_are_decoded() {
     let readings = herestring_readings(r"cat <<< $'t\tn\nq\'b\\o\101x\x41u\u00e9c\cA'");
     assert_eq!(readings[0].content, "t\tn\nq'b\\oAxAu\u{e9}c\u{1}");
+    // A `\u` that names no character is kept as written, digits and all.
+    let readings = herestring_readings(r"cat <<< $'\ud800x'");
+    assert_eq!(readings[0].content, r"\ud800x");
+    // `$"..."` is bash's locale-translated double quote: the `$` goes.
+    let readings = herestring_readings(r#"cat <<< $"a"b"#);
+    assert_eq!(readings[0].content, "ab");
 }
 
 /// The word ends at a metacharacter, not at the end of a quoted segment.
