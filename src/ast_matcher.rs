@@ -32,6 +32,7 @@
 //! - Match: <1ms typical
 //! - Default timeout for [`AstMatcher::find_matches`]: 20ms
 
+use crate::context::git_global_option_takes_value;
 use crate::heredoc::ScriptLanguage;
 use ast_grep_core::{AstGrep, Doc, Node, NodeMatch, Pattern};
 use ast_grep_language::SupportLang;
@@ -1682,12 +1683,49 @@ where
     }
 }
 
-fn detect_git_destructive<'a, I>(mut tokens: I) -> Option<ShellPayloadHit>
+fn detect_git_destructive<'a, I>(tokens: I) -> Option<ShellPayloadHit>
 where
     I: Iterator<Item = &'a str>,
 {
-    let sub = tokens.next()?;
+    // The subcommand is the first word after git's global options and their
+    // values: `git -C <dir> reset --hard` read `-C` as the subcommand and let
+    // every argv spelled that way through (.agent-config-5cw2y). A
+    // value-taking option is read both ways, owning the next word and not,
+    // because an argv element that is not a literal is dropped before this
+    // reads it: `["-C", dir, "reset", "--hard"]` arrives as `-C reset --hard`.
+    // Every word a reading reaches is judged as the subcommand, and the most
+    // severe hit decides. A word is judged once, where it is first reached:
+    // what follows it there includes what follows any later copy, so a later
+    // copy adds no hit -- and judging every copy was quadratic.
+    let words: Vec<&str> = tokens.collect();
+    let mut reached = vec![false; words.len() + 2];
+    reached[0] = true;
+    let mut judged = HashSet::new();
+    let mut hits = Vec::new();
+    for (i, word) in words.iter().enumerate() {
+        if !reached[i] {
+            continue;
+        }
+        if word.starts_with('-') {
+            reached[i + 1] = true;
+            reached[i + 2] |= git_global_option_takes_value(word);
+        } else if judged.insert(*word) {
+            hits.push(detect_git_subcommand(word, words[i + 1..].iter().copied()));
+        }
+    }
+    strongest_hit(hits)
+}
 
+/// Judge one git subcommand by the words after it.
+///
+/// Must stay monotone in those words: more of them never remove a hit.
+/// `detect_git_destructive` judges a word once, where it is first reached,
+/// and relies on it -- a veto such as a dry-run `-n` would need that dedupe
+/// dropped or rekeyed (`.agent-config-g5xom`).
+fn detect_git_subcommand<'a, I>(sub: &str, mut tokens: I) -> Option<ShellPayloadHit>
+where
+    I: Iterator<Item = &'a str>,
+{
     if sub == "reset" {
         if tokens.any(|t| t == "--hard") {
             return Some(ShellPayloadHit {
@@ -4566,6 +4604,41 @@ def cleanup():
                 .unwrap();
             // Pattern matching finds this - path filtering is separate policy
             assert!(!matches.is_empty(), "shutil.rmtree matches structurally");
+        }
+    }
+
+    mod git_global_options {
+        use super::*;
+
+        fn suffix(line: &str) -> Option<&'static str> {
+            detect_command_words(line.split_whitespace()).map(|hit| hit.rule_suffix)
+        }
+
+        #[test]
+        fn the_subcommand_is_read_after_global_options() {
+            for line in [
+                "git -C /repo reset --hard",
+                "git -c core.pager=cat reset --hard",
+                "git --git-dir /r/.git --work-tree /r reset --hard",
+                "git --attr-source HEAD --shallow-file f reset --hard",
+                "git --no-pager -P reset --hard",
+            ] {
+                assert_eq!(suffix(line), Some("git_reset_hard"), "{line}");
+            }
+            assert_eq!(suffix("git -C . clean -fd"), Some("git_clean_fd"));
+        }
+
+        #[test]
+        fn a_value_taking_option_is_read_both_ways() {
+            // A non-literal argv value is dropped before the detector reads it.
+            assert_eq!(suffix("git -C reset --hard"), Some("git_reset_hard"));
+            assert_eq!(suffix("git -C -c k=v reset --hard"), Some("git_reset_hard"));
+            assert_eq!(suffix("git -C . status"), None);
+            assert_eq!(suffix("git -C"), None);
+            // Only a word the option skip reaches is a subcommand.
+            assert_eq!(suffix("git -C . log --grep reset --hard"), None);
+            // A flag-only option owns no word, so `--grep` is never reached.
+            assert_eq!(suffix("git --no-pager log --grep reset --hard"), None);
         }
     }
 

@@ -1182,24 +1182,7 @@ pub fn sanitize_for_pattern_matching(command: &str) -> Cow<'_, str> {
             } else if token_text == "--" {
                 git_options_ended = true;
             } else if !git_options_ended && token_text.starts_with('-') && token_text != "-" {
-                let takes_value = matches!(
-                    token_text,
-                    "-C" | "-c"
-                        | "--git-dir"
-                        | "--work-tree"
-                        | "--namespace"
-                        | "--exec-path"
-                        | "--pager"
-                        | "--config-env"
-                ) || token_text.starts_with("-C")
-                    || token_text.starts_with("-c")
-                    || token_text.starts_with("--git-dir=")
-                    || token_text.starts_with("--work-tree=")
-                    || token_text.starts_with("--namespace=")
-                    || token_text.starts_with("--exec-path=")
-                    || token_text.starts_with("--pager=")
-                    || token_text.starts_with("--config-env=");
-                if takes_value && !token_text.contains('=') {
+                if git_global_option_takes_value(token_text) {
                     git_waiting_for_value = true;
                 }
             } else {
@@ -1627,6 +1610,34 @@ fn env_option_takes_value(token: &str) -> Option<WrapperOptionValueMode> {
     }
 
     None
+}
+
+/// Whether a git GLOBAL option -- one before the subcommand, as in
+/// `git -C <dir> reset` -- takes the NEXT word as its value.
+///
+/// Measured on git 2.55.0 (`.agent-config-5cw2y`): these eight run the
+/// subcommand after their separate value, `--attr-source` and the
+/// undocumented `--shallow-file` included. An `=` form (`--git-dir=<p>`)
+/// carries its own value, and git rejects an attached `-C<dir>` or
+/// `-c<k=v>` outright. `--exec-path` and `--pager` stay from the list this
+/// replaced: git exits on the first and rejects the second, so the word after
+/// either never runs as a subcommand. The sanitizer's `git grep` finder and
+/// the heredoc payload detector both read this one list.
+#[inline]
+#[must_use]
+pub(crate) fn git_global_option_takes_value(token: &str) -> bool {
+    matches!(
+        token,
+        "-C" | "-c"
+            | "--git-dir"
+            | "--work-tree"
+            | "--namespace"
+            | "--config-env"
+            | "--attr-source"
+            | "--shallow-file"
+            | "--exec-path"
+            | "--pager"
+    )
 }
 
 #[inline]
@@ -2997,6 +3008,35 @@ mod tests {
                 .contains("git -C /tmp -c color.ui=auto grep -e")
         );
         assert!(sanitized.as_ref().contains("src/main.rs"));
+    }
+
+    #[test]
+    fn sanitize_finds_git_grep_after_every_value_taking_global_option() {
+        // git 2.55.0 runs the subcommand after each separate value
+        // (.agent-config-5cw2y); the last two were missing from the list.
+        for options in [
+            "--git-dir .git",
+            "--work-tree .",
+            "--namespace n",
+            "--config-env a.b=HOME",
+            "--attr-source HEAD",
+            "--shallow-file f",
+        ] {
+            let cmd = format!(r#"git {options} grep -e "rm -rf" src/main.rs"#);
+            let sanitized = sanitize_for_pattern_matching(&cmd);
+            assert!(!sanitized.as_ref().contains("rm -rf"), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn sanitize_finds_git_grep_after_a_flag_only_global_option() {
+        // These own no word, so `grep` is the subcommand and its pattern is
+        // data. git rejects the attached `-C.` outright (.agent-config-5cw2y).
+        for options in ["--no-pager", "-p", "-P", "-C.", "-cfoo"] {
+            let cmd = format!(r#"git {options} grep -e "rm -rf" src/main.rs"#);
+            let sanitized = sanitize_for_pattern_matching(&cmd);
+            assert!(!sanitized.as_ref().contains("rm -rf"), "{cmd}");
+        }
     }
 
     #[test]

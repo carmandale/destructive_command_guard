@@ -276,6 +276,23 @@ All derived rule IDs are valid allowlist targets.
   `"/var/lib/" + app` is, and a template in which nothing destructive is found
   stays a dynamic (medium) match. A `//` or `/* */` comment inside an argv
   array is skipped, `]` included.
+- A `git` command's subcommand is the first word after its global options
+  and their values (`-C <dir>`, `-c <k=v>`, `--git-dir <p>`, `--no-pager`,
+  ...), so `["-C", "/repo", "reset", "--hard"]` is read as `reset` -- in an
+  argv above, a Python `subprocess` list, and a shell string alike
+  (`.agent-config-5cw2y`). An argv reader keeps only the string literals it
+  finds, so a value-taking option is read both as owning the next word and
+  not: `["-C", dir, "reset", "--hard"]` denies too, and so does one literal
+  inside a call (`path.join(dir, "x")`), which stands in for the value. Two
+  or more (`path.join(dir, "a", "b")`, `"/a/" + dir + "/b"`) still hide the
+  subcommand, as does a `]` in code (`dirs[0]`), which ends the array
+  (`.agent-config-argv-nested-literal-txccq`). Reading both ways can
+  over-block: the word after a value-taking option is judged as a subcommand
+  too (`git -C clean log --diff-filter=d` in a shell string), and when the
+  value was dropped, the real subcommand's own options are read as global
+  ones, so a word after them is judged as well:
+  `["-C", dir, "grep", "-e", "reset --hard"]` and
+  `["-C", dir, "commit", "-m", "reset --hard is bad"]` deny.
 - A call these rules cannot judge stays a medium match: a payload or argv that
   is not wholly literal (a variable, a spread, a call, a concatenation such as
   `"npm run " + s`, or a literal holding `${`), and a literal call with no argv
