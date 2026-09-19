@@ -466,10 +466,14 @@ static JS_RECURSIVE_TRUE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)\brecursive\s*:\s*true\b").expect("js recursive:true regex compiles")
 });
 
-static JS_EXEC_SYNC_LITERAL: LazyLock<Regex> = LazyLock::new(|| {
-    // Matches: execSync("...") / execSync('...')
-    Regex::new(r#"(?m)\bexecSync\b\s*\(\s*(?:"(?P<dq>[^"\n]*)"|'(?P<sq>[^'\n]*)')"#)
-        .expect("js execSync literal regex compiles")
+static JS_EXEC_LITERAL: LazyLock<Regex> = LazyLock::new(|| {
+    // Matches the arguments of execSync("...") / exec('...') / exec(`...`) -- the
+    // calls that take one shell string. The child_process regexes read a template
+    // by its raw text, which may span lines; a `${..}` stays in it as an opaque
+    // word, so `/var/lib/${app}` is judged as `"/var/lib/" + app` already is
+    // (.agent-config-crqi7).
+    Regex::new(r#"^\s*(?:"(?P<dq>[^"\n]*)"|'(?P<sq>[^'\n]*)'|`(?P<bq>[^`]*)`)"#)
+        .expect("js exec/execSync literal regex compiles")
 });
 
 static JS_REQUIRE_CHILD_PROCESS_RECEIVER: LazyLock<Regex> = LazyLock::new(|| {
@@ -496,17 +500,31 @@ fn execsync_rule_id(rule_id: &str, matched_text: &str) -> String {
     }
 }
 
-static JS_SPAWN_SYNC_CMD_ARGS: LazyLock<Regex> = LazyLock::new(|| {
-    // Matches: spawnSync("cmd", [ ... ]) / spawnSync('cmd', [ ... ])
+static JS_ARGV_CALL_CMD_ARGS: LazyLock<Regex> = LazyLock::new(|| {
+    // Matches the arguments of spawnSync("cmd", [ ... ]) / execFile('cmd', [ ... ])
+    // -- the calls that take a file and an argv (spawn, spawnSync, execFile,
+    // execFileSync). The array consumes strings and comments whole before it
+    // looks for its `]`, so one inside them does not end it.
     Regex::new(
-        r#"(?m)\bspawnSync\b\s*\(\s*(?:"(?P<dq>[^"\n]*)"|'(?P<sq>[^'\n]*)')\s*,\s*\[(?P<args>[^\]]*)\]"#,
+        r#"^\s*(?:"(?P<dq>[^"\n]*)"|'(?P<sq>[^'\n]*)'|`(?P<bq>[^`]*)`)\s*,\s*\[(?P<args>(?:"[^"\n]*"|'[^'\n]*'|`[^`]*`|//[^\n]*|/\*(?s:.)*?\*/|[^\]])*)\]"#,
     )
-    .expect("js spawnSync(cmd, [args]) regex compiles")
+    .expect("js argv call (cmd, [args]) regex compiles")
 });
 
 static JS_ARRAY_STRING_LITERALS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?m)(?:"(?P<dq>[^"\n]*)"|'(?P<sq>[^'\n]*)')"#)
         .expect("js array string literal regex compiles")
+});
+
+static JS_ARGV_ELEMENTS: LazyLock<Regex> = LazyLock::new(|| {
+    // The elements of a child_process argv array: string and template literals.
+    // The comment alternatives capture nothing: they consume a `//` or `/* */`
+    // comment whole, so a quote or backtick inside one is never read as an
+    // element (.agent-config-crqi7).
+    Regex::new(
+        r#"(?m)(?:"(?P<dq>[^"\n]*)"|'(?P<sq>[^'\n]*)'|`(?P<bq>[^`]*)`|//[^\n]*|/\*(?s:.)*?\*/)"#,
+    )
+    .expect("js argv element regex compiles")
 });
 
 static JS_FIRST_STRING_ARG: LazyLock<Regex> = LazyLock::new(|| {
@@ -640,19 +658,36 @@ fn refine_match_meta(
 fn refine_javascript_match(meta: &CompiledPattern, matched_text: &str) -> Option<RefinedMatchMeta> {
     let rule_id = meta.rule_id.as_str();
 
-    if rule_id == "heredoc.javascript.execsync" {
+    if matches!(
+        rule_id,
+        "heredoc.javascript.execsync" | "heredoc.javascript.exec"
+    ) {
         let rule_id = execsync_rule_id(rule_id, matched_text);
-        let payload = JS_EXEC_SYNC_LITERAL
-            .captures(matched_text)
-            .and_then(|caps| string_literal_from_caps(&caps));
-
-        if let Some(payload) = payload {
-            return detect_shell_payload(payload).map(|hit| RefinedMatchMeta {
-                rule_id: format!("{rule_id}.{}", hit.rule_suffix),
-                reason: hit.reason.to_string(),
-                severity: hit.severity,
-                suggestion: hit.suggestion.map(str::to_string),
+        // Read from the call's own arguments (rmxds's `js_call_arguments`), so a
+        // nested call's literal -- `/x/.exec("y")` inside an `execSync` -- never
+        // stands in for them (.agent-config-crqi7).
+        let literal = pattern_member(&meta.pattern_str)
+            .and_then(|member| js_call_arguments(matched_text, member))
+            .and_then(|arguments| {
+                let caps = JS_EXEC_LITERAL.captures(arguments)?;
+                let rest = &arguments[caps.get(0)?.end()..];
+                Some((string_literal_from_caps(&caps)?, rest))
             });
+
+        if let Some((payload, rest)) = literal {
+            let hit = detect_shell_payload(payload);
+            // A `${..}` may be anything, and so may whatever is concatenated onto
+            // the literal (`"npm run " + s`): finding nothing is not a verdict, so
+            // the call stays the dynamic match (.agent-config-crqi7).
+            let whole = rest.trim_start().starts_with([',', ')']);
+            if hit.is_some() || (whole && !payload.contains("${")) {
+                return hit.map(|hit| RefinedMatchMeta {
+                    rule_id: format!("{rule_id}.{}", hit.rule_suffix),
+                    reason: hit.reason.to_string(),
+                    severity: hit.severity,
+                    suggestion: hit.suggestion.map(str::to_string),
+                });
+            }
         }
 
         // Dynamic payloads: warn only (fail-open).
@@ -664,21 +699,50 @@ fn refine_javascript_match(meta: &CompiledPattern, matched_text: &str) -> Option
         });
     }
 
-    if rule_id == "heredoc.javascript.spawnsync" {
-        if let Some(caps) = JS_SPAWN_SYNC_CMD_ARGS.captures(matched_text) {
+    if matches!(
+        rule_id,
+        "heredoc.javascript.spawnsync"
+            | "heredoc.javascript.spawn"
+            | "heredoc.javascript.execfilesync"
+            | "heredoc.javascript.execfile"
+    ) {
+        if let Some((caps, rest)) = pattern_member(&meta.pattern_str)
+            .and_then(|member| js_call_arguments(matched_text, member))
+            .and_then(|arguments| {
+                let caps = JS_ARGV_CALL_CMD_ARGS.captures(arguments)?;
+                let rest = &arguments[caps.get(0)?.end()..];
+                Some((caps, rest))
+            })
+        {
             let cmd = string_literal_from_caps(&caps).unwrap_or("");
-            let args = caps.name("args").map_or("", |m| m.as_str());
-            let args: Vec<&str> = JS_ARRAY_STRING_LITERALS
-                .captures_iter(args)
+            let array = caps.name("args").map_or("", |m| m.as_str());
+            let args: Vec<&str> = JS_ARGV_ELEMENTS
+                .captures_iter(array)
                 .filter_map(|caps| string_literal_from_caps(&caps))
                 .collect();
 
-            return detect_spawn_argv(cmd, &args).map(|hit| RefinedMatchMeta {
-                rule_id: format!("{rule_id}.{}", hit.rule_suffix),
-                reason: hit.reason.to_string(),
-                severity: hit.severity,
-                suggestion: hit.suggestion.map(str::to_string),
-            });
+            let hit = detect_spawn_argv(cmd, &args);
+            // A word holding a `${..}`, an element that is not a literal at all (a
+            // variable, a spread, a call), or anything applied to the array after
+            // its `]` (`["-rf"].concat(dirs)`) may be anything: finding nothing is
+            // not a verdict, so the call stays the dynamic match
+            // (.agent-config-crqi7).
+            let whole = rest.trim_start().starts_with([',', ')']);
+            let dynamic = !whole
+                || std::iter::once(cmd)
+                    .chain(args.iter().copied())
+                    .any(|word| word.contains("${"))
+                || JS_ARGV_ELEMENTS
+                    .replace_all(array, "")
+                    .contains(|c: char| !c.is_whitespace() && c != ',');
+            if hit.is_some() || !dynamic {
+                return hit.map(|hit| RefinedMatchMeta {
+                    rule_id: format!("{rule_id}.{}", hit.rule_suffix),
+                    reason: hit.reason.to_string(),
+                    severity: hit.severity,
+                    suggestion: hit.suggestion.map(str::to_string),
+                });
+            }
         }
 
         // Dynamic spawnSync: warn only.
@@ -741,19 +805,36 @@ fn refine_javascript_match(meta: &CompiledPattern, matched_text: &str) -> Option
 fn refine_typescript_match(meta: &CompiledPattern, matched_text: &str) -> Option<RefinedMatchMeta> {
     let rule_id = meta.rule_id.as_str();
 
-    if rule_id == "heredoc.typescript.execsync" {
+    if matches!(
+        rule_id,
+        "heredoc.typescript.execsync" | "heredoc.typescript.exec"
+    ) {
         let rule_id = execsync_rule_id(rule_id, matched_text);
-        let payload = JS_EXEC_SYNC_LITERAL
-            .captures(matched_text)
-            .and_then(|caps| string_literal_from_caps(&caps));
-
-        if let Some(payload) = payload {
-            return detect_shell_payload(payload).map(|hit| RefinedMatchMeta {
-                rule_id: format!("{rule_id}.{}", hit.rule_suffix),
-                reason: hit.reason.to_string(),
-                severity: hit.severity,
-                suggestion: hit.suggestion.map(str::to_string),
+        // Read from the call's own arguments (rmxds's `js_call_arguments`), so a
+        // nested call's literal -- `/x/.exec("y")` inside an `execSync` -- never
+        // stands in for them (.agent-config-crqi7).
+        let literal = pattern_member(&meta.pattern_str)
+            .and_then(|member| js_call_arguments(matched_text, member))
+            .and_then(|arguments| {
+                let caps = JS_EXEC_LITERAL.captures(arguments)?;
+                let rest = &arguments[caps.get(0)?.end()..];
+                Some((string_literal_from_caps(&caps)?, rest))
             });
+
+        if let Some((payload, rest)) = literal {
+            let hit = detect_shell_payload(payload);
+            // A `${..}` may be anything, and so may whatever is concatenated onto
+            // the literal (`"npm run " + s`): finding nothing is not a verdict, so
+            // the call stays the dynamic match (.agent-config-crqi7).
+            let whole = rest.trim_start().starts_with([',', ')']);
+            if hit.is_some() || (whole && !payload.contains("${")) {
+                return hit.map(|hit| RefinedMatchMeta {
+                    rule_id: format!("{rule_id}.{}", hit.rule_suffix),
+                    reason: hit.reason.to_string(),
+                    severity: hit.severity,
+                    suggestion: hit.suggestion.map(str::to_string),
+                });
+            }
         }
 
         return Some(RefinedMatchMeta {
@@ -764,21 +845,50 @@ fn refine_typescript_match(meta: &CompiledPattern, matched_text: &str) -> Option
         });
     }
 
-    if rule_id == "heredoc.typescript.spawnsync" {
-        if let Some(caps) = JS_SPAWN_SYNC_CMD_ARGS.captures(matched_text) {
+    if matches!(
+        rule_id,
+        "heredoc.typescript.spawnsync"
+            | "heredoc.typescript.spawn"
+            | "heredoc.typescript.execfilesync"
+            | "heredoc.typescript.execfile"
+    ) {
+        if let Some((caps, rest)) = pattern_member(&meta.pattern_str)
+            .and_then(|member| js_call_arguments(matched_text, member))
+            .and_then(|arguments| {
+                let caps = JS_ARGV_CALL_CMD_ARGS.captures(arguments)?;
+                let rest = &arguments[caps.get(0)?.end()..];
+                Some((caps, rest))
+            })
+        {
             let cmd = string_literal_from_caps(&caps).unwrap_or("");
-            let args = caps.name("args").map_or("", |m| m.as_str());
-            let args: Vec<&str> = JS_ARRAY_STRING_LITERALS
-                .captures_iter(args)
+            let array = caps.name("args").map_or("", |m| m.as_str());
+            let args: Vec<&str> = JS_ARGV_ELEMENTS
+                .captures_iter(array)
                 .filter_map(|caps| string_literal_from_caps(&caps))
                 .collect();
 
-            return detect_spawn_argv(cmd, &args).map(|hit| RefinedMatchMeta {
-                rule_id: format!("{rule_id}.{}", hit.rule_suffix),
-                reason: hit.reason.to_string(),
-                severity: hit.severity,
-                suggestion: hit.suggestion.map(str::to_string),
-            });
+            let hit = detect_spawn_argv(cmd, &args);
+            // A word holding a `${..}`, an element that is not a literal at all (a
+            // variable, a spread, a call), or anything applied to the array after
+            // its `]` (`["-rf"].concat(dirs)`) may be anything: finding nothing is
+            // not a verdict, so the call stays the dynamic match
+            // (.agent-config-crqi7).
+            let whole = rest.trim_start().starts_with([',', ')']);
+            let dynamic = !whole
+                || std::iter::once(cmd)
+                    .chain(args.iter().copied())
+                    .any(|word| word.contains("${"))
+                || JS_ARGV_ELEMENTS
+                    .replace_all(array, "")
+                    .contains(|c: char| !c.is_whitespace() && c != ',');
+            if hit.is_some() || !dynamic {
+                return hit.map(|hit| RefinedMatchMeta {
+                    rule_id: format!("{rule_id}.{}", hit.rule_suffix),
+                    reason: hit.reason.to_string(),
+                    severity: hit.severity,
+                    suggestion: hit.suggestion.map(str::to_string),
+                });
+            }
         }
 
         return Some(RefinedMatchMeta {
@@ -1442,6 +1552,7 @@ fn mask_perl_comments(code: &str) -> std::borrow::Cow<'_, str> {
 fn string_literal_from_caps<'t>(caps: &regex::Captures<'t>) -> Option<&'t str> {
     caps.name("dq")
         .or_else(|| caps.name("sq"))
+        .or_else(|| caps.name("bq"))
         .map(|m| m.as_str())
 }
 
@@ -1812,6 +1923,25 @@ static INLINE_REQUIRE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("inline require regex compiles")
 });
 
+static REQUIRED_MEMBER: LazyLock<Regex> = LazyLock::new(|| {
+    // `require("x").member` -- the older way to take one export (.agent-config-crqi7).
+    Regex::new(
+        r#"^require\s*\(\s*(?:"(?P<dq>[^"\n]*)"|'(?P<sq>[^'\n]*)')\s*\)\s*\.\s*(?P<member>[A-Za-z_$][\w$]*)$"#,
+    )
+    .expect("required member regex compiles")
+});
+
+/// The module and member of a `require("x").member` expression, if that is all
+/// the text is.
+fn required_member_from_text(text: &str) -> Option<(String, String)> {
+    let caps = REQUIRED_MEMBER.captures(text.trim())?;
+    let raw = caps.name("dq").or_else(|| caps.name("sq"))?.as_str();
+    Some((
+        normalize_module(raw),
+        caps.name("member")?.as_str().to_string(),
+    ))
+}
+
 /// `node:fs` and `fs` are the same module; `fs/promises` is not.
 fn normalize_module(raw: &str) -> String {
     raw.trim()
@@ -1959,6 +2089,14 @@ fn collect_js_bindings<D: Doc>(root: &Node<'_, D>, out: &mut ModuleBindings) {
                 let (Some(name), Some(value)) = (node.field("name"), node.field("value")) else {
                     continue;
                 };
+                // `var exec = require("child_process").exec`: the member itself,
+                // under its local name (.agent-config-crqi7).
+                if let Some((module, member)) = required_member_from_text(&value.text()) {
+                    if name.kind().as_ref() == "identifier" {
+                        out.bare.insert(name.text().to_string(), (module, member));
+                    }
+                    continue;
+                }
                 let Some(module) = require_module_from_text(&value.text()) else {
                     continue;
                 };
@@ -2332,6 +2470,80 @@ fn default_patterns() -> HashMap<ScriptLanguage, Vec<CompiledPattern>> {
                 Severity::Medium,
                 Some("Validate command and arguments carefully".to_string()),
             ),
+            // The rest of child_process, read the same way (.agent-config-crqi7):
+            // execFile/execFileSync/spawn take an argv as spawnSync does, exec takes a
+            // shell string as execSync does. Only exec is gated to a child_process
+            // binding, because RegExp and db objects share its name; a gated-out exec
+            // falls to the core raw-text rules, which read its one shell string but
+            // miss spellings this reads (`git reset -q --hard`). An argv call's split
+            // literals have no raw-text reader at all, so those stay ungated. Not read: an optional chain
+            // (`cp?.spawn`), a computed member (`cp["spawn"]`), a type argument
+            // (`spawn<T>(..)`), and any rebinding of the name (`{ spawn: s }`,
+            // `import { spawn as s }`, `promisify(cp.execFile)`).
+            CompiledPattern::new(
+                "$M.execFileSync($$$)".to_string(),
+                "heredoc.javascript.execfilesync".to_string(),
+                "execFileSync() executes commands".to_string(),
+                Severity::Medium, // refined to block only on destructive literal payloads
+                Some("Validate command and arguments carefully".to_string()),
+            ),
+            CompiledPattern::new(
+                "execFileSync($$$)".to_string(),
+                "heredoc.javascript.execfilesync".to_string(),
+                "execFileSync() executes commands".to_string(),
+                Severity::Medium, // refined to block only on destructive literal payloads
+                Some("Validate command and arguments carefully".to_string()),
+            ),
+            CompiledPattern::new(
+                "$M.execFile($$$)".to_string(),
+                "heredoc.javascript.execfile".to_string(),
+                "execFile() executes commands".to_string(),
+                Severity::Medium, // refined to block only on destructive literal payloads
+                Some("Validate command and arguments carefully".to_string()),
+            ),
+            CompiledPattern::new(
+                "execFile($$$)".to_string(),
+                "heredoc.javascript.execfile".to_string(),
+                "execFile() executes commands".to_string(),
+                Severity::Medium, // refined to block only on destructive literal payloads
+                Some("Validate command and arguments carefully".to_string()),
+            ),
+            CompiledPattern::new(
+                "$M.spawn($$$)".to_string(),
+                "heredoc.javascript.spawn".to_string(),
+                "spawn() executes commands".to_string(),
+                Severity::Medium, // refined to block only on destructive literal payloads
+                Some("Validate command and arguments carefully".to_string()),
+            ),
+            CompiledPattern::new(
+                "spawn($$$)".to_string(),
+                "heredoc.javascript.spawn".to_string(),
+                "spawn() executes commands".to_string(),
+                Severity::Medium, // refined to block only on destructive literal payloads
+                Some("Validate command and arguments carefully".to_string()),
+            ),
+            CompiledPattern::new(
+                "$M.exec($$$)".to_string(),
+                "heredoc.javascript.exec".to_string(),
+                "exec() executes shell commands".to_string(),
+                Severity::Medium, // refined to block only on destructive literal payloads
+                Some("Validate command arguments carefully".to_string()),
+            )
+            .with_gate(BindingGate::Receiver {
+                module: "child_process",
+                receiver: "child_process",
+            }),
+            CompiledPattern::new(
+                "exec($$$)".to_string(),
+                "heredoc.javascript.exec".to_string(),
+                "exec() executes shell commands".to_string(),
+                Severity::Medium, // refined to block only on destructive literal payloads
+                Some("Validate command arguments carefully".to_string()),
+            )
+            .with_gate(BindingGate::Bare {
+                module: "child_process",
+                member: "exec",
+            }),
             // Async versions (still dangerous)
             CompiledPattern::new(
                 "$M.rm($$$)".to_string(),
@@ -2553,6 +2765,71 @@ fn default_patterns() -> HashMap<ScriptLanguage, Vec<CompiledPattern>> {
                 Severity::Medium,
                 Some("Validate command and arguments carefully".to_string()),
             ),
+            // The rest of child_process, as for JavaScript (.agent-config-crqi7).
+            CompiledPattern::new(
+                "$M.execFileSync($$$)".to_string(),
+                "heredoc.typescript.execfilesync".to_string(),
+                "execFileSync() executes commands".to_string(),
+                Severity::Medium, // refined to block only on destructive literal payloads
+                Some("Validate command and arguments carefully".to_string()),
+            ),
+            CompiledPattern::new(
+                "execFileSync($$$)".to_string(),
+                "heredoc.typescript.execfilesync".to_string(),
+                "execFileSync() executes commands".to_string(),
+                Severity::Medium, // refined to block only on destructive literal payloads
+                Some("Validate command and arguments carefully".to_string()),
+            ),
+            CompiledPattern::new(
+                "$M.execFile($$$)".to_string(),
+                "heredoc.typescript.execfile".to_string(),
+                "execFile() executes commands".to_string(),
+                Severity::Medium, // refined to block only on destructive literal payloads
+                Some("Validate command and arguments carefully".to_string()),
+            ),
+            CompiledPattern::new(
+                "execFile($$$)".to_string(),
+                "heredoc.typescript.execfile".to_string(),
+                "execFile() executes commands".to_string(),
+                Severity::Medium, // refined to block only on destructive literal payloads
+                Some("Validate command and arguments carefully".to_string()),
+            ),
+            CompiledPattern::new(
+                "$M.spawn($$$)".to_string(),
+                "heredoc.typescript.spawn".to_string(),
+                "spawn() executes commands".to_string(),
+                Severity::Medium, // refined to block only on destructive literal payloads
+                Some("Validate command and arguments carefully".to_string()),
+            ),
+            CompiledPattern::new(
+                "spawn($$$)".to_string(),
+                "heredoc.typescript.spawn".to_string(),
+                "spawn() executes commands".to_string(),
+                Severity::Medium, // refined to block only on destructive literal payloads
+                Some("Validate command and arguments carefully".to_string()),
+            ),
+            CompiledPattern::new(
+                "$M.exec($$$)".to_string(),
+                "heredoc.typescript.exec".to_string(),
+                "exec() executes shell commands".to_string(),
+                Severity::Medium, // refined to block only on destructive literal payloads
+                Some("Validate command arguments carefully".to_string()),
+            )
+            .with_gate(BindingGate::Receiver {
+                module: "child_process",
+                receiver: "child_process",
+            }),
+            CompiledPattern::new(
+                "exec($$$)".to_string(),
+                "heredoc.typescript.exec".to_string(),
+                "exec() executes shell commands".to_string(),
+                Severity::Medium, // refined to block only on destructive literal payloads
+                Some("Validate command arguments carefully".to_string()),
+            )
+            .with_gate(BindingGate::Bare {
+                module: "child_process",
+                member: "exec",
+            }),
             CompiledPattern::new(
                 "$M.rm($$$)".to_string(),
                 "heredoc.typescript.fs_rm".to_string(),
@@ -3076,6 +3353,58 @@ mod tests {
         use super::*;
 
         #[test]
+        fn child_process_calls_block_a_destructive_literal_on_any_receiver() {
+            // .agent-config-crqi7: each new rule, aliased and bare, quoted and templated.
+            let ast_matcher = AstMatcher::new();
+            for (code, rule_id) in [
+                (
+                    "cp.execFileSync('rm', ['-rf', '/'])",
+                    "heredoc.javascript.execfilesync.rm_rf_catastrophic",
+                ),
+                (
+                    "execFileSync('rm', ['-rf', '/'])",
+                    "heredoc.javascript.execfilesync.rm_rf_catastrophic",
+                ),
+                (
+                    "cp.execFile('rm', ['-rf', '/'], () => {})",
+                    "heredoc.javascript.execfile.rm_rf_catastrophic",
+                ),
+                (
+                    "execFile('git', ['reset', '--hard'])",
+                    "heredoc.javascript.execfile.git_reset_hard",
+                ),
+                (
+                    "cp.spawn('rm', ['-rf', '/'])",
+                    "heredoc.javascript.spawn.rm_rf_catastrophic",
+                ),
+                (
+                    "spawn(`rm`, [`-rf`, `/`])",
+                    "heredoc.javascript.spawn.rm_rf_catastrophic",
+                ),
+                // exec is gated to a child_process binding, so its rows bind one.
+                (
+                    "const cp = require('child_process');\ncp.exec('rm -rf /')",
+                    "heredoc.javascript.exec.rm_rf_catastrophic",
+                ),
+                (
+                    "const { exec } = require('child_process');\nexec(`rm -rf /`)",
+                    "heredoc.javascript.exec.rm_rf_catastrophic",
+                ),
+            ] {
+                let matches = ast_matcher
+                    .find_matches(code, ScriptLanguage::JavaScript)
+                    .unwrap();
+                let ids: Vec<&str> = matches.iter().map(|m| m.rule_id.as_str()).collect();
+                assert!(
+                    matches
+                        .iter()
+                        .any(|m| m.rule_id == rule_id && m.severity.blocks_by_default()),
+                    "{code} should block as {rule_id}, got {ids:?}"
+                );
+            }
+        }
+
+        #[test]
         fn fs_rmsync_catastrophic_blocks() {
             let ast_matcher = AstMatcher::new();
             let code = "const fs = require('fs');\nfs.rmSync('/etc', { recursive: true });";
@@ -3195,6 +3524,37 @@ mod tests {
 
     mod javascript_negative_fixtures {
         use super::*;
+
+        #[test]
+        fn child_process_calls_block_nothing_benign_commented_or_quoted() {
+            // .agent-config-crqi7: benign and non-catastrophic literals, a quote
+            // inside a comment in the argv, a commented-out call, a call in a string.
+            let ast_matcher = AstMatcher::new();
+            for code in [
+                "cp.execFileSync('git', ['status'])",
+                "execFile('ls', ['-la'])",
+                "cp.spawn('rm', ['-rf', './build'])",
+                "const cp = require('child_process');\ncp.exec('echo hi')",
+                "const cp = require('child_process');\ncp.exec(`rm -rf ${dir}`)",
+                "/a+/.exec('aaa')",
+                // exec is gated to a child_process binding: a RegExp's exec is not
+                // a command, whatever its argument reads like.
+                "/x/.exec('rm -rf /')",
+                "cp.spawnSync('rm', [\n  '-rf', // never `/` here\n  './build',\n])",
+                "cp.spawnSync('git', [\n  'reset', /* not '--hard' */\n  '--soft',\n])",
+                "// cp.exec('rm -rf /')",
+                "const s = \"cp.spawn('rm', ['-rf', '/'])\";",
+            ] {
+                let matches = ast_matcher
+                    .find_matches(code, ScriptLanguage::JavaScript)
+                    .unwrap();
+                let ids: Vec<&str> = matches.iter().map(|m| m.rule_id.as_str()).collect();
+                assert!(
+                    !matches.iter().any(|m| m.severity.blocks_by_default()),
+                    "{code} should not block, got {ids:?}"
+                );
+            }
+        }
 
         #[test]
         fn printed_dangerous_string_does_not_match() {
@@ -3709,6 +4069,41 @@ mod tests {
         use super::*;
 
         #[test]
+        fn child_process_calls_block_a_destructive_literal_on_any_receiver() {
+            // .agent-config-crqi7: each new rule, aliased and bare.
+            let ast_matcher = AstMatcher::new();
+            for (code, rule_id) in [
+                (
+                    "cp.execFileSync('rm', ['-rf', '/'] as string[]);",
+                    "heredoc.typescript.execfilesync.rm_rf_catastrophic",
+                ),
+                (
+                    "execFile('rm', ['-rf', '/']);",
+                    "heredoc.typescript.execfile.rm_rf_catastrophic",
+                ),
+                (
+                    "spawn('rm', ['-rf', '/']);",
+                    "heredoc.typescript.spawn.rm_rf_catastrophic",
+                ),
+                (
+                    "import * as cp from 'node:child_process';\ncp.exec('rm -rf /');",
+                    "heredoc.typescript.exec.rm_rf_catastrophic",
+                ),
+            ] {
+                let matches = ast_matcher
+                    .find_matches(code, ScriptLanguage::TypeScript)
+                    .unwrap();
+                let ids: Vec<&str> = matches.iter().map(|m| m.rule_id.as_str()).collect();
+                assert!(
+                    matches
+                        .iter()
+                        .any(|m| m.rule_id == rule_id && m.severity.blocks_by_default()),
+                    "{code} should block as {rule_id}, got {ids:?}"
+                );
+            }
+        }
+
+        #[test]
         fn fs_rmsync_catastrophic_blocks_with_type_assertion() {
             let ast_matcher = AstMatcher::new();
             let code =
@@ -3797,6 +4192,29 @@ mod tests {
 
     mod typescript_negative_fixtures {
         use super::*;
+
+        #[test]
+        fn child_process_calls_block_nothing_benign_commented_or_quoted() {
+            // .agent-config-crqi7
+            let ast_matcher = AstMatcher::new();
+            for code in [
+                "cp.execFileSync('git', ['status']);",
+                "spawn('ls', ['-la'] as string[]);",
+                "import * as cp from 'child_process';\ncp.exec('echo hi');",
+                "const m: RegExpExecArray | null = /x/.exec('rm -rf /');",
+                "// execFile('rm', ['-rf', '/']);",
+                "const s: string = \"cp.exec('rm -rf /')\";",
+            ] {
+                let matches = ast_matcher
+                    .find_matches(code, ScriptLanguage::TypeScript)
+                    .unwrap();
+                let ids: Vec<&str> = matches.iter().map(|m| m.rule_id.as_str()).collect();
+                assert!(
+                    !matches.iter().any(|m| m.severity.blocks_by_default()),
+                    "{code} should not block, got {ids:?}"
+                );
+            }
+        }
 
         #[test]
         fn execsync_safe_payload_does_not_match() {

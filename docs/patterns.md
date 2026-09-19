@@ -48,9 +48,10 @@ Heredoc patterns are authored using ast-grep pattern syntax (as implemented by
   the body's own imports (`BindingGate` in `src/ast_matcher.rs`): the receiver
   must be the module itself, a local name the body binds to that module
   (`import shutil as sh`, `const f = require('fs')`, `import * as fs from
-  'fs'`), or an inline `require("fs")`; a bare call must have been imported
-  from that module (`from shutil import rmtree`, `const { rmSync } =
-  require('fs')`). This is why `$M.remove($$$)` does not match
+  'fs'`), or an inline `require("fs")`; a
+  bare call must have been imported from that module (`from shutil import
+  rmtree`, `const { rmSync } = require('fs')`, `const rmSync =
+  require('fs').rmSync`). This is why `$M.remove($$$)` does not match
   `items.remove(x)`. See `.agent-config-artmu`.
 
 Examples:
@@ -140,6 +141,10 @@ built-in rule IDs. Use these IDs for allowlisting and tests.
 | `heredoc.javascript.execsync` | `$M.execSync($$$)`, `execSync($$$)` (any receiver, or destructured) | executes shell commands |
 | `heredoc.javascript.require_execsync` | the same patterns, when the receiver is `require('child_process')` | executes shell commands |
 | `heredoc.javascript.spawnsync` | `$M.spawnSync($$$)`, `spawnSync($$$)` (any receiver, or destructured) | executes shell commands |
+| `heredoc.javascript.execfilesync` | `$M.execFileSync($$$)`, `execFileSync($$$)` (any receiver, or destructured) | executes commands |
+| `heredoc.javascript.execfile` | `$M.execFile($$$)`, `execFile($$$)` (any receiver, or destructured) | executes commands |
+| `heredoc.javascript.spawn` | `$M.spawn($$$)`, `spawn($$$)` (any receiver, or destructured) | executes commands |
+| `heredoc.javascript.exec` | `$M.exec($$$)`, `exec($$$)` (receiver bound to `child_process`, or imported from it) | executes shell commands |
 
 ### TypeScript
 
@@ -156,6 +161,10 @@ built-in rule IDs. Use these IDs for allowlisting and tests.
 | `heredoc.typescript.execsync` | `$M.execSync($$$)`, `execSync($$$)` (any receiver, or destructured) | executes shell commands |
 | `heredoc.typescript.require_execsync` | the same patterns, when the receiver is `require('child_process')` | executes shell commands |
 | `heredoc.typescript.spawnsync` | `$M.spawnSync($$$)`, `spawnSync($$$)` (any receiver, or destructured) | executes shell commands |
+| `heredoc.typescript.execfilesync` | `$M.execFileSync($$$)`, `execFileSync($$$)` (any receiver, or destructured) | executes commands |
+| `heredoc.typescript.execfile` | `$M.execFile($$$)`, `execFile($$$)` (any receiver, or destructured) | executes commands |
+| `heredoc.typescript.spawn` | `$M.spawn($$$)`, `spawn($$$)` (any receiver, or destructured) | executes commands |
+| `heredoc.typescript.exec` | `$M.exec($$$)`, `exec($$$)` (receiver bound to `child_process`, or imported from it) | executes shell commands |
 | `heredoc.typescript.deno_remove` | `Deno.remove($$$)` | deletes files/directories |
 
 ### Python
@@ -241,27 +250,78 @@ All derived rule IDs are valid allowlist targets.
   payloads are warn-only to avoid false positives.
 - Some file deletion APIs are refined at match time. Non-recursive or
   non-catastrophic paths may result in warn-only severity.
-- JavaScript/TypeScript `execSync` / `spawnSync` rules match any receiver and
-  the bare (destructured) call, so ANY object's `spawnSync`/`execSync` handed a
-  destructive literal denies. A `spawnSync` argv is judged both as words
-  (the command and wrappers compared by basename, an `sh -c` script read) and
-  as the joined shell line (the way `shell: true` runs it, and the rule's
-  reading before any receiver was widened); the MOST SEVERE hit of either
-  reading, or of any segment of a shell line, decides -- a less severe hit
-  never hides a more severe one. A shell
-  line -- an `execSync` payload, an `sh -c` script, or a joined argv -- is
-  split on `;` `|` `&` without
-  quote awareness, so a quoted separator can still over-block
-  (`.agent-config-fqbws`), a dry-run `git clean -n -fd` is judged
-  destructive (`.agent-config-g5xom`), and a `--long-option` is scanned as short
-  flags (`.agent-config-6j4tg`).
-- A destructive `execSync` string is usually read twice: by the heredoc rule
-  and by the `core.*` rule that reads the raw command text. Allowing one takes
-  both ids in the allowlist (a `spawnSync` argv split into separate literals is
+- JavaScript/TypeScript `child_process` rules (`execSync`, `spawnSync`, `spawn`,
+  `execFileSync`, `execFile`) match any receiver and the bare (destructured)
+  call, so ANY object's method of one of those names handed a destructive
+  literal in the `(cmd, [args])` or `(string)` form denies. `exec` alone is
+  gated to a `child_process` binding (the module itself, a name the body binds
+  to it with `require(..)` or `import`, an inline `require("child_process")`,
+  or `exec` imported or taken as `require("child_process").exec`), because
+  RegExp and db objects share its name. A gated-out `exec` falls to the `core.*` raw-text
+  rules, which read its shell string but miss spellings this rule reads
+  (`git reset -q --hard`).
+- An argv (`spawn*`, `execFile*`) is judged both as words (the command and
+  wrappers compared by basename, an `sh -c` script read) and as the joined
+  shell line (the way `shell: true` runs it, and the spawnSync rule's reading
+  before any receiver was widened); the MOST SEVERE hit of either reading, or
+  of any segment of a shell line, decides -- a less severe hit never hides a
+  more severe one. A shell line -- an `exec`/`execSync` payload, an `sh -c`
+  script, or a joined argv -- is split on `;` `|` `&` without quote awareness,
+  so a quoted separator can still over-block (`.agent-config-fqbws`), a
+  dry-run `git clean -n -fd` is judged destructive (`.agent-config-g5xom`),
+  and a `--long-option` is scanned as short flags (`.agent-config-6j4tg`).
+  The literal is read from the call's own arguments, never from a call nested
+  in them. A template literal is read by its raw text, which may span lines;
+  a `${..}` stays in it as an opaque word, so `/var/lib/${app}` is judged as
+  `"/var/lib/" + app` is, and a template in which nothing destructive is found
+  stays a dynamic (medium) match. A `//` or `/* */` comment inside an argv
+  array is skipped, `]` included.
+- A call these rules cannot judge stays a medium match: a payload or argv that
+  is not wholly literal (a variable, a spread, a call, a concatenation such as
+  `"npm run " + s`, or a literal holding `${`), and a literal call with no argv
+  array (`cp.spawn("ls")`). Anything applied to an argv array after its `]`
+  (`["-rf"].concat(dirs)`) counts as not literal, and so -- over-keeping the
+  match -- do a numeric element and a comment or `as` cast after an exec
+  literal. The hook skips it by default; a `[policy.rules]` deny on its id or
+  `default_mode = "deny"` denies it -- for every receiver of the ungated names.
+  A partly literal call in which a non-catastrophic `rm -rf` is found is refined
+  to `<id>.rm_rf`, which a `[policy.rules]` key must name (as for spawnSync).
+- Not read: an optional chain (`cp?.spawn`), a computed member
+  (`cp["spawn"]`), a non-null call (`cp.spawn!(..)`), a type argument
+  (`spawn<T>`), a cast literal (`"rm" as string`), a concatenated command
+  (`cp.spawn(p + "/rm", ..)`), Bun's argv-array forms (`Bun.spawn([..])`,
+  `Bun.spawn({ cmd: [..] })`), a comment before the first literal or the argv
+  array (`cp.spawn("rm", /* argv */ [..])`), a lone command line under
+  `{ shell: true }` (`cp.spawn("git reset --hard", { shell: true })`, which
+  stays medium), a regex literal holding `//` inside an argv array (read as a
+  comment), any rebinding of the name (`{ spawn: s }`, `import { spawn as s }`,
+  `promisify(cp.execFile)`), and, for the `exec` gate, a binding by assignment
+  (`let cp; cp = require(..)`), TypeScript's `import cp = require(..)`, a
+  dynamic `await import(..)` (binding it would let a name like `fs` bound to
+  `fs-extra` stop matching the literal-`fs` rule), a parenthesized inline
+  receiver (`(await import(..)).exec`), and destructuring from a bound alias
+  (`const { exec } = cp`). The
+  refinement reads the call's text with regexes; these need its syntax tree.
+- A destructive `exec`/`execSync` string is usually read twice: by the heredoc
+  rule and by the `core.*` rule that reads the raw command text. Allowing one
+  takes both ids in the allowlist (an argv split into separate literals is
   read by the heredoc rule alone); a `[policy.rules]` warn on the `core.*` rule alone does not
   govern it (the heredoc match decides first). A warn on the heredoc id or the
   `heredoc.<lang>` pack is held, and the `core.*` rule reading the same text
   still denies (`.agent-config-dcg-heredoc-policy-warn-hides-outer-fxck7`).
+  `exec` joined these rules in `.agent-config-crqi7`, so an allowlist that
+  named only the `core.*` id for a `child_process` `exec` literal now denies
+  under the heredoc id. Name both, or the whole pack:
+
+  ```toml
+  [[allow]]
+  rule = "heredoc.javascript:exec.rm_rf_catastrophic"   # or "heredoc.javascript:*"
+  reason = "fixture"
+
+  [[allow]]
+  rule = "core.filesystem:rm-rf-root-home"
+  reason = "fixture"
+  ```
 - Patterns are evaluated only for supported languages and only when heredoc
   triggers are detected. Non-heredoc destructive code outside the supported
   languages is out of scope.

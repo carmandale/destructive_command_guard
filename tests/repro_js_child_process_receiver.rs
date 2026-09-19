@@ -50,14 +50,33 @@
 //! the receiver, not from a second pattern: two patterns on one call produced
 //! two matches, and allowlisting both ids the deny could name still denied.
 //!
-//! Still NOT read, recorded rather than claimed: `cp.execFileSync`, `cp.spawn`,
-//! `cp.exec`, a renamed destructure (`{ spawnSync: s }`), `cp?.spawnSync`,
-//! `cp["spawnSync"]`, a template-literal argv, a TS generic call
-//! (`.agent-config-crqi7`); an unterminated body, which only the fallback regex
-//! sweep reads -- by call shape, with no payload judged (`.agent-config-artmu`
-//! gave it the bare `spawnSync(` / `execSync(` shapes); a node heredoc
-//! nested in a bash heredoc body (`.agent-config-0awpo`); a catastrophic `rm`
-//! target after the first, or under `/Users` (`.agent-config-b8m7s`).
+//! The rest of `child_process` is read the same way (`.agent-config-crqi7`):
+//! `execFileSync`, `execFile` and `spawn` take an argv as spawnSync does, `exec`
+//! a shell string as execSync does -- gated to a `child_process` binding, since
+//! RegExp and db objects share its name. A template literal is read by its raw
+//! text, a `${..}` kept in it as an opaque word; one in which nothing
+//! destructive is found stays a dynamic (medium) match that a deny policy
+//! governs, as does an argv with a non-literal element or a concatenated
+//! payload. A comment inside an argv array is skipped. Before, every argv row
+//! ALLOWED, and exec was denied only where a `core.*` raw-text rule matched
+//! (`core.filesystem`, `core.git`) -- `git reset -q --hard` was not.
+//!
+//! Still NOT read, recorded rather than claimed: `cp?.spawnSync`,
+//! `cp["spawnSync"]`, `cp.spawnSync!(..)` and a type argument
+//! (`spawnSync<T>(..)`, a TS2558 type error that `deno run` and `bun` do not
+//! check, so it does run) are spellings outside the "well-intentioned but
+//! fallible" agent dcg's README guards against; a cast literal
+//! (`"rm" as string`) is missed because the refinement reads the call's text
+//! with regexes, not its AST; any rebinding of the name (`{ spawnSync: s }`,
+//! `import { spawn as s }`, `promisify(cp.execFile)`) -- the binding reader
+//! `.agent-config-artmu` landed (which now gates exec too) records a renamed
+//! destructure as unread; a dynamic `await import(..)`; an unterminated body,
+//! which only the fallback regex sweep reads -- by call shape, with no payload
+//! judged
+//! (`.agent-config-artmu` gave it the bare `spawnSync(` / `execSync(` shapes);
+//! a node heredoc nested in a bash heredoc body (`.agent-config-0awpo`); a
+//! catastrophic `rm` target after the first, or under `/Users`
+//! (`.agent-config-b8m7s`).
 //!
 //! Every deny asserts the `ruleId`, so a deny from the regex sweep (which
 //! carries none) or from another pack cannot pass for the rule reading it.
@@ -77,6 +96,15 @@ const RM: &str = "rm";
 const GIT: &str = "git";
 
 fn hook_with_allowlist(command: &str, allowlist: Option<&str>) -> serde_json::Value {
+    hook_in(command, allowlist, None)
+}
+
+/// A hook run under a config file (`DCG_CONFIG`), e.g. a `[policy]` table.
+fn hook_with_config(command: &str, config: &str) -> serde_json::Value {
+    hook_in(command, None, Some(config))
+}
+
+fn hook_in(command: &str, allowlist: Option<&str>, config: Option<&str>) -> serde_json::Value {
     let sandbox = spawn::sandbox();
     if let Some(allowlist) = allowlist {
         let dir = sandbox.dcg_config_dir();
@@ -84,6 +112,11 @@ fn hook_with_allowlist(command: &str, allowlist: Option<&str>) -> serde_json::Va
         std::fs::write(dir.join("allowlist.toml"), allowlist).expect("write allowlist");
     }
     let mut cmd = spawn::dcg_in(&sandbox);
+    if let Some(config) = config {
+        let path = sandbox.root().join("config.toml");
+        std::fs::write(&path, config).expect("write config");
+        cmd.env("DCG_CONFIG", &path);
+    }
     let input = payload::pre_tool_use(sandbox.root(), command).to_string();
     let mut child = cmd
         .stdin(Stdio::piped())
@@ -532,4 +565,297 @@ fn a_spawn_sync_argv_is_also_read_as_the_joined_shell_line() {
         r#"import * as cp from "child_process"; cp.spawnSync("{GIT}", ["clean -fd"] as string[], {{ shell: true }});"#
     );
     assert_denied_by(&ts(&ts_body), "heredoc.typescript:spawnsync.git_clean_fd");
+}
+
+// ---------------------------------------------------------------------------
+// The rest of child_process (.agent-config-crqi7). execFileSync / execFile /
+// spawn take an argv, as spawnSync does; exec takes a shell string, as
+// execSync does. Before: every argv row ALLOWED, and exec was denied only where
+// a core.* raw-text rule matched (core.filesystem, core.git).
+// ---------------------------------------------------------------------------
+
+/// Each argv call and the rule-id segment it is read under.
+const ARGV_CALLS: [(&str, &str); 3] = [
+    ("execFileSync", "execfilesync"),
+    ("execFile", "execfile"),
+    ("spawn", "spawn"),
+];
+
+#[test]
+fn every_argv_call_with_a_destructive_argv_denies() {
+    for (call, id) in ARGV_CALLS {
+        let rule = format!("heredoc.javascript:{id}.rm_rf_catastrophic");
+        let aliased =
+            format!(r#"const cp=require("child_process"); cp.{call}("{RM}",["-rf","/srv"])"#);
+        assert_denied_by(&node(&aliased), &rule);
+        let destructured = format!(
+            r#"const {{ {call} }} = require("child_process"); {call}("{RM}", ["-rf", "/srv"])"#
+        );
+        assert_denied_by(&node(&destructured), &rule);
+    }
+}
+
+#[test]
+fn an_argv_call_judges_git_as_words() {
+    assert_denied_by(
+        &node(&format!(
+            r#"const cp=require("child_process"); cp.spawn("{GIT}",["reset","--hard"])"#
+        )),
+        "heredoc.javascript:spawn.git_reset_hard",
+    );
+    assert_denied_by(
+        &node(&format!(
+            r#"const cp=require("child_process"); cp.execFileSync("{GIT}",["clean","-fd"])"#
+        )),
+        "heredoc.javascript:execfilesync.git_clean_fd",
+    );
+}
+
+#[test]
+fn exec_is_denied_by_the_rule_that_read_it() {
+    for body in [
+        format!(r#"const cp=require("child_process"); cp.exec("{RM} -rf /srv")"#),
+        format!(r#"const {{ exec }} = require("child_process"); exec("{RM} -rf /srv")"#),
+        format!(
+            r#"const child_process=require("child_process"); child_process.exec("{RM} -rf /srv")"#
+        ),
+        // The gate resolves an inline require to its module (.agent-config-rmxds).
+        format!(r#"require("child_process").exec("{RM} -rf /srv", () => {{}})"#),
+    ] {
+        assert_denied_by(&node(&body), "heredoc.javascript:exec.rm_rf_catastrophic");
+    }
+}
+
+#[test]
+fn typescript_reads_the_rest_of_child_process() {
+    let argv = format!(r#"("{RM}", ["-rf", "/srv"])"#);
+    let string = format!(r#"("{RM} -rf /srv")"#);
+    for (call, id, args) in [
+        ("execFileSync", "execfilesync", &argv),
+        ("execFile", "execfile", &argv),
+        ("spawn", "spawn", &argv),
+        ("exec", "exec", &string),
+    ] {
+        let rule = format!("heredoc.typescript:{id}.rm_rf_catastrophic");
+        let aliased = format!(r#"import * as cp from "child_process"; cp.{call}{args};"#);
+        assert_denied_by(&ts(&aliased), &rule);
+        let destructured =
+            format!(r#"import {{ {call} }} from "node:child_process"; {call}{args};"#);
+        assert_denied_by(&ts(&destructured), &rule);
+    }
+}
+
+#[test]
+fn a_template_is_read_by_its_raw_text() {
+    let argv =
+        format!(r#"const cp=require("child_process"); cp.spawnSync(`{RM}`, [`-rf`, `/srv`])"#);
+    assert_denied_by(&node(&argv), JS_SPAWN_RM);
+    let string = format!(r#"const cp=require("child_process"); cp.exec(`{RM} -rf /srv`)"#);
+    assert_denied_by(&node(&string), "heredoc.javascript:exec.rm_rf_catastrophic");
+    // A template may span lines; before, this one was left to core.filesystem.
+    let multi_line = format!("const cp=require(\"child_process\"); cp.exec(`\n{RM} -rf /srv\n`)");
+    assert_denied_by(
+        &node(&multi_line),
+        "heredoc.javascript:exec.rm_rf_catastrophic",
+    );
+    // A substitution stays in the text as an opaque word, so a static command
+    // name or system-path prefix is judged as a literal path to rm
+    // (`"/usr/bin/rm"`) and the concatenation `"/var/lib/" + app` already are.
+    // (A concatenated COMMAND, `p + "/rm"`, is not read: no literal follows `(`.)
+    let command_by_path = format!(
+        r#"const cp=require("child_process"); const p=process.argv[2]; cp.spawn(`${{p}}/{RM}`, ["-rf", "/srv"])"#
+    );
+    assert_denied_by(
+        &node(&command_by_path),
+        "heredoc.javascript:spawn.rm_rf_catastrophic",
+    );
+    let under_a_system_dir = format!(
+        r#"const cp=require("child_process"); const app=process.argv[2]; cp.spawnSync("{RM}", ["-rf", `/var/lib/${{app}}`])"#
+    );
+    assert_denied_by(&node(&under_a_system_dir), JS_SPAWN_RM);
+    // Controls: an unknown target, or one under /tmp, is not catastrophic.
+    for target in ["`${d}`", "`/tmp/${d}`"] {
+        assert_allowed(&node(&format!(
+            r#"const cp=require("child_process"); const d=process.argv[2]; cp.spawnSync("{RM}", ["-rf", {target}])"#
+        )));
+    }
+}
+
+#[test]
+fn a_comment_inside_an_argv_is_not_read_as_an_element() {
+    // Found by the crqi7 cold review: a quoted word in a comment was read as an
+    // argv element, moving the target in both directions. The double-quoted
+    // row allowed before crqi7 too.
+    for comment in [
+        "// wipe the `data` dir",
+        r#"// wipe the "data" dir"#,
+        "/* wipe the `data` dir */",
+        // A `]` in a comment does not end the array either.
+        "// see [1]",
+        "/* [prod] */",
+    ] {
+        let command = node(&format!(
+            "const cp=require(\"child_process\"); cp.spawnSync(\"{RM}\", [\n  \"-rf\", {comment}\n  \"/srv/data\",\n])"
+        ));
+        assert_denied_by(&command, JS_SPAWN_RM);
+    }
+    assert_allowed(&node(&format!(
+        "const cp=require(\"child_process\"); cp.spawnSync(\"{RM}\", [\n  \"-rf\", // never `/` here\n  \"./build\",\n])"
+    )));
+    assert_allowed(&node(&format!(
+        "const cp=require(\"child_process\"); cp.spawnSync(\"{GIT}\", [\n  \"reset\", // not `--hard` here\n  \"--soft\",\n])"
+    )));
+}
+
+#[test]
+fn the_rest_of_child_process_allows_benign_and_dynamic_calls() {
+    assert_allowed(&node(
+        r#"const cp=require("child_process"); cp.spawn("ls",["-la","/srv"]); cp.execFileSync("git",["status"]); cp.execFile("ls",[]); cp.exec("echo hi")"#,
+    ));
+    assert_allowed(&node(
+        r#"const cp=require("child_process"); const c=process.argv[2]; cp.exec(c); cp.spawn(c, []); cp.execFileSync(c, []); cp.execFile(c, [])"#,
+    ));
+    assert_allowed(&node(&format!(
+        r#"const cp=require("child_process"); cp.spawn("{RM}",["-rf","./build"])"#
+    )));
+}
+
+// ---------------------------------------------------------------------------
+// Deny policies (crqi7 review round 2). A call these rules cannot judge stays a
+// medium match, which a `[policy.rules]` deny or a deny default governs, so a
+// dynamic call must not be dropped -- and exec, whose name RegExp and db objects
+// share, must not match what is not child_process.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_dynamic_call_stays_a_match_a_deny_policy_governs() {
+    let policy = "[policy.rules]\n\
+                  \"heredoc.javascript:execsync\" = \"deny\"\n\
+                  \"heredoc.javascript:spawnsync\" = \"deny\"\n\
+                  \"heredoc.javascript:spawn\" = \"deny\"\n\
+                  \"heredoc.javascript:exec\" = \"deny\"\n\
+                  \"heredoc.typescript:execsync\" = \"deny\"\n\
+                  \"heredoc.typescript:spawnsync\" = \"deny\"\n";
+    for (command, rule) in [
+        // A template with a substitution: nothing destructive is found in it,
+        // and that is not a verdict.
+        (
+            node(
+                r#"const cp=require("child_process"); const s=process.argv[2]; cp.execSync(`npm run ${s}`, {stdio:"inherit"})"#,
+            ),
+            "heredoc.javascript:execsync",
+        ),
+        (
+            node(
+                r#"const cp=require("child_process"); const t=process.argv[2]; cp.spawnSync(`${t}`, ["x"])"#,
+            ),
+            "heredoc.javascript:spawnsync",
+        ),
+        (
+            node(r#"const cp=require("child_process"); const c=process.argv[2]; cp.exec(`${c}`)"#),
+            "heredoc.javascript:exec",
+        ),
+        (
+            ts(
+                r#"import { execSync } from "node:child_process"; const pm = Deno.args[0]; execSync(`${pm} install`);"#,
+            ),
+            "heredoc.typescript:execsync",
+        ),
+        // A nested call's literal does not stand in for the call's own argument.
+        (
+            node(
+                r#"const cp=require("child_process"); const c=process.argv[2]; cp.execSync(c + (/x/.exec("y") ? "" : ""))"#,
+            ),
+            "heredoc.javascript:execsync",
+        ),
+        // Partly literal: a variable argv element, or a variable concatenated onto
+        // the literal. The literal part alone is not the call.
+        (
+            node(&format!(
+                r#"const cp=require("child_process"); const s=process.argv[2]; cp.spawn("{RM}", ["-rf", s])"#
+            )),
+            "heredoc.javascript:spawn",
+        ),
+        (
+            node(
+                r#"const cp=require("child_process"); const s=process.argv[2]; cp.exec("npm run " + s)"#,
+            ),
+            "heredoc.javascript:exec",
+        ),
+        // Anything applied to the array after its `]` (crqi7 review round 4).
+        (
+            node(&format!(
+                r#"const cp=require("child_process"); const dirs=process.argv.slice(2); cp.spawn("{RM}", ["-rf"].concat(dirs))"#
+            )),
+            "heredoc.javascript:spawn",
+        ),
+        // The TypeScript copies of the same checks.
+        (
+            ts(&format!(
+                r#"import {{ spawnSync }} from "node:child_process"; const d = Deno.args; spawnSync("{RM}", ["-rf"].concat(d));"#
+            )),
+            "heredoc.typescript:spawnsync",
+        ),
+        (
+            ts(
+                r#"import { spawnSync } from "node:child_process"; const t = Deno.args[0]; spawnSync("npm", ["run", t]);"#,
+            ),
+            "heredoc.typescript:spawnsync",
+        ),
+        (
+            ts(
+                r#"import { execSync } from "node:child_process"; const pm = Deno.args[0]; execSync("npm run " + pm);"#,
+            ),
+            "heredoc.typescript:execsync",
+        ),
+    ] {
+        assert_verdict_denied_by(&hook_with_config(&command, policy), &command, rule);
+        // Control: without the policy the same medium match only warns.
+        assert_allowed(&command);
+    }
+}
+
+#[test]
+fn a_deny_default_does_not_reach_a_regexp_exec() {
+    let deny_default = "[policy]\ndefault_mode = \"deny\"\n";
+    for body in [
+        r"const re=/(\w+)=(\w+)/g; let m; while ((m = re.exec(process.argv[2])) !== null) { console.log(m[1]); }",
+        r"const db=open(); db.exec(process.argv[2])",
+        r"exec(process.argv[2])",
+    ] {
+        let command = node(body);
+        let out = hook_with_config(&command, deny_default);
+        assert!(
+            out.is_null(),
+            "a non-child_process exec must not match\ncommand: {command:?}\noutput: {out}"
+        );
+    }
+    // Control: a child_process exec is still the rule's, so the deny default
+    // denies it by that id.
+    let command = node(r#"const cp=require("child_process"); const c=process.argv[2]; cp.exec(c)"#);
+    assert_verdict_denied_by(
+        &hook_with_config(&command, deny_default),
+        &command,
+        "heredoc.javascript:exec",
+    );
+}
+
+#[test]
+fn a_call_taken_as_a_member_of_require_is_read() {
+    // `git reset -q --hard` is one core.git's raw-text regex does not catch, so a
+    // deny here is the exec rule's or nothing (crqi7 review round 3).
+    let payload = format!("{GIT} reset -q --hard");
+    let member = node(&format!(
+        r#"var exec = require("child_process").exec; exec("{payload}", function (err) {{}})"#
+    ));
+    assert_denied_by(&member, "heredoc.javascript:exec.git_reset_hard");
+    // The binding is artmu's collector's, so the fs rules read it too.
+    let fs_member =
+        node(r#"const rmSync = require("fs").rmSync; rmSync("/etc", {recursive: true})"#);
+    assert_denied_by(&fs_member, "heredoc.javascript:fs_rmsync.catastrophic");
+    // Control: the same payload through a name bound to nothing is not read by
+    // any rule -- the gap the binding above closes.
+    assert_allowed(&node(&format!(
+        r#"var run = pick(); run.exec("{payload}")"#
+    )));
 }
