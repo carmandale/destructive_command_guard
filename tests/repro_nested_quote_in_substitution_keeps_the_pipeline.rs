@@ -15,52 +15,67 @@
 //! FOUND 2026-09-19 by the cold review of `.agent-config-y2d40` (finding S3);
 //! it predates that change.
 //!
-//! Every kill row has a single-quote twin: the same command with the inner
-//! quotes made single, which never desynced. The twin proves the harness, the
-//! pack and the rule can all produce the DENY a kill row claims was missing,
-//! so a kill row's green means the walk changed, not that the probe went blind.
+//! The cold review's follow-up rows found the same walk misjudging two more
+//! extents outside `" "`: a bare `${...}` (the `;` in `2>${LOG//;/_}`), and an
+//! ANSI-C `$'...'`, whose backslashes escape (`$'e\'log'` is one word).
+//!
+//! Every kill row has a twin: the same command with the inner quotes made
+//! single, or without the backslash or separator, which never desynced. The
+//! twin proves the harness, the pack and the rule can all produce the DENY a
+//! kill row claims was missing, so a kill row's green means the walk changed,
+//! not that the probe went blind.
 //!
 //! WHICH ROW IS A KILL, measured by running this file with `src/heredoc.rs`
-//! swapped for main's (305f6802) and restored:
+//! swapped for main's before this bead (95ee28e3), then for this bead's first
+//! commit alone (448ccca6), and restored:
 //!
 //! ```text
-//!   row                                                                | pre-fix
-//!   --------------------------------------------------------------------|--------
-//!   a_quote_inside_a_substitution_does_not_end_the_argument             | RED
-//!   a_herestring_line_is_walked_the_same_way                            | RED
-//!   a_quote_inside_a_redirection_target_does_not_end_it                 | RED
-//!   a_quote_inside_a_backtick_substitution_does_not_end_the_argument    | RED
-//!   a_quote_inside_a_parameter_expansion_does_not_end_the_argument      | RED
-//!   a_paren_does_not_close_a_parameter_expansion                        | RED
-//!   an_escaped_quote_inside_the_substitution_does_not_end_its_string    | RED
-//!   a_double_quote_inside_single_quotes_in_the_substitution_is_literal  | RED
-//!   a_pipe_inside_the_substitution_is_not_this_pipeline                 | RED
-//!   the five twins, and the_same_argument_into_a_data_sink_allows       | green
+//!   row                                                                | 95ee28e3 | 448ccca6
+//!   --------------------------------------------------------------------|----------|---------
+//!   a_quote_inside_a_substitution_does_not_end_the_argument             | RED      | green
+//!   a_herestring_line_is_walked_the_same_way                            | RED      | green
+//!   a_quote_inside_a_redirection_target_does_not_end_it                 | RED      | green
+//!   a_quote_inside_a_backtick_substitution_does_not_end_the_argument    | RED      | green
+//!   a_quote_inside_a_parameter_expansion_does_not_end_the_argument      | RED      | green
+//!   a_paren_does_not_close_a_parameter_expansion                        | RED      | green
+//!   an_escaped_quote_inside_the_substitution_does_not_end_its_string    | RED      | green
+//!   a_double_quote_inside_single_quotes_in_the_substitution_is_literal  | RED      | green
+//!   a_pipe_inside_the_substitution_is_not_this_pipeline                 | RED      | green
+//!   a_separator_inside_a_bare_parameter_expansion_is_not_this_pipelines | RED      | RED
+//!   an_escaped_quote_does_not_end_an_ansi_c_word                        | RED      | RED
+//!   an_escaped_quote_does_not_end_an_ansi_c_word_inside_a_substitution  | RED      | RED
+//!   a_pipe_inside_an_expansion_or_an_ansi_c_word_is_not_this_pipeline   | RED      | RED
+//!   the seven twins, and the_same_argument_into_a_data_sink_allows      | green    | green
 //! ```
 //!
-//! All fifteen are green after it. The last kill row is the other direction:
-//! the desynced span read the `|` inside the substitution as a pipe and DENIED
-//! a heredoc written to a file.
+//! All twenty-one are green after both. The two `a_pipe_inside_...` rows are
+//! the other direction: a desynced walk read a `|` inside a word as a pipe and
+//! DENIED a heredoc written to a file.
 //!
 //! THE MUTANTS, each one change, each run on this tree and restored after:
 //!
 //! ```text
 //!   mutant                                                    | rows it turns red
 //!   -----------------------------------------------------------|------------------
-//!   the walk's quote arm back to "skip to the next bare quote" | all nine kill rows
+//!   the walk's quote arm back to "skip to the next bare quote" | the nine `" "` kill rows
 //!   skip_quoted_span without its `$(` / `${` arm               | eight: not backtick
 //!   skip_quoted_span without its backtick arm                  | the backtick row
-//!   skip_quoted_span's `$(` arm without `${`                   | both expansion rows
-//!   skip_balanced_paren counting `(` for a `${`                | the paren row only
+//!   skip_quoted_span's `$(` arm without `${`                   | both `" "` expansion rows
+//!   skip_balanced_paren counting `(` for a `${`                | every `${` row, twins too
 //!   skip_balanced_paren's quote arm ignoring `\"`              | the escaped-quote row
+//!   the walk's `$(` arm without `${`                           | bare expansion, pipe-in-word
+//!   the walk without its `$'` arm                              | ANSI-C word, pipe-in-word
+//!   skip_balanced_paren without its `$'` arm                   | ANSI-C inside a substitution
+//!   skip_quoted_span not honouring `\` in `$' '`               | both ANSI-C rows, pipe-in-word
 //! ```
 //!
-//! The counting mutant is caught only by the paren row: without a `)` in the
-//! word, a paren count runs to the end of input and the unterminated-span
-//! fallback denies by accident. That is why the paren row exists.
-//! `skip_quoted_span`'s own `\` step is pinned by
+//! `a_paren_does_not_close_a_parameter_expansion` exists for the counting
+//! mutant: before the walk read a bare `${`, it was the only row that mutant
+//! turned red, because without a `)` in the word a paren count runs to the end
+//! of input and the unterminated-span fallback denies by accident.
+//! `skip_quoted_span`'s `\` step inside `" "` is pinned by
 //! `a_pipe_inside_the_quoted_span_is_still_not_a_pipeline` in
-//! tests/repro_heredoc_gate_composition.rs, which the same mutant turns red.
+//! tests/repro_heredoc_gate_composition.rs, which that mutant turns red.
 
 #![allow(clippy::doc_markdown, clippy::uninlined_format_args)]
 
@@ -262,6 +277,67 @@ fn the_single_quote_twin_of_the_expansion_row_denies() {
 }
 
 // ---------------------------------------------------------------------------
+// The same walk outside `" "`: a bare `${...}` and ANSI-C `$'...'` (rows added
+// to the bead from `.agent-config-y2d40`'s cold review 2).
+// ---------------------------------------------------------------------------
+
+/// The `;` in `${LOG//;/_}` is part of a pattern, not a separator.
+#[test]
+fn a_separator_inside_a_bare_parameter_expansion_is_not_this_pipelines() {
+    assert_denied(
+        &heredoc("cat <<'EOF' 2>${LOG//;/_} | bash"),
+        "in a redirection target",
+    );
+    assert_denied(
+        &heredoc("cat <<'EOF' | tee ${LOG//;/_} | bash"),
+        "as a data stage's argument",
+    );
+    assert_denied(
+        &format!("cat <<< '{}' 2>${{LOG//;/_}} | bash", body()),
+        "on a here-string's line",
+    );
+}
+
+#[test]
+fn the_plain_twin_of_the_bare_expansion_row_denies() {
+    assert_denied(
+        &heredoc("cat <<'EOF' 2>${LOG//./_} | bash"),
+        "control: no separator in the pattern",
+    );
+}
+
+/// In `$'e\'log'` the backslash escapes the quote. Read as a plain `' '`, the
+/// span ended at `\'` and the word's last quote opened a span that ran to the
+/// `'` of `'a'`, swallowing `| bash`.
+#[test]
+fn an_escaped_quote_does_not_end_an_ansi_c_word() {
+    assert_denied(
+        &heredoc(r"cat <<'EOF' 2>$'e\'log' | bash -s 'a'"),
+        "`$'e\\'log'` is one word",
+    );
+}
+
+#[test]
+fn an_escaped_quote_does_not_end_an_ansi_c_word_inside_a_substitution() {
+    assert_denied(
+        &heredoc(r"cat <<'EOF' 2>$(echo $'a\'b') | bash"),
+        "the substitution holds one word and closes at its `)`",
+    );
+}
+
+#[test]
+fn the_plain_twin_of_the_ansi_c_rows_denies() {
+    assert_denied(
+        &heredoc(r"cat <<'EOF' 2>$'elog' | bash -s 'a'"),
+        "control: no backslash in the word",
+    );
+    assert_denied(
+        &heredoc(r"cat <<'EOF' 2>$(echo $'ab') | bash"),
+        "control: no backslash in the word",
+    );
+}
+
+// ---------------------------------------------------------------------------
 // The data side: the fix must not buy its denies by reading more pipes.
 // ---------------------------------------------------------------------------
 
@@ -282,5 +358,18 @@ fn a_pipe_inside_the_substitution_is_not_this_pipeline() {
     assert_allowed(
         &heredoc(r#"cat <<'EOF' - "$(printf "a|b")" > out.txt"#),
         "the only `|` is inside the substitution",
+    );
+}
+
+/// The same for a `|` inside a bare `${...}` and inside an ANSI-C word.
+#[test]
+fn a_pipe_inside_an_expansion_or_an_ansi_c_word_is_not_this_pipeline() {
+    assert_allowed(
+        &heredoc("cat <<'EOF' 2>${LOG//|/_} > out.txt"),
+        "the only `|` is in the expansion's pattern",
+    );
+    assert_allowed(
+        &heredoc(r"cat <<'EOF' 2>$'a\'b|c' > out.txt"),
+        "the only `|` is inside the ANSI-C word",
     );
 }

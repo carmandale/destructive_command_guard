@@ -2771,11 +2771,20 @@ pub fn heredoc_output_reaches_executor(command: &str, heredoc_start: usize) -> b
             // The partner is not simply the next bare quote either: see
             // `skip_quoted_span` for the substitutions a `" "` span can hold.
             b'\'' | b'"' => i = skip_quoted_span(b, i).unwrap_or(i + 1),
+            // `$'...'` is ANSI-C quoting, and its backslashes escape: `$'e\'log'`
+            // is one word. Read as a plain `' '` it ended at the `\'`, and the
+            // next `'` opened a span that swallowed `| bash`.
+            b'$' if b.get(i + 1) == Some(&b'\'') => {
+                i = skip_quoted_span(b, i).unwrap_or(i + 2);
+            }
             // A substitution is its own command list. The `;` in `$(true;)` and
             // the `|` in `` `a | b` `` belong to that inner list, not to this
             // pipeline; reading them as this pipeline's separators ends the scan
-            // early, and an early end is an allow.
-            b'$' if b.get(i + 1) == Some(&b'(') => i = skip_balanced_paren(b, i + 1),
+            // early, and an early end is an allow. A `${...}` expansion is the
+            // same: the `;` in `2>${LOG//;/_}` is part of a pattern.
+            b'$' if matches!(b.get(i + 1), Some(b'(' | b'{')) => {
+                i = skip_balanced_paren(b, i + 1);
+            }
             b'`' => i = skip_backticks(b, i),
             // `>(cmd)` and `<(cmd)` are process substitutions, and the command
             // inside receives the stream. `tee >(bash)` is a data sink in
@@ -2930,14 +2939,19 @@ pub fn compound_output_reaches_executor(command: &str, body_end: usize) -> bool 
 /// (`.agent-config-dcg-walk-nested-dquote-veto-bypass-xr4v2`). The substitution
 /// scanner already opens a level on `$(` inside `" "`; this is the walk
 /// agreeing with it.
+///
+/// `open` may also be the `$` of an ANSI-C `$'...'`: a `' '` span in which a
+/// backslash DOES escape, so `$'a\'b'` ends at the last quote, not the second.
 fn skip_quoted_span(b: &[u8], open: usize) -> Option<usize> {
-    let quote = b[open];
+    let ansi_c = b.get(open) == Some(&b'$');
+    let open = open + usize::from(ansi_c);
+    let quote = *b.get(open)?;
     let mut i = open + 1;
     while i < b.len() {
         match b[i] {
             c if c == quote => return Some(i + 1),
+            b'\\' if quote == b'"' || ansi_c => i += 2,
             _ if quote == b'\'' => i += 1,
-            b'\\' => i += 2,
             b'$' if matches!(b.get(i + 1), Some(b'(' | b'{')) => {
                 i = skip_balanced_paren(b, i + 1);
             }
@@ -2965,6 +2979,12 @@ fn skip_balanced_paren(b: &[u8], open: usize) -> usize {
     while i < b.len() {
         match b[i] {
             b'\\' => i += 1,
+            // An ANSI-C `$'...'` honours backslashes: `$(echo $'a\'b')` holds
+            // one word, and a plain `' '` reading ran past the `)`.
+            b'$' if b.get(i + 1) == Some(&b'\'') => match skip_quoted_span(b, i) {
+                Some(end) => i = end - 1,
+                None => return b.len(),
+            },
             b'\'' | b'"' => {
                 let quote = b[i];
                 i += 1;
