@@ -137,9 +137,9 @@ built-in rule IDs. Use these IDs for allowlisting and tests.
 | `heredoc.javascript.fs_unlinksync` | `$M.unlinkSync($$$)` / `unlinkSync($$$)`, bound to `fs` | deletes files |
 | `heredoc.javascript.fspromises_rm` | `$M.rm($$$)` / `rm($$$)`, bound to `fs/promises` | deletes files/directories |
 | `heredoc.javascript.fspromises_rmdir` | `$M.rmdir($$$)` / `rmdir($$$)`, bound to `fs/promises` | deletes directories |
-| `heredoc.javascript.execsync` | `child_process.execSync($$$)` | executes shell commands |
-| `heredoc.javascript.require_execsync` | `require('child_process').execSync($$$)` | executes shell commands |
-| `heredoc.javascript.spawnsync` | `child_process.spawnSync($$$)` | executes shell commands |
+| `heredoc.javascript.execsync` | `$M.execSync($$$)`, `execSync($$$)` (any receiver, or destructured) | executes shell commands |
+| `heredoc.javascript.require_execsync` | the same patterns, when the receiver is `require('child_process')` | executes shell commands |
+| `heredoc.javascript.spawnsync` | `$M.spawnSync($$$)`, `spawnSync($$$)` (any receiver, or destructured) | executes shell commands |
 
 ### TypeScript
 
@@ -153,9 +153,9 @@ built-in rule IDs. Use these IDs for allowlisting and tests.
 | `heredoc.typescript.fs_unlinksync` | `$M.unlinkSync($$$)` / `unlinkSync($$$)`, bound to `fs` | deletes files |
 | `heredoc.typescript.fspromises_rm` | `$M.rm($$$)` / `rm($$$)`, bound to `fs/promises` | deletes files/directories |
 | `heredoc.typescript.fspromises_rmdir` | `$M.rmdir($$$)` / `rmdir($$$)`, bound to `fs/promises` | deletes directories |
-| `heredoc.typescript.execsync` | `child_process.execSync($$$)` | executes shell commands |
-| `heredoc.typescript.require_execsync` | `require('child_process').execSync($$$)` | executes shell commands |
-| `heredoc.typescript.spawnsync` | `child_process.spawnSync($$$)` | executes shell commands |
+| `heredoc.typescript.execsync` | `$M.execSync($$$)`, `execSync($$$)` (any receiver, or destructured) | executes shell commands |
+| `heredoc.typescript.require_execsync` | the same patterns, when the receiver is `require('child_process')` | executes shell commands |
+| `heredoc.typescript.spawnsync` | `$M.spawnSync($$$)`, `spawnSync($$$)` (any receiver, or destructured) | executes shell commands |
 | `heredoc.typescript.deno_remove` | `Deno.remove($$$)` | deletes files/directories |
 
 ### Python
@@ -241,6 +241,27 @@ All derived rule IDs are valid allowlist targets.
   payloads are warn-only to avoid false positives.
 - Some file deletion APIs are refined at match time. Non-recursive or
   non-catastrophic paths may result in warn-only severity.
+- JavaScript/TypeScript `execSync` / `spawnSync` rules match any receiver and
+  the bare (destructured) call, so ANY object's `spawnSync`/`execSync` handed a
+  destructive literal denies. A `spawnSync` argv is judged both as words
+  (the command and wrappers compared by basename, an `sh -c` script read) and
+  as the joined shell line (the way `shell: true` runs it, and the rule's
+  reading before any receiver was widened); the MOST SEVERE hit of either
+  reading, or of any segment of a shell line, decides -- a less severe hit
+  never hides a more severe one. A shell
+  line -- an `execSync` payload, an `sh -c` script, or a joined argv -- is
+  split on `;` `|` `&` without
+  quote awareness, so a quoted separator can still over-block
+  (`.agent-config-fqbws`), a dry-run `git clean -n -fd` is judged
+  destructive (`.agent-config-g5xom`), and a `--long-option` is scanned as short
+  flags (`.agent-config-6j4tg`).
+- A destructive `execSync` string is usually read twice: by the heredoc rule
+  and by the `core.*` rule that reads the raw command text. Allowing one takes
+  both ids in the allowlist (a `spawnSync` argv split into separate literals is
+  read by the heredoc rule alone); a `[policy.rules]` warn on the `core.*` rule alone does not
+  govern it (the heredoc match decides first). A warn on the heredoc id or the
+  `heredoc.<lang>` pack is held, and the `core.*` rule reading the same text
+  still denies (`.agent-config-dcg-heredoc-policy-warn-hides-outer-fxck7`).
 - Patterns are evaluated only for supported languages and only when heredoc
   triggers are detected. Non-heredoc destructive code outside the supported
   languages is out of scope.

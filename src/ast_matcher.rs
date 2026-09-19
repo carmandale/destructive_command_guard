@@ -472,6 +472,30 @@ static JS_EXEC_SYNC_LITERAL: LazyLock<Regex> = LazyLock::new(|| {
         .expect("js execSync literal regex compiles")
 });
 
+static JS_REQUIRE_CHILD_PROCESS_RECEIVER: LazyLock<Regex> = LazyLock::new(|| {
+    // Matches a call whose receiver is `require('child_process')` / `require("node:child_process")`.
+    Regex::new(
+        r#"^\s*require\s*\(\s*(?:'(?:node:)?child_process'|"(?:node:)?child_process")\s*\)\s*\.\s*execSync\b"#,
+    )
+        .expect("js require(child_process) receiver regex compiles")
+});
+
+/// The rule id for an `execSync` match (.agent-config-w9pvb).
+///
+/// One pattern reads every receiver. `require('child_process').execSync(..)` had a
+/// pattern of its own, and allowlists name its id, so that receiver keeps it.
+/// Whatever this returns, the call was matched and is judged. The name still
+/// matters: allowlists and `[policy.rules]` match on it, so a misread spelling
+/// can change a verdict under such config, never without it.
+fn execsync_rule_id(rule_id: &str, matched_text: &str) -> String {
+    match rule_id.strip_suffix(".execsync") {
+        Some(pack) if JS_REQUIRE_CHILD_PROCESS_RECEIVER.is_match(matched_text) => {
+            format!("{pack}.require_execsync")
+        }
+        _ => rule_id.to_string(),
+    }
+}
+
 static JS_SPAWN_SYNC_CMD_ARGS: LazyLock<Regex> = LazyLock::new(|| {
     // Matches: spawnSync("cmd", [ ... ]) / spawnSync('cmd', [ ... ])
     Regex::new(
@@ -611,10 +635,8 @@ fn refine_match_meta(
 fn refine_javascript_match(meta: &CompiledPattern, matched_text: &str) -> Option<RefinedMatchMeta> {
     let rule_id = meta.rule_id.as_str();
 
-    if matches!(
-        rule_id,
-        "heredoc.javascript.execsync" | "heredoc.javascript.require_execsync"
-    ) {
+    if rule_id == "heredoc.javascript.execsync" {
+        let rule_id = execsync_rule_id(rule_id, matched_text);
         let payload = JS_EXEC_SYNC_LITERAL
             .captures(matched_text)
             .and_then(|caps| string_literal_from_caps(&caps));
@@ -630,7 +652,7 @@ fn refine_javascript_match(meta: &CompiledPattern, matched_text: &str) -> Option
 
         // Dynamic payloads: warn only (fail-open).
         return Some(RefinedMatchMeta {
-            rule_id: meta.rule_id.clone(),
+            rule_id,
             reason: meta.reason.clone(),
             severity: meta.severity,
             suggestion: meta.suggestion.clone(),
@@ -646,16 +668,12 @@ fn refine_javascript_match(meta: &CompiledPattern, matched_text: &str) -> Option
                 .filter_map(|caps| string_literal_from_caps(&caps))
                 .collect();
 
-            if let Some(reconstructed) = reconstruct_spawn_command(cmd, &args) {
-                return detect_shell_payload(&reconstructed).map(|hit| RefinedMatchMeta {
-                    rule_id: format!("{rule_id}.{}", hit.rule_suffix),
-                    reason: hit.reason.to_string(),
-                    severity: hit.severity,
-                    suggestion: hit.suggestion.map(str::to_string),
-                });
-            }
-
-            return None;
+            return detect_spawn_argv(cmd, &args).map(|hit| RefinedMatchMeta {
+                rule_id: format!("{rule_id}.{}", hit.rule_suffix),
+                reason: hit.reason.to_string(),
+                severity: hit.severity,
+                suggestion: hit.suggestion.map(str::to_string),
+            });
         }
 
         // Dynamic spawnSync: warn only.
@@ -718,10 +736,8 @@ fn refine_javascript_match(meta: &CompiledPattern, matched_text: &str) -> Option
 fn refine_typescript_match(meta: &CompiledPattern, matched_text: &str) -> Option<RefinedMatchMeta> {
     let rule_id = meta.rule_id.as_str();
 
-    if matches!(
-        rule_id,
-        "heredoc.typescript.execsync" | "heredoc.typescript.require_execsync"
-    ) {
+    if rule_id == "heredoc.typescript.execsync" {
+        let rule_id = execsync_rule_id(rule_id, matched_text);
         let payload = JS_EXEC_SYNC_LITERAL
             .captures(matched_text)
             .and_then(|caps| string_literal_from_caps(&caps));
@@ -736,7 +752,7 @@ fn refine_typescript_match(meta: &CompiledPattern, matched_text: &str) -> Option
         }
 
         return Some(RefinedMatchMeta {
-            rule_id: meta.rule_id.clone(),
+            rule_id,
             reason: meta.reason.clone(),
             severity: Severity::Medium,
             suggestion: meta.suggestion.clone(),
@@ -752,16 +768,12 @@ fn refine_typescript_match(meta: &CompiledPattern, matched_text: &str) -> Option
                 .filter_map(|caps| string_literal_from_caps(&caps))
                 .collect();
 
-            if let Some(reconstructed) = reconstruct_spawn_command(cmd, &args) {
-                return detect_shell_payload(&reconstructed).map(|hit| RefinedMatchMeta {
-                    rule_id: format!("{rule_id}.{}", hit.rule_suffix),
-                    reason: hit.reason.to_string(),
-                    severity: hit.severity,
-                    suggestion: hit.suggestion.map(str::to_string),
-                });
-            }
-
-            return None;
+            return detect_spawn_argv(cmd, &args).map(|hit| RefinedMatchMeta {
+                rule_id: format!("{rule_id}.{}", hit.rule_suffix),
+                reason: hit.reason.to_string(),
+                severity: hit.severity,
+                suggestion: hit.suggestion.map(str::to_string),
+            });
         }
 
         return Some(RefinedMatchMeta {
@@ -899,22 +911,6 @@ fn refine_ruby_match(meta: &CompiledPattern, matched_text: &str) -> Option<Refin
         severity: meta.severity,
         suggestion: meta.suggestion.clone(),
     })
-}
-
-fn reconstruct_spawn_command(cmd: &str, args: &[&str]) -> Option<String> {
-    let cmd = cmd.trim();
-    if cmd.is_empty() {
-        return None;
-    }
-
-    let mut out = String::new();
-    out.push_str(cmd);
-    for arg in args {
-        out.push(' ');
-        out.push_str(arg);
-    }
-
-    Some(out)
 }
 
 // ============================================================================
@@ -1379,34 +1375,89 @@ struct ShellPayloadHit {
     suggestion: Option<&'static str>,
 }
 
-fn detect_shell_payload(payload: &str) -> Option<ShellPayloadHit> {
-    for segment in payload.split(&[';', '\n', '|', '&'][..]) {
-        let segment = segment.trim();
-        if segment.is_empty() {
-            continue;
-        }
+/// Judge a `spawnSync(cmd, [args], ..)` call (.agent-config-w9pvb).
+///
+/// Read twice, and the most severe hit of either reading decides
+/// (`strongest_hit`). As WORDS, the way the argv runs with no
+/// shell: `/bin/rm`, `/usr/bin/env` and an `sh -c <script>` are read. As the
+/// JOINED line, the way node runs it under `{ shell: true }` -- which a cast, a
+/// comment or an options variable can hide from a text check -- and the only
+/// reading this rule had before. The joined reading is unconditional so that no
+/// call it denied is ever allowed: every attempt to skip it (a words-only
+/// argv, then a guess at whether an options argument follows) reopened a call
+/// the old rule denied. The price: a `;` inside one argv element can still
+/// over-block, as in any shell string (.agent-config-fqbws).
+fn detect_spawn_argv(cmd: &str, args: &[&str]) -> Option<ShellPayloadHit> {
+    let words = std::iter::once(cmd).chain(args.iter().copied());
+    let line: Vec<&str> = std::iter::once(cmd).chain(args.iter().copied()).collect();
+    strongest_hit([
+        detect_command_words(words),
+        detect_shell_payload(&line.join(" ")),
+    ])
+}
 
-        let mut tokens = segment.split_whitespace().peekable();
-        let Some(cmd) = next_shell_command(&mut tokens) else {
-            continue;
-        };
-
-        match cmd {
-            "git" => {
-                if let Some(hit) = detect_git_destructive(tokens) {
-                    return Some(hit);
-                }
-            }
-            "rm" => {
-                if let Some(hit) = detect_rm_rf_destructive(tokens) {
-                    return Some(hit);
-                }
-            }
-            _ => {}
+/// The verdict of several readings: the MOST SEVERE hit, the first among equals.
+/// A less severe hit must never hide a more severe one after it -- in a later
+/// segment of a shell line, or in the other reading of a spawn argv
+/// (.agent-config-w9pvb). Not merely the first blocking hit: a policy warn can
+/// downgrade a high hit but never a critical one, so an earlier high must not
+/// replace the critical the old first-hit reading returned. That old hit is
+/// always among these candidates, so the result is never less severe than it.
+fn strongest_hit<I>(hits: I) -> Option<ShellPayloadHit>
+where
+    I: IntoIterator<Item = Option<ShellPayloadHit>>,
+{
+    const fn rank(severity: Severity) -> u8 {
+        match severity {
+            Severity::Critical => 3,
+            Severity::High => 2,
+            Severity::Medium => 1,
+            Severity::Low => 0,
         }
     }
+    let mut best: Option<ShellPayloadHit> = None;
+    for hit in hits.into_iter().flatten() {
+        if best
+            .as_ref()
+            .is_none_or(|b| rank(hit.severity) > rank(b.severity))
+        {
+            best = Some(hit);
+        }
+    }
+    best
+}
 
-    None
+fn detect_shell_payload(payload: &str) -> Option<ShellPayloadHit> {
+    strongest_hit(
+        payload
+            .split(&[';', '\n', '|', '&'][..])
+            .map(|segment| detect_command_words(segment.split_whitespace())),
+    )
+}
+
+/// Judge ONE command, given as its words (a shell segment split on whitespace,
+/// or a spawn argv as-is).
+///
+/// Wrappers (`sudo`, `env`, `command`, by any path) are skipped with the flags
+/// `next_shell_command` knows -- a wrapper flag taking a value it does not know
+/// (`env -u X`) still hides the command (.agent-config-ok70w). The command word is
+/// compared by basename (`/bin/rm` is `rm`), and `sh -c <script>` judges the
+/// script as a shell string (.agent-config-w9pvb).
+fn detect_command_words<'a, I>(words: I) -> Option<ShellPayloadHit>
+where
+    I: Iterator<Item = &'a str>,
+{
+    let mut words = words.peekable();
+    let cmd = next_shell_command(&mut words)?;
+    match cmd.rsplit('/').next().unwrap_or(cmd) {
+        "git" => detect_git_destructive(words),
+        "rm" => detect_rm_rf_destructive(words),
+        "sh" | "bash" | "zsh" | "dash" => match (words.next(), words.next()) {
+            (Some("-c"), Some(script)) => detect_shell_payload(script),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn detect_git_destructive<'a, I>(mut tokens: I) -> Option<ShellPayloadHit>
@@ -1526,7 +1577,8 @@ where
 {
     loop {
         let token = tokens.next()?;
-        match token {
+        // By basename, so `/usr/bin/env` and `/usr/bin/sudo` are wrappers too.
+        match token.rsplit('/').next().unwrap_or(token) {
             "sudo" => {
                 while let Some(&next) = tokens.peek() {
                     if !next.starts_with('-') {
@@ -2135,23 +2187,42 @@ fn default_patterns() -> HashMap<ScriptLanguage, Vec<CompiledPattern>> {
                 module: "fs",
                 member: "unlinkSync",
             }),
+            // The receiver is whatever the module is bound to (`cp`, `child_process`,
+            // `require("child_process")`), or nothing once destructured, so these
+            // rules take any receiver and the bare call (.agent-config-w9pvb): naming
+            // `child_process` let `cp.spawnSync("rm", ["-rf", "/srv"])` through.
+            // Only a destructive literal payload refines to a blocking severity, so
+            // the cost is that ANY object's `spawnSync`/`execSync` handed a
+            // catastrophic literal now denies; a benign or dynamic call does not.
+            //
+            // One pattern per call shape, so one call is one match. The
+            // `require('child_process')` receiver is named `require_execsync` by
+            // `execsync_rule_id`, not by a second pattern: two patterns on one node
+            // make an allowlist entry for the reported id insufficient.
             CompiledPattern::new(
-                "child_process.execSync($$$)".to_string(),
+                "$M.execSync($$$)".to_string(),
                 "heredoc.javascript.execsync".to_string(),
                 "execSync() executes shell commands".to_string(),
                 Severity::Medium, // refined to block only on destructive literal payloads
                 Some("Validate command arguments carefully".to_string()),
             ),
             CompiledPattern::new(
-                "require('child_process').execSync($$$)".to_string(),
-                "heredoc.javascript.require_execsync".to_string(),
+                "execSync($$$)".to_string(),
+                "heredoc.javascript.execsync".to_string(),
                 "execSync() executes shell commands".to_string(),
                 Severity::Medium, // refined to block only on destructive literal payloads
                 Some("Validate command arguments carefully".to_string()),
             ),
             // Spawn variants
             CompiledPattern::new(
-                "child_process.spawnSync($$$)".to_string(),
+                "$M.spawnSync($$$)".to_string(),
+                "heredoc.javascript.spawnsync".to_string(),
+                "spawnSync() executes shell commands".to_string(),
+                Severity::Medium,
+                Some("Validate command and arguments carefully".to_string()),
+            ),
+            CompiledPattern::new(
+                "spawnSync($$$)".to_string(),
                 "heredoc.javascript.spawnsync".to_string(),
                 "spawnSync() executes shell commands".to_string(),
                 Severity::Medium,
@@ -2349,22 +2420,30 @@ fn default_patterns() -> HashMap<ScriptLanguage, Vec<CompiledPattern>> {
                 Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
                 Some("Verify target path carefully before running".to_string()),
             ),
+            // Any receiver and the bare call, as for JavaScript (.agent-config-w9pvb).
             CompiledPattern::new(
-                "child_process.execSync($$$)".to_string(),
+                "$M.execSync($$$)".to_string(),
                 "heredoc.typescript.execsync".to_string(),
                 "execSync() executes shell commands".to_string(),
                 Severity::Medium, // refined to block only on destructive literal payloads
                 Some("Validate command arguments carefully".to_string()),
             ),
             CompiledPattern::new(
-                "require('child_process').execSync($$$)".to_string(),
-                "heredoc.typescript.require_execsync".to_string(),
+                "execSync($$$)".to_string(),
+                "heredoc.typescript.execsync".to_string(),
                 "execSync() executes shell commands".to_string(),
                 Severity::Medium, // refined to block only on destructive literal payloads
                 Some("Validate command arguments carefully".to_string()),
             ),
             CompiledPattern::new(
-                "child_process.spawnSync($$$)".to_string(),
+                "$M.spawnSync($$$)".to_string(),
+                "heredoc.typescript.spawnsync".to_string(),
+                "spawnSync() executes shell commands".to_string(),
+                Severity::Medium,
+                Some("Validate command and arguments carefully".to_string()),
+            ),
+            CompiledPattern::new(
+                "spawnSync($$$)".to_string(),
                 "heredoc.typescript.spawnsync".to_string(),
                 "spawnSync() executes shell commands".to_string(),
                 Severity::Medium,
