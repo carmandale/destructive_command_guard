@@ -26,6 +26,7 @@
 //!   a_tag_message_on_stdin_is_data                               | RED
 //!   a_note_on_stdin_is_data                                      | RED
 //!   the_sink_survives_a_wrapper_a_path_and_a_global_option       | RED
+//!   the_bead_row_allows_in_hook_mode                             | RED
 //!   every CONTROL row below                                      | green
 //! ```
 //!
@@ -34,7 +35,7 @@
 //! ```text
 //!   mutant                                                  | rows it turns red
 //!   ---------------------------------------------------------|------------------
-//!   drop the `receiver_reads_stdin_as_a_message` clause      | all five kill rows
+//!   drop the `receiver_reads_stdin_as_a_message` clause      | all six kill rows
 //!   accept any `-F`, not only `-F -`                         | a_message_file_that_is_not_stdin_is_not_this_sink
 //!   drop the `git` name test                                 | a_foreign_command_taking_dash_f_is_not_a_git_sink
 //!   drop the subcommand test                                 | a_git_subcommand_that_is_not_a_message_sink_is_not_inert
@@ -49,7 +50,15 @@
 
 #![allow(clippy::doc_markdown, clippy::uninlined_format_args)]
 
+use std::io::Write;
+use std::process::Stdio;
+
 use destructive_command_guard::{Config, LayeredAllowlist, evaluate_command, packs::REGISTRY};
+
+#[path = "common/payload.rs"]
+mod payload;
+#[path = "common/spawn.rs"]
+mod spawn;
 
 /// The trigger every row carries, so a verdict difference can only come from
 /// the receiver.
@@ -175,6 +184,62 @@ fn a_foreign_command_taking_dash_f_is_not_a_git_sink() {
 fn a_git_subcommand_that_is_not_a_message_sink_is_not_inert() {
     let cmd = format!("git hook run x -F - <<'EOF'\n{TRIGGER}\nEOF");
     assert_denied(&cmd, "only commit, tag and notes take a message on stdin");
+}
+
+// ---------------------------------------------------------------------------
+// The same pair through the real binary. `evaluate_command` above is the
+// library's answer; this is the answer an agent gets. A verdict that is right
+// in the library and unreadable on the wire is an allow
+// (`.agent-config-d5c7l`), which is why `common/payload.rs` exists and why the
+// bead asked for a hook row.
+// ---------------------------------------------------------------------------
+
+fn run_hook(command: &str) -> (String, String, i32) {
+    let (mut cmd, sandbox) = spawn::dcg();
+    let input = payload::pre_tool_use(sandbox.root(), command).to_string();
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn dcg process");
+    {
+        let stdin = child.stdin.as_mut().expect("failed to get stdin");
+        stdin
+            .write_all(input.as_bytes())
+            .expect("failed to write to stdin");
+    }
+    let output = child.wait_with_output().expect("failed to wait for dcg");
+    (
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+        output.status.code().unwrap_or(-1),
+    )
+}
+
+#[test]
+fn the_bead_row_allows_in_hook_mode() {
+    let cmd = format!(
+        "cd /tmp/x && git commit -q -F - -- a.rs <<'EOF'\n\
+         test: the rows carry their {TRIGGER} in a python body\n\nbody\nEOF"
+    );
+    let (stdout, stderr, exit_code) = run_hook(&cmd);
+    assert_eq!(exit_code, 0, "hook mode exits 0 whatever the verdict");
+    assert!(
+        stdout.trim().is_empty(),
+        "the commit an agent actually typed must reach git\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+#[test]
+fn the_piped_control_still_denies_in_hook_mode() {
+    let cmd = format!("git commit -F - <<'EOF' | bash\n{TRIGGER}\nEOF");
+    let (stdout, stderr, exit_code) = run_hook(&cmd);
+    assert_eq!(exit_code, 0, "hook mode exits 0 whatever the verdict");
+    assert!(
+        format!("{stdout}{stderr}").contains("core.filesystem:"),
+        "the control must still deny on the wire\nstdout: {stdout}\nstderr: {stderr}"
+    );
 }
 
 /// Scope: stdin, not a file. `-F msg.txt` leaves the heredoc unread, and this
