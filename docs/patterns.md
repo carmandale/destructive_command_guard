@@ -44,6 +44,14 @@ Heredoc patterns are authored using ast-grep pattern syntax (as implemented by
 - `$X` captures a single AST node.
 - Patterns are language-specific and only evaluated on code parsed for that
   language.
+- A pattern whose RECEIVER is `$M`, or whose call is a bare name, is gated on
+  the body's own imports (`BindingGate` in `src/ast_matcher.rs`): the receiver
+  must be the module itself, a local name the body binds to that module
+  (`import shutil as sh`, `const f = require('fs')`, `import * as fs from
+  'fs'`), or an inline `require("fs")`; a bare call must have been imported
+  from that module (`from shutil import rmtree`, `const { rmSync } =
+  require('fs')`). This is why `$M.remove($$$)` does not match
+  `items.remove(x)`. See `.agent-config-artmu`.
 
 Examples:
 
@@ -121,14 +129,14 @@ built-in rule IDs. Use these IDs for allowlisting and tests.
 
 | Rule ID | Pattern | Reason |
 | --- | --- | --- |
-| `heredoc.javascript.fs_rm` | `fs.rm($$$)` | deletes files/directories |
-| `heredoc.javascript.fs_rmdir` | `fs.rmdir($$$)` | deletes directories |
-| `heredoc.javascript.fs_rmsync` | `fs.rmSync($$$)` | deletes files/directories |
-| `heredoc.javascript.fs_rmdirsync` | `fs.rmdirSync($$$)` | deletes directories |
-| `heredoc.javascript.fs_unlink` | `fs.unlink($$$)` | deletes files |
-| `heredoc.javascript.fs_unlinksync` | `fs.unlinkSync($$$)` | deletes files |
-| `heredoc.javascript.fspromises_rm` | `fsPromises.rm($$$)` | deletes files/directories |
-| `heredoc.javascript.fspromises_rmdir` | `fsPromises.rmdir($$$)` | deletes directories |
+| `heredoc.javascript.fs_rm` | `$M.rm($$$)` / `rm($$$)`, bound to `fs` | deletes files/directories |
+| `heredoc.javascript.fs_rmdir` | `$M.rmdir($$$)` / `rmdir($$$)`, bound to `fs` | deletes directories |
+| `heredoc.javascript.fs_rmsync` | `$M.rmSync($$$)` / `rmSync($$$)`, bound to `fs` | deletes files/directories |
+| `heredoc.javascript.fs_rmdirsync` | `$M.rmdirSync($$$)` / `rmdirSync($$$)`, bound to `fs` | deletes directories |
+| `heredoc.javascript.fs_unlink` | `$M.unlink($$$)` / `unlink($$$)`, bound to `fs` | deletes files |
+| `heredoc.javascript.fs_unlinksync` | `$M.unlinkSync($$$)` / `unlinkSync($$$)`, bound to `fs` | deletes files |
+| `heredoc.javascript.fspromises_rm` | `$M.rm($$$)` / `rm($$$)`, bound to `fs/promises` | deletes files/directories |
+| `heredoc.javascript.fspromises_rmdir` | `$M.rmdir($$$)` / `rmdir($$$)`, bound to `fs/promises` | deletes directories |
 | `heredoc.javascript.execsync` | `child_process.execSync($$$)` | executes shell commands |
 | `heredoc.javascript.require_execsync` | `require('child_process').execSync($$$)` | executes shell commands |
 | `heredoc.javascript.spawnsync` | `child_process.spawnSync($$$)` | executes shell commands |
@@ -137,14 +145,14 @@ built-in rule IDs. Use these IDs for allowlisting and tests.
 
 | Rule ID | Pattern | Reason |
 | --- | --- | --- |
-| `heredoc.typescript.fs_rm` | `fs.rm($$$)` | deletes files/directories |
-| `heredoc.typescript.fs_rmdir` | `fs.rmdir($$$)` | deletes directories |
-| `heredoc.typescript.fs_rmsync` | `fs.rmSync($$$)` | deletes files/directories |
-| `heredoc.typescript.fs_rmdirsync` | `fs.rmdirSync($$$)` | deletes directories |
-| `heredoc.typescript.fs_unlink` | `fs.unlink($$$)` | deletes files |
-| `heredoc.typescript.fs_unlinksync` | `fs.unlinkSync($$$)` | deletes files |
-| `heredoc.typescript.fspromises_rm` | `fsPromises.rm($$$)` | deletes files/directories |
-| `heredoc.typescript.fspromises_rmdir` | `fsPromises.rmdir($$$)` | deletes directories |
+| `heredoc.typescript.fs_rm` | `$M.rm($$$)` / `rm($$$)`, bound to `fs` | deletes files/directories |
+| `heredoc.typescript.fs_rmdir` | `$M.rmdir($$$)` / `rmdir($$$)`, bound to `fs` | deletes directories |
+| `heredoc.typescript.fs_rmsync` | `$M.rmSync($$$)` / `rmSync($$$)`, bound to `fs` | deletes files/directories |
+| `heredoc.typescript.fs_rmdirsync` | `$M.rmdirSync($$$)` / `rmdirSync($$$)`, bound to `fs` | deletes directories |
+| `heredoc.typescript.fs_unlink` | `$M.unlink($$$)` / `unlink($$$)`, bound to `fs` | deletes files |
+| `heredoc.typescript.fs_unlinksync` | `$M.unlinkSync($$$)` / `unlinkSync($$$)`, bound to `fs` | deletes files |
+| `heredoc.typescript.fspromises_rm` | `$M.rm($$$)` / `rm($$$)`, bound to `fs/promises` | deletes files/directories |
+| `heredoc.typescript.fspromises_rmdir` | `$M.rmdir($$$)` / `rmdir($$$)`, bound to `fs/promises` | deletes directories |
 | `heredoc.typescript.execsync` | `child_process.execSync($$$)` | executes shell commands |
 | `heredoc.typescript.require_execsync` | `require('child_process').execSync($$$)` | executes shell commands |
 | `heredoc.typescript.spawnsync` | `child_process.spawnSync($$$)` | executes shell commands |
@@ -154,12 +162,12 @@ built-in rule IDs. Use these IDs for allowlisting and tests.
 
 | Rule ID | Pattern | Reason |
 | --- | --- | --- |
-| `heredoc.python.shutil_rmtree` | `shutil.rmtree($$$)` | recursively deletes directories |
-| `heredoc.python.os_remove` | `os.remove($$$)` | deletes files |
-| `heredoc.python.os_rmdir` | `os.rmdir($$$)` | deletes directories |
-| `heredoc.python.os_unlink` | `os.unlink($$$)` | deletes files |
-| `heredoc.python.pathlib_unlink` | `pathlib.Path($$$).unlink($$$)` and `Path($$$).unlink($$$)` | deletes files |
-| `heredoc.python.pathlib_rmdir` | `pathlib.Path($$$).rmdir($$$)` and `Path($$$).rmdir($$$)` | deletes directories |
+| `heredoc.python.shutil_rmtree` | `$M.rmtree($$$)` / `rmtree($$$)`, bound to `shutil` | recursively deletes directories |
+| `heredoc.python.os_remove` | `$M.remove($$$)` / `remove($$$)`, bound to `os` | deletes files |
+| `heredoc.python.os_rmdir` | `$M.rmdir($$$)` / `rmdir($$$)`, bound to `os` | deletes directories |
+| `heredoc.python.os_unlink` | `$M.unlink($$$)` / `unlink($$$)`, bound to `os` | deletes files |
+| `heredoc.python.pathlib_unlink` | `$M.Path($$$).unlink($$$)` bound to `pathlib`, and `Path($$$).unlink($$$)` | deletes files |
+| `heredoc.python.pathlib_rmdir` | `$M.Path($$$).rmdir($$$)` bound to `pathlib`, and `Path($$$).rmdir($$$)` | deletes directories |
 | `heredoc.python.subprocess_run` | `subprocess.run($$$)` | executes shell commands |
 | `heredoc.python.subprocess_call` | `subprocess.call($$$)` | executes shell commands |
 | `heredoc.python.subprocess_popen` | `subprocess.Popen($$$)` | spawns shell processes |
@@ -233,6 +241,23 @@ All derived rule IDs are valid allowlist targets.
 - Patterns are evaluated only for supported languages and only when heredoc
   triggers are detected. Non-heredoc destructive code outside the supported
   languages is out of scope.
+- The import gate reads only bindings whose LOCAL name is the one the pattern
+  spells. A renamed destructure or from-import (`from shutil import rmtree as
+  rt`, `const { rmSync: r } = require('fs')`), a receiver that is itself an
+  expression (`fs.promises.rm(..)`), a computed or optional member
+  (`fs?.rmSync`, `fs["rmSync"]`) and `import fs = require("fs")` are NOT read.
+  Catching them needs a pattern compiled per body, which the hook budget does
+  not allow (`.agent-config-artmu`).
+- An inline `require("fs").rmSync(..)` resolves as a receiver but still does
+  not deny: the payload refinement reads the first string literal in the match
+  as the target path, and for that spelling it is `"fs"`
+  (`.agent-config-rmxds`).
+- The fallback regex sweep in `src/evaluator.rs` reads only text the extractor
+  says went unread, has no AST and therefore no imports to resolve an alias
+  against. It matches the distinctive bare call shapes (`rmtree(`, `rmSync(`,
+  `rmdirSync(`, `execSync(`, `spawnSync(`) in addition to the receiver
+  spellings; `remove(`, `rmdir(` and `unlink(` are too common to sweep on and
+  stay receiver-bound there.
 
 ## Testing Requirements
 

@@ -33,11 +33,11 @@
 //! - Default timeout for [`AstMatcher::find_matches`]: 20ms
 
 use crate::heredoc::ScriptLanguage;
-use ast_grep_core::{AstGrep, Pattern};
+use ast_grep_core::{AstGrep, Doc, Node, NodeMatch, Pattern};
 use ast_grep_language::SupportLang;
 use memchr::memchr_iter;
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
@@ -147,6 +147,42 @@ impl std::fmt::Display for MatchError {
     }
 }
 
+/// What a widened pattern needs from the body's own imports before it counts.
+///
+/// A rule that names its receiver literally (`shutil.rmtree($$$)`) misses every
+/// other spelling of the same call: `import shutil as sh; sh.rmtree(..)`,
+/// `from shutil import rmtree; rmtree(..)`, `const { rmSync } = require('fs')`
+/// (`.agent-config-artmu`). Widening the receiver to `$M` fixes that, but these
+/// rules are NOT payload-gated the way `execSync`/`spawnSync` are -- they block
+/// on any argument -- so an ungated `$M.remove($$$)` would deny
+/// `self.remove(item)` in unrelated code.
+///
+/// So the widened pattern carries a gate, and the gate keeps it to the same
+/// MEANING as the spelling it replaced: the receiver is the module, or a name
+/// this body's own imports bind to that module. What the imports do not
+/// explain is not a match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BindingGate {
+    /// Ungated: the pattern names every part of the call literally.
+    None,
+    /// `$M.<member>($$$)` -- `$M` must be `receiver` itself, a local name bound
+    /// to `module`, or an inline `require("<module>")`.
+    Receiver {
+        /// Canonical module the alias must resolve to (`shutil`, `fs`).
+        module: &'static str,
+        /// Receiver the replaced pattern named, always accepted so the
+        /// canonical spelling keeps its verdict with no import in the body.
+        receiver: &'static str,
+    },
+    /// `<member>($$$)` -- `member` must be imported from `module` in this body.
+    Bare {
+        /// Canonical module the import must name.
+        module: &'static str,
+        /// Member the pattern spells, which must be what was imported.
+        member: &'static str,
+    },
+}
+
 /// A compiled AST pattern with metadata.
 #[derive(Debug, Clone)]
 pub struct CompiledPattern {
@@ -160,6 +196,8 @@ pub struct CompiledPattern {
     pub severity: Severity,
     /// Optional safe alternative suggestion.
     pub suggestion: Option<String>,
+    /// What the body's imports must say for this pattern to count as a match.
+    gate: BindingGate,
 }
 
 impl CompiledPattern {
@@ -178,7 +216,18 @@ impl CompiledPattern {
             reason,
             severity,
             suggestion,
+            gate: BindingGate::None,
         }
+    }
+
+    /// Require the body's imports to explain this pattern's receiver.
+    ///
+    /// Only for a pattern whose receiver is the metavariable `$M`, or whose
+    /// call is a bare name; see [`BindingGate`].
+    #[must_use]
+    pub(crate) fn with_gate(mut self, gate: BindingGate) -> Self {
+        self.gate = gate;
+        self
     }
 }
 
@@ -305,6 +354,10 @@ impl AstMatcher {
 
         let mut matches = Vec::new();
 
+        // Read the body's imports only if a gated pattern actually matched.
+        // Most bodies match nothing, and this is a second O(nodes) walk.
+        let mut bindings: Option<ModuleBindings> = None;
+
         // Match each pattern
         for compiled in patterns {
             // Check timeout before each pattern
@@ -317,6 +370,13 @@ impl AstMatcher {
                 // Check timeout during matching (a single pattern can match many nodes)
                 if start_time.elapsed() > timeout {
                     return Err(timeout_err(start_time));
+                }
+
+                if compiled.meta.gate != BindingGate::None {
+                    let known = bindings.get_or_insert_with(|| collect_bindings(&root, language));
+                    if !gate_admits(compiled.meta.gate, &node, known) {
+                        continue;
+                    }
                 }
 
                 let matched_text = node.text();
@@ -1501,6 +1561,254 @@ fn push_regex_match(
     });
 }
 
+/// What this body's own imports bind, for [`BindingGate`].
+///
+/// Read from the parsed tree, not from the text, so an import spelled inside a
+/// comment or a string binds nothing.
+#[derive(Debug, Default)]
+struct ModuleBindings {
+    /// Local receiver name -> canonical module (`sh` -> `shutil`, `f` -> `fs`).
+    receivers: HashMap<String, String>,
+    /// Local call name -> (canonical module, the member that was imported).
+    ///
+    /// The member is kept because `from shutil import copy as rmtree` binds
+    /// the NAME `rmtree` to something harmless; only the pair decides.
+    bare: HashMap<String, (String, String)>,
+    /// Modules imported wholesale (`from shutil import *`).
+    wildcards: HashSet<String>,
+}
+
+static INLINE_REQUIRE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"^require\s*\(\s*(?:"(?P<dq>[^"\n]*)"|'(?P<sq>[^'\n]*)')\s*\)$"#)
+        .expect("inline require regex compiles")
+});
+
+/// `node:fs` and `fs` are the same module; `fs/promises` is not.
+fn normalize_module(raw: &str) -> String {
+    raw.trim()
+        .trim_matches(|c| c == '"' || c == '\'')
+        .trim_start_matches("node:")
+        .to_string()
+}
+
+/// The module of a `require("x")` expression, if that is all the text is.
+fn require_module_from_text(text: &str) -> Option<String> {
+    let caps = INLINE_REQUIRE.captures(text.trim())?;
+    let raw = caps
+        .name("dq")
+        .or_else(|| caps.name("sq"))
+        .map(|m| m.as_str())?;
+    Some(normalize_module(raw))
+}
+
+/// Whether the body's imports admit this match under `gate`.
+fn gate_admits<D: Doc>(
+    gate: BindingGate,
+    node: &NodeMatch<'_, D>,
+    bindings: &ModuleBindings,
+) -> bool {
+    match gate {
+        BindingGate::None => true,
+        BindingGate::Receiver { module, receiver } => {
+            // `$M` is the receiver the pattern widened. No binding, no match:
+            // that is the whole point of the gate.
+            let Some(matched) = node.get_env().get_match("M") else {
+                return false;
+            };
+            let text = matched.text();
+            let text = text.trim();
+            // Binding first, and that order is not a preference: a name the
+            // body BINDS resolves to exactly one module, so exactly one rule
+            // can own the call. Reading the literal receiver first would let
+            // `const fs = require("fs/promises")` match the `fs.rm` rule and
+            // the `fsPromises.rm` rule at once, and an allowlist for the id
+            // the deny named would still deny under the other
+            // (`.agent-config-w9pvb` review round 1).
+            //
+            // An INLINE `require("fs").rmSync(..)` is deliberately not
+            // admitted here. Measured 2026-09-18: the receiver is resolvable,
+            // but the payload refinement below reads the FIRST string literal
+            // in the matched text as the target path, which for that spelling
+            // is `"fs"` -- so the match refines to medium and the hook skips
+            // it. Admitting it would add a code path that changes no verdict.
+            // The refinement defect is `.agent-config-rmxds`; when it is
+            // fixed, this is one `require_module_from_text(text)` line.
+            if let Some(bound) = bindings.receivers.get(text) {
+                return bound == module;
+            }
+            text == receiver
+        }
+        BindingGate::Bare { module, member } => {
+            if let Some((bound, imported)) = bindings.bare.get(member) {
+                return bound == module && imported == member;
+            }
+            bindings.wildcards.contains(module)
+        }
+    }
+}
+
+/// Read every import binding in the body.
+///
+/// Deliberately NOT read, so a later reader is not told they are: a renamed
+/// destructure or `import ... as` whose LOCAL name differs from the member the
+/// pattern spells (`from shutil import rmtree as rt; rt(..)`), a receiver that
+/// is itself an expression (`fs.promises.rm(..)`), a computed or optional
+/// member (`fs?.rmSync`, `fs["rmSync"]`), and TypeScript's
+/// `import fs = require("fs")`. Catching those needs a pattern per local name,
+/// compiled per body, which this hot path does not have the budget for.
+fn collect_bindings<D: Doc>(root: &Node<'_, D>, language: ScriptLanguage) -> ModuleBindings {
+    let mut out = ModuleBindings::default();
+    match language {
+        ScriptLanguage::Python => collect_python_bindings(root, &mut out),
+        ScriptLanguage::JavaScript | ScriptLanguage::TypeScript => {
+            collect_js_bindings(root, &mut out);
+        }
+        _ => {}
+    }
+    out
+}
+
+fn collect_python_bindings<D: Doc>(root: &Node<'_, D>, out: &mut ModuleBindings) {
+    for node in root.dfs() {
+        match node.kind().as_ref() {
+            // `import shutil as sh`. Plain `import shutil` needs no entry: the
+            // receiver the rule names IS the module.
+            "import_statement" => {
+                for name in node.field_children("name") {
+                    if name.kind().as_ref() != "aliased_import" {
+                        continue;
+                    }
+                    if let (Some(module), Some(alias)) = (name.field("name"), name.field("alias")) {
+                        out.receivers
+                            .insert(alias.text().to_string(), normalize_module(&module.text()));
+                    }
+                }
+            }
+            // `from shutil import rmtree [as rt]`, `from shutil import *`.
+            "import_from_statement" => {
+                let Some(module_node) = node.field("module_name") else {
+                    continue;
+                };
+                let module = normalize_module(&module_node.text());
+                if node
+                    .children()
+                    .any(|c| c.kind().as_ref() == "wildcard_import")
+                {
+                    out.wildcards.insert(module.clone());
+                }
+                for name in node.field_children("name") {
+                    match name.kind().as_ref() {
+                        "aliased_import" => {
+                            if let (Some(member), Some(alias)) =
+                                (name.field("name"), name.field("alias"))
+                            {
+                                out.bare.insert(
+                                    alias.text().to_string(),
+                                    (module.clone(), member.text().to_string()),
+                                );
+                            }
+                        }
+                        "dotted_name" => {
+                            let member = name.text().to_string();
+                            out.bare.insert(member.clone(), (module.clone(), member));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_js_bindings<D: Doc>(root: &Node<'_, D>, out: &mut ModuleBindings) {
+    for node in root.dfs() {
+        match node.kind().as_ref() {
+            // `const f = require("fs")`, `const { rmSync } = require("fs")`.
+            "variable_declarator" => {
+                let (Some(name), Some(value)) = (node.field("name"), node.field("value")) else {
+                    continue;
+                };
+                let Some(module) = require_module_from_text(&value.text()) else {
+                    continue;
+                };
+                match name.kind().as_ref() {
+                    "identifier" => {
+                        out.receivers.insert(name.text().to_string(), module);
+                    }
+                    "object_pattern" => {
+                        for child in name.children() {
+                            match child.kind().as_ref() {
+                                "shorthand_property_identifier_pattern" => {
+                                    let member = child.text().to_string();
+                                    out.bare.insert(member.clone(), (module.clone(), member));
+                                }
+                                "pair_pattern" => {
+                                    if let (Some(key), Some(local)) =
+                                        (child.field("key"), child.field("value"))
+                                    {
+                                        out.bare.insert(
+                                            local.text().to_string(),
+                                            (module.clone(), key.text().to_string()),
+                                        );
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // `import fs from "fs"`, `import * as fs from "fs"`,
+            // `import { rmSync as r } from "fs"`.
+            "import_statement" => {
+                let Some(source) = node.field("source") else {
+                    continue;
+                };
+                let module = normalize_module(&source.text());
+                for clause in node
+                    .children()
+                    .filter(|c| c.kind().as_ref() == "import_clause")
+                {
+                    for part in clause.children() {
+                        match part.kind().as_ref() {
+                            "identifier" => {
+                                out.receivers
+                                    .insert(part.text().to_string(), module.clone());
+                            }
+                            "namespace_import" => {
+                                if let Some(id) =
+                                    part.children().find(|c| c.kind().as_ref() == "identifier")
+                                {
+                                    out.receivers.insert(id.text().to_string(), module.clone());
+                                }
+                            }
+                            "named_imports" => {
+                                for spec in part
+                                    .children()
+                                    .filter(|c| c.kind().as_ref() == "import_specifier")
+                                {
+                                    let Some(member) = spec.field("name") else {
+                                        continue;
+                                    };
+                                    let member = member.text().to_string();
+                                    let local = spec
+                                        .field("alias")
+                                        .map_or_else(|| member.clone(), |a| a.text().to_string());
+                                    out.bare.insert(local, (module.clone(), member));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Default patterns for heredoc scanning.
 ///
 /// These patterns detect destructive operations in embedded scripts.
@@ -1513,41 +1821,109 @@ fn default_patterns() -> HashMap<ScriptLanguage, Vec<CompiledPattern>> {
     patterns.insert(
         ScriptLanguage::Python,
         vec![
+            // The receiver is a metavariable gated on this body's imports, so
+            // `import shutil as sh; sh.rmtree(..)` reads the same as
+            // `shutil.rmtree(..)` and an unexplained `x.rmtree(..)` still does
+            // not (`.agent-config-artmu`). Same rule id either way.
             CompiledPattern::new(
-                "shutil.rmtree($$$)".to_string(),
+                "$M.rmtree($$$)".to_string(),
                 "heredoc.python.shutil_rmtree".to_string(),
                 "shutil.rmtree() recursively deletes directories".to_string(),
                 Severity::Critical,
                 Some("Use shutil.rmtree with explicit path validation".to_string()),
-            ),
+            )
+            .with_gate(BindingGate::Receiver {
+                module: "shutil",
+                receiver: "shutil",
+            }),
             CompiledPattern::new(
-                "os.remove($$$)".to_string(),
+                "rmtree($$$)".to_string(),
+                "heredoc.python.shutil_rmtree".to_string(),
+                "shutil.rmtree() recursively deletes directories".to_string(),
+                Severity::Critical,
+                Some("Use shutil.rmtree with explicit path validation".to_string()),
+            )
+            .with_gate(BindingGate::Bare {
+                module: "shutil",
+                member: "rmtree",
+            }),
+            CompiledPattern::new(
+                "$M.remove($$$)".to_string(),
                 "heredoc.python.os_remove".to_string(),
                 "os.remove() deletes files".to_string(),
                 Severity::High,
                 None,
-            ),
+            )
+            .with_gate(BindingGate::Receiver {
+                module: "os",
+                receiver: "os",
+            }),
             CompiledPattern::new(
-                "os.rmdir($$$)".to_string(),
+                "remove($$$)".to_string(),
+                "heredoc.python.os_remove".to_string(),
+                "os.remove() deletes files".to_string(),
+                Severity::High,
+                None,
+            )
+            .with_gate(BindingGate::Bare {
+                module: "os",
+                member: "remove",
+            }),
+            CompiledPattern::new(
+                "$M.rmdir($$$)".to_string(),
                 "heredoc.python.os_rmdir".to_string(),
                 "os.rmdir() deletes directories".to_string(),
                 Severity::High,
                 None,
-            ),
+            )
+            .with_gate(BindingGate::Receiver {
+                module: "os",
+                receiver: "os",
+            }),
             CompiledPattern::new(
-                "os.unlink($$$)".to_string(),
+                "rmdir($$$)".to_string(),
+                "heredoc.python.os_rmdir".to_string(),
+                "os.rmdir() deletes directories".to_string(),
+                Severity::High,
+                None,
+            )
+            .with_gate(BindingGate::Bare {
+                module: "os",
+                member: "rmdir",
+            }),
+            CompiledPattern::new(
+                "$M.unlink($$$)".to_string(),
                 "heredoc.python.os_unlink".to_string(),
                 "os.unlink() deletes files".to_string(),
                 Severity::High,
                 None,
-            ),
+            )
+            .with_gate(BindingGate::Receiver {
+                module: "os",
+                receiver: "os",
+            }),
             CompiledPattern::new(
-                "pathlib.Path($$$).unlink($$$)".to_string(),
+                "unlink($$$)".to_string(),
+                "heredoc.python.os_unlink".to_string(),
+                "os.unlink() deletes files".to_string(),
+                Severity::High,
+                None,
+            )
+            .with_gate(BindingGate::Bare {
+                module: "os",
+                member: "unlink",
+            }),
+            CompiledPattern::new(
+                "$M.Path($$$).unlink($$$)".to_string(),
                 "heredoc.python.pathlib_unlink".to_string(),
                 "Path.unlink() deletes files".to_string(),
                 Severity::High,
                 None,
-            ),
+            )
+            .with_gate(BindingGate::Receiver {
+                module: "pathlib",
+                receiver: "pathlib",
+            }),
             // Also match when Path is imported directly: from pathlib import Path
             CompiledPattern::new(
                 "Path($$$).unlink($$$)".to_string(),
@@ -1557,12 +1933,16 @@ fn default_patterns() -> HashMap<ScriptLanguage, Vec<CompiledPattern>> {
                 None,
             ),
             CompiledPattern::new(
-                "pathlib.Path($$$).rmdir($$$)".to_string(),
+                "$M.Path($$$).rmdir($$$)".to_string(),
                 "heredoc.python.pathlib_rmdir".to_string(),
                 "Path.rmdir() deletes directories".to_string(),
                 Severity::High,
                 None,
-            ),
+            )
+            .with_gate(BindingGate::Receiver {
+                module: "pathlib",
+                receiver: "pathlib",
+            }),
             // Also match when Path is imported directly
             CompiledPattern::new(
                 "Path($$$).rmdir($$$)".to_string(),
@@ -1616,26 +1996,71 @@ fn default_patterns() -> HashMap<ScriptLanguage, Vec<CompiledPattern>> {
         ScriptLanguage::JavaScript,
         vec![
             CompiledPattern::new(
-                "fs.rmSync($$$)".to_string(),
+                "$M.rmSync($$$)".to_string(),
                 "heredoc.javascript.fs_rmsync".to_string(),
                 "fs.rmSync() deletes files/directories".to_string(),
                 Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
                 Some("Verify target path carefully before running".to_string()),
-            ),
+            )
+            .with_gate(BindingGate::Receiver {
+                module: "fs",
+                receiver: "fs",
+            }),
             CompiledPattern::new(
-                "fs.rmdirSync($$$)".to_string(),
+                "rmSync($$$)".to_string(),
+                "heredoc.javascript.fs_rmsync".to_string(),
+                "fs.rmSync() deletes files/directories".to_string(),
+                Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
+                Some("Verify target path carefully before running".to_string()),
+            )
+            .with_gate(BindingGate::Bare {
+                module: "fs",
+                member: "rmSync",
+            }),
+            CompiledPattern::new(
+                "$M.rmdirSync($$$)".to_string(),
                 "heredoc.javascript.fs_rmdirsync".to_string(),
                 "fs.rmdirSync() deletes directories".to_string(),
                 Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
                 Some("Verify target path carefully before running".to_string()),
-            ),
+            )
+            .with_gate(BindingGate::Receiver {
+                module: "fs",
+                receiver: "fs",
+            }),
             CompiledPattern::new(
-                "fs.unlinkSync($$$)".to_string(),
+                "rmdirSync($$$)".to_string(),
+                "heredoc.javascript.fs_rmdirsync".to_string(),
+                "fs.rmdirSync() deletes directories".to_string(),
+                Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
+                Some("Verify target path carefully before running".to_string()),
+            )
+            .with_gate(BindingGate::Bare {
+                module: "fs",
+                member: "rmdirSync",
+            }),
+            CompiledPattern::new(
+                "$M.unlinkSync($$$)".to_string(),
                 "heredoc.javascript.fs_unlinksync".to_string(),
                 "fs.unlinkSync() deletes files".to_string(),
                 Severity::Low,
                 None,
-            ),
+            )
+            .with_gate(BindingGate::Receiver {
+                module: "fs",
+                receiver: "fs",
+            }),
+            CompiledPattern::new(
+                "unlinkSync($$$)".to_string(),
+                "heredoc.javascript.fs_unlinksync".to_string(),
+                "fs.unlinkSync() deletes files".to_string(),
+                Severity::Low,
+                None,
+            )
+            .with_gate(BindingGate::Bare {
+                module: "fs",
+                member: "unlinkSync",
+            }),
             CompiledPattern::new(
                 "child_process.execSync($$$)".to_string(),
                 "heredoc.javascript.execsync".to_string(),
@@ -1660,41 +2085,116 @@ fn default_patterns() -> HashMap<ScriptLanguage, Vec<CompiledPattern>> {
             ),
             // Async versions (still dangerous)
             CompiledPattern::new(
-                "fs.rm($$$)".to_string(),
+                "$M.rm($$$)".to_string(),
                 "heredoc.javascript.fs_rm".to_string(),
                 "fs.rm() deletes files/directories".to_string(),
                 Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
                 Some("Verify target path carefully before running".to_string()),
-            ),
+            )
+            .with_gate(BindingGate::Receiver {
+                module: "fs",
+                receiver: "fs",
+            }),
             CompiledPattern::new(
-                "fs.rmdir($$$)".to_string(),
+                "rm($$$)".to_string(),
+                "heredoc.javascript.fs_rm".to_string(),
+                "fs.rm() deletes files/directories".to_string(),
+                Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
+                Some("Verify target path carefully before running".to_string()),
+            )
+            .with_gate(BindingGate::Bare {
+                module: "fs",
+                member: "rm",
+            }),
+            CompiledPattern::new(
+                "$M.rmdir($$$)".to_string(),
                 "heredoc.javascript.fs_rmdir".to_string(),
                 "fs.rmdir() deletes directories".to_string(),
                 Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
                 Some("Verify target path carefully before running".to_string()),
-            ),
+            )
+            .with_gate(BindingGate::Receiver {
+                module: "fs",
+                receiver: "fs",
+            }),
             CompiledPattern::new(
-                "fs.unlink($$$)".to_string(),
+                "rmdir($$$)".to_string(),
+                "heredoc.javascript.fs_rmdir".to_string(),
+                "fs.rmdir() deletes directories".to_string(),
+                Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
+                Some("Verify target path carefully before running".to_string()),
+            )
+            .with_gate(BindingGate::Bare {
+                module: "fs",
+                member: "rmdir",
+            }),
+            CompiledPattern::new(
+                "$M.unlink($$$)".to_string(),
                 "heredoc.javascript.fs_unlink".to_string(),
                 "fs.unlink() deletes files".to_string(),
                 Severity::Low,
                 None,
-            ),
+            )
+            .with_gate(BindingGate::Receiver {
+                module: "fs",
+                receiver: "fs",
+            }),
+            CompiledPattern::new(
+                "unlink($$$)".to_string(),
+                "heredoc.javascript.fs_unlink".to_string(),
+                "fs.unlink() deletes files".to_string(),
+                Severity::Low,
+                None,
+            )
+            .with_gate(BindingGate::Bare {
+                module: "fs",
+                member: "unlink",
+            }),
             // Promise-based fs variants
             CompiledPattern::new(
-                "fsPromises.rm($$$)".to_string(),
+                "$M.rm($$$)".to_string(),
                 "heredoc.javascript.fspromises_rm".to_string(),
                 "fsPromises.rm() deletes files/directories".to_string(),
                 Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
                 Some("Verify target path carefully before running".to_string()),
-            ),
+            )
+            .with_gate(BindingGate::Receiver {
+                module: "fs/promises",
+                receiver: "fsPromises",
+            }),
             CompiledPattern::new(
-                "fsPromises.rmdir($$$)".to_string(),
+                "rm($$$)".to_string(),
+                "heredoc.javascript.fspromises_rm".to_string(),
+                "fsPromises.rm() deletes files/directories".to_string(),
+                Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
+                Some("Verify target path carefully before running".to_string()),
+            )
+            .with_gate(BindingGate::Bare {
+                module: "fs/promises",
+                member: "rm",
+            }),
+            CompiledPattern::new(
+                "$M.rmdir($$$)".to_string(),
                 "heredoc.javascript.fspromises_rmdir".to_string(),
                 "fsPromises.rmdir() deletes directories".to_string(),
                 Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
                 Some("Verify target path carefully before running".to_string()),
-            ),
+            )
+            .with_gate(BindingGate::Receiver {
+                module: "fs/promises",
+                receiver: "fsPromises",
+            }),
+            CompiledPattern::new(
+                "rmdir($$$)".to_string(),
+                "heredoc.javascript.fspromises_rmdir".to_string(),
+                "fsPromises.rmdir() deletes directories".to_string(),
+                Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
+                Some("Verify target path carefully before running".to_string()),
+            )
+            .with_gate(BindingGate::Bare {
+                module: "fs/promises",
+                member: "rmdir",
+            }),
         ],
     );
 
@@ -1703,26 +2203,71 @@ fn default_patterns() -> HashMap<ScriptLanguage, Vec<CompiledPattern>> {
         ScriptLanguage::TypeScript,
         vec![
             CompiledPattern::new(
-                "fs.rmSync($$$)".to_string(),
+                "$M.rmSync($$$)".to_string(),
                 "heredoc.typescript.fs_rmsync".to_string(),
                 "fs.rmSync() deletes files/directories".to_string(),
                 Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
                 Some("Verify target path carefully before running".to_string()),
-            ),
+            )
+            .with_gate(BindingGate::Receiver {
+                module: "fs",
+                receiver: "fs",
+            }),
             CompiledPattern::new(
-                "fs.rmdirSync($$$)".to_string(),
+                "rmSync($$$)".to_string(),
+                "heredoc.typescript.fs_rmsync".to_string(),
+                "fs.rmSync() deletes files/directories".to_string(),
+                Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
+                Some("Verify target path carefully before running".to_string()),
+            )
+            .with_gate(BindingGate::Bare {
+                module: "fs",
+                member: "rmSync",
+            }),
+            CompiledPattern::new(
+                "$M.rmdirSync($$$)".to_string(),
                 "heredoc.typescript.fs_rmdirsync".to_string(),
                 "fs.rmdirSync() deletes directories".to_string(),
                 Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
                 Some("Verify target path carefully before running".to_string()),
-            ),
+            )
+            .with_gate(BindingGate::Receiver {
+                module: "fs",
+                receiver: "fs",
+            }),
             CompiledPattern::new(
-                "fs.unlinkSync($$$)".to_string(),
+                "rmdirSync($$$)".to_string(),
+                "heredoc.typescript.fs_rmdirsync".to_string(),
+                "fs.rmdirSync() deletes directories".to_string(),
+                Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
+                Some("Verify target path carefully before running".to_string()),
+            )
+            .with_gate(BindingGate::Bare {
+                module: "fs",
+                member: "rmdirSync",
+            }),
+            CompiledPattern::new(
+                "$M.unlinkSync($$$)".to_string(),
                 "heredoc.typescript.fs_unlinksync".to_string(),
                 "fs.unlinkSync() deletes files".to_string(),
                 Severity::Low,
                 None,
-            ),
+            )
+            .with_gate(BindingGate::Receiver {
+                module: "fs",
+                receiver: "fs",
+            }),
+            CompiledPattern::new(
+                "unlinkSync($$$)".to_string(),
+                "heredoc.typescript.fs_unlinksync".to_string(),
+                "fs.unlinkSync() deletes files".to_string(),
+                Severity::Low,
+                None,
+            )
+            .with_gate(BindingGate::Bare {
+                module: "fs",
+                member: "unlinkSync",
+            }),
             CompiledPattern::new(
                 "Deno.remove($$$)".to_string(),
                 "heredoc.typescript.deno_remove".to_string(),
@@ -1752,40 +2297,115 @@ fn default_patterns() -> HashMap<ScriptLanguage, Vec<CompiledPattern>> {
                 Some("Validate command and arguments carefully".to_string()),
             ),
             CompiledPattern::new(
-                "fs.rm($$$)".to_string(),
+                "$M.rm($$$)".to_string(),
                 "heredoc.typescript.fs_rm".to_string(),
                 "fs.rm() deletes files/directories".to_string(),
                 Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
                 Some("Verify target path carefully before running".to_string()),
-            ),
+            )
+            .with_gate(BindingGate::Receiver {
+                module: "fs",
+                receiver: "fs",
+            }),
             CompiledPattern::new(
-                "fs.rmdir($$$)".to_string(),
+                "rm($$$)".to_string(),
+                "heredoc.typescript.fs_rm".to_string(),
+                "fs.rm() deletes files/directories".to_string(),
+                Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
+                Some("Verify target path carefully before running".to_string()),
+            )
+            .with_gate(BindingGate::Bare {
+                module: "fs",
+                member: "rm",
+            }),
+            CompiledPattern::new(
+                "$M.rmdir($$$)".to_string(),
                 "heredoc.typescript.fs_rmdir".to_string(),
                 "fs.rmdir() deletes directories".to_string(),
                 Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
                 Some("Verify target path carefully before running".to_string()),
-            ),
+            )
+            .with_gate(BindingGate::Receiver {
+                module: "fs",
+                receiver: "fs",
+            }),
             CompiledPattern::new(
-                "fs.unlink($$$)".to_string(),
+                "rmdir($$$)".to_string(),
+                "heredoc.typescript.fs_rmdir".to_string(),
+                "fs.rmdir() deletes directories".to_string(),
+                Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
+                Some("Verify target path carefully before running".to_string()),
+            )
+            .with_gate(BindingGate::Bare {
+                module: "fs",
+                member: "rmdir",
+            }),
+            CompiledPattern::new(
+                "$M.unlink($$$)".to_string(),
                 "heredoc.typescript.fs_unlink".to_string(),
                 "fs.unlink() deletes files".to_string(),
                 Severity::Low,
                 None,
-            ),
+            )
+            .with_gate(BindingGate::Receiver {
+                module: "fs",
+                receiver: "fs",
+            }),
             CompiledPattern::new(
-                "fsPromises.rm($$$)".to_string(),
+                "unlink($$$)".to_string(),
+                "heredoc.typescript.fs_unlink".to_string(),
+                "fs.unlink() deletes files".to_string(),
+                Severity::Low,
+                None,
+            )
+            .with_gate(BindingGate::Bare {
+                module: "fs",
+                member: "unlink",
+            }),
+            CompiledPattern::new(
+                "$M.rm($$$)".to_string(),
                 "heredoc.typescript.fspromises_rm".to_string(),
                 "fsPromises.rm() deletes files/directories".to_string(),
                 Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
                 Some("Verify target path carefully before running".to_string()),
-            ),
+            )
+            .with_gate(BindingGate::Receiver {
+                module: "fs/promises",
+                receiver: "fsPromises",
+            }),
             CompiledPattern::new(
-                "fsPromises.rmdir($$$)".to_string(),
+                "rm($$$)".to_string(),
+                "heredoc.typescript.fspromises_rm".to_string(),
+                "fsPromises.rm() deletes files/directories".to_string(),
+                Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
+                Some("Verify target path carefully before running".to_string()),
+            )
+            .with_gate(BindingGate::Bare {
+                module: "fs/promises",
+                member: "rm",
+            }),
+            CompiledPattern::new(
+                "$M.rmdir($$$)".to_string(),
                 "heredoc.typescript.fspromises_rmdir".to_string(),
                 "fsPromises.rmdir() deletes directories".to_string(),
                 Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
                 Some("Verify target path carefully before running".to_string()),
-            ),
+            )
+            .with_gate(BindingGate::Receiver {
+                module: "fs/promises",
+                receiver: "fsPromises",
+            }),
+            CompiledPattern::new(
+                "rmdir($$$)".to_string(),
+                "heredoc.typescript.fspromises_rmdir".to_string(),
+                "fsPromises.rmdir() deletes directories".to_string(),
+                Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
+                Some("Verify target path carefully before running".to_string()),
+            )
+            .with_gate(BindingGate::Bare {
+                module: "fs/promises",
+                member: "rmdir",
+            }),
         ],
     );
 

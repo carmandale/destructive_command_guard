@@ -3243,6 +3243,30 @@ fn check_fallback_patterns(command: &str) -> Option<EvaluationResult> {
             r"child_process\.execSync",
             r"child_process\.spawnSync",
             r"os\.RemoveAll",
+            // The same call on whatever the body bound the module to
+            // (`.agent-config-artmu`). This sweep reads text nothing else
+            // could read, so there is no AST and no import to resolve an
+            // alias against -- only the call shape is left. Additive, not a
+            // replacement: the receiver spellings above still stand on their
+            // own, including where they appear without a paren.
+            //
+            // Only names distinctive enough to BE the module's call go here.
+            // `remove(`, `rmdir(` and `unlink(` are common method names on
+            // ordinary objects and stay receiver-bound above; an unterminated
+            // `import os as o; o.remove(..)` is therefore still unread, and
+            // this comment is the record of that, not a claim to cover it.
+            //
+            // This does widen what the sweep denies -- an unread
+            // `spawnSync("ls")` now denies where it did not. That is the
+            // verdict `child_process.spawnSync("ls")` has always drawn here:
+            // the sweep has no payload gate for ANY of these, so the widening
+            // gives the other spellings of a call the same answer, it does not
+            // invent a new one.
+            r"\brmtree\s*\(",
+            r"\brmSync\s*\(",
+            r"\brmdirSync\s*\(",
+            r"\bexecSync\s*\(",
+            r"\bspawnSync\s*\(",
             r"\brm\s+(?:-[a-zA-Z]*r[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*r)\b", // rm -rf, rm -fr, rm -r -f
             r"\bgit\s+reset\s+--hard\b",
         ])
