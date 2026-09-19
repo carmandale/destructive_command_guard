@@ -135,6 +135,11 @@ fn a_payload_past_the_cap_is_read_by_the_packs() {
 }
 
 /// A heredoc past the cap, with a pack rule the fallback list never spelled.
+///
+/// A floor, not a kill: this denied before the fix too. A heredoc body is
+/// unquoted lines in the raw command, and the ordinary pack scan reads those
+/// as commands. Only a QUOTED payload (the here-strings above) was invisible to
+/// every reader past the cap.
 #[test]
 fn a_heredoc_past_the_cap_is_read_by_the_packs() {
     let heredoc = format!("bash <<'E'\n{}\nE", push_force());

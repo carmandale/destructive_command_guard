@@ -43,7 +43,9 @@
 //!
 //! The `a_skipped_body_*` rows are the fail-closed controls: they are what a
 //! mask that is too wide would break, and they were green on both sides, so
-//! they prove the fix did not buy its green by switching the sweep off.
+//! they prove the fix did not buy its green by switching the sweep off. (That
+//! was measured with a `bash` body; they now carry a python one, see
+//! `skipped_body_holding_rm_rf`.)
 //!
 //! The fix masks the byte ranges of the content that actually reached the
 //! matchers before the sweep runs. It masks what was JUDGED, not what was
@@ -307,11 +309,24 @@ fn a_real_unread_body_does_not_make_the_outer_command_unjudged() {
     );
 }
 
+/// Ten fillers, then a heredoc past the cap whose body holds `rm -rf`.
+///
+/// A python body, not a bash one: since
+/// `.agent-config-dcg-cap-overflow-fallback-lacks-packs-nvs11` a SHELL body past
+/// the cap is read by the packs before the sweep runs, while python past the
+/// cap gets no AST pass -- so for this body the sweep is still the only reader.
+fn skipped_body_holding_rm_rf() -> String {
+    format!(
+        "{}python3 <<'EOF'\nimport os\nos.system(\"rm -rf /srv/data\")\nEOF",
+        fillers(10)
+    )
+}
+
 #[test]
 fn a_skipped_body_holding_rm_rf_still_denies() {
-    // The bead's DONE WHEN. Ten fillers fill the cap, so the bash heredoc is
-    // never extracted and never judged. Nothing masks it, so the sweep sees it.
-    let cmd = format!("{}bash <<'EOF'\nrm -rf /srv/data\nEOF", fillers(10));
+    // The bead's DONE WHEN. Ten fillers fill the cap, so the heredoc is never
+    // judged. Nothing masks it, so the sweep sees it.
+    let cmd = skipped_body_holding_rm_rf();
     assert_denied_as_unjudged(
         &cmd,
         run_default(&cmd),
@@ -324,7 +339,7 @@ fn a_skipped_body_holding_rm_rf_still_denies_under_the_warned_config() {
     // The same input under the downgrade config, so that "the policy warns" can
     // never be read as "the fallback is off". The fallback is a fail-closed
     // backstop for UNREAD text and stays one.
-    let cmd = format!("{}bash <<'EOF'\nrm -rf /srv/data\nEOF", fillers(10));
+    let cmd = skipped_body_holding_rm_rf();
     assert_denied_as_unjudged(
         &cmd,
         run_with_warned_rules(&cmd),
