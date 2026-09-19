@@ -152,6 +152,44 @@ fn strip_sudo(command: &str) -> Option<(String, StrippedWrapper)> {
     // Options that take an argument
     // -D (chdir) changes to directory before running command
     const ARG_FLAGS: &[char] = &['u', 'g', 'h', 'p', 'C', 'r', 'U', 'D', 't', 'a', 'T'];
+    // The long spellings of the two lists above. `--` itself is handled before
+    // this branch and is not listed.
+    //
+    // Exact match only. getopt_long also accepts unambiguous ABBREVIATIONS
+    // (`sudo --us root`), which these tables decline; that is conservative on
+    // the rule-matching side -- the command is left unstripped and the git and
+    // filesystem regexes still fire on it -- and it costs only the heredoc
+    // receiver. Measured, not assumed (cold review 2).
+    const LONG_SIMPLE_FLAGS: &[&str] = &[
+        "--preserve-env",
+        "--set-home",
+        "--non-interactive",
+        "--stdin",
+        "--shell",
+        "--background",
+        "--login",
+        "--preserve-groups",
+        "--askpass",
+        "--bell",
+        "--reset-timestamp",
+        "--remove-timestamp",
+    ];
+    const LONG_ARG_FLAGS: &[&str] = &[
+        "--user",
+        "--group",
+        "--host",
+        "--prompt",
+        "--close-from",
+        "--role",
+        "--type",
+        "--chdir",
+        "--other-user",
+        "--command-timeout",
+        // `-a` in ARG_FLAGS above. Omitting it left `sudo --auth-type pam
+        // python3 <<'PY'` resolving its heredoc receiver to `pam` while the
+        // short twin resolved correctly (`.agent-config-a09gf`, cold review 2).
+        "--auth-type",
+    ];
 
     let trimmed = command.trim_start();
 
@@ -220,6 +258,40 @@ fn strip_sudo(command: &str) -> Option<(String, StrippedWrapper)> {
         }
 
         if word.starts_with("--") {
+            // sudo uses getopt_long, so every option above has a long spelling
+            // and `--user root` is as real as `-u root`. Declining to strip it
+            // left `sudo --user root python3 <<'PY'` resolving its heredoc
+            // receiver to `root` even after the short form was fixed
+            // (`.agent-config-a09gf`): the same defect, one word of spelling
+            // away. The tables live here because this is the one reader of
+            // sudo's option grammar.
+            let (name, glued) = word
+                .find('=')
+                .map_or((word, None), |eq| (&word[..eq], Some(&word[eq + 1..])));
+
+            if LONG_SIMPLE_FLAGS.contains(&name) {
+                // A glued value belongs to the same word either way
+                // (`--preserve-env=FOO`), so nothing follows to consume.
+                idx = word_end;
+                continue;
+            }
+
+            if LONG_ARG_FLAGS.contains(&name) {
+                idx = word_end;
+                if glued.is_some() {
+                    continue;
+                }
+                while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+                    idx += 1;
+                }
+                if idx >= bytes.len() {
+                    // Missing argument - don't strip
+                    return None;
+                }
+                idx = consume_word_token(bytes, idx, bytes.len());
+                continue;
+            }
+
             // Unknown long option - not safe to strip
             return None;
         }
