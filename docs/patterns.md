@@ -53,6 +53,13 @@ Heredoc patterns are authored using ast-grep pattern syntax (as implemented by
   rmtree`, `const { rmSync } = require('fs')`, `const rmSync =
   require('fs').rmSync`). This is why `$M.remove($$$)` does not match
   `items.remove(x)`. See `.agent-config-artmu`.
+- A name the body binds to ANOTHER module is that module, with one python
+  exception: if the body also plainly imports the module under that name
+  (`try: import subprocess32 as subprocess` / `except ImportError: import
+  subprocess`), either binding may be live, and the name stays the module.
+  The gate reads imports, not scope, so a local `def run` after `from
+  subprocess import run` is still read as subprocess. See
+  `.agent-config-dcg-subprocess-module-binding-ehxrb`.
 
 Examples:
 
@@ -177,9 +184,9 @@ built-in rule IDs. Use these IDs for allowlisting and tests.
 | `heredoc.python.os_unlink` | `$M.unlink($$$)` / `unlink($$$)`, bound to `os` | deletes files |
 | `heredoc.python.pathlib_unlink` | `$M.Path($$$).unlink($$$)` bound to `pathlib`, and `Path($$$).unlink($$$)` | deletes files |
 | `heredoc.python.pathlib_rmdir` | `$M.Path($$$).rmdir($$$)` bound to `pathlib`, and `Path($$$).rmdir($$$)` | deletes directories |
-| `heredoc.python.subprocess_run` | `subprocess.run($$$)` | executes shell commands |
-| `heredoc.python.subprocess_call` | `subprocess.call($$$)` | executes shell commands |
-| `heredoc.python.subprocess_popen` | `subprocess.Popen($$$)` | spawns shell processes |
+| `heredoc.python.subprocess_run` | `$M.run($$$)` / `run($$$)`, bound to `subprocess` | executes shell commands |
+| `heredoc.python.subprocess_call` | `$M.call($$$)` / `call($$$)`, bound to `subprocess` | executes shell commands |
+| `heredoc.python.subprocess_popen` | `$M.Popen($$$)` / `Popen($$$)`, bound to `subprocess` | spawns shell processes |
 | `heredoc.python.os_system` | `os.system($$$)` | executes shell commands |
 | `heredoc.python.os_popen` | `os.popen($$$)` | executes shell commands |
 

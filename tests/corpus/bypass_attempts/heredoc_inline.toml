@@ -21,11 +21,32 @@ description = "python3 -c with os.remove (potentially destructive)"
 command = "python3 -c \"import os; os.remove('/etc/passwd')\""
 expected = "deny"
 
-# NOTE: python subprocess calls depend on heredoc scanner detecting nested commands
-# [[case]]
-# description = "python -c with subprocess git reset"
-# command = "python -c \"import subprocess; subprocess.run(['git', 'reset', '--hard'])\""
-# expected = "deny"
+# An argv list is read by the python refiner (.agent-config-ei4it), and the
+# subprocess rules read the module the body bound, under any spelling
+# (.agent-config-dcg-subprocess-module-binding-ehxrb).
+[[case]]
+description = "python -c with subprocess git reset"
+command = "python -c \"import subprocess; subprocess.run(['git', 'reset', '--hard'])\""
+expected = "deny"
+rule_id = "heredoc.python:subprocess_run.git_reset_hard"
+
+[[case]]
+description = "python3 -c with an aliased subprocess.run git reset"
+command = "python3 -c \"import subprocess as sp; sp.run(['git', 'reset', '--hard'])\""
+expected = "deny"
+rule_id = "heredoc.python:subprocess_run.git_reset_hard"
+
+[[case]]
+description = "python3 -c with a from-imported subprocess call git reset"
+command = "python3 -c \"from subprocess import call; call(['git', 'reset', '--hard'])\""
+expected = "deny"
+rule_id = "heredoc.python:subprocess_call.git_reset_hard"
+
+[[case]]
+description = "python3 -c with a wildcard-imported Popen git reset"
+command = "python3 -c \"from subprocess import *; Popen(['git', 'reset', '--hard'])\""
+expected = "deny"
+rule_id = "heredoc.python:subprocess_popen.git_reset_hard"
 
 # ============================================================================
 # Bash inline execution (-c flag) - DESTRUCTIVE ONLY

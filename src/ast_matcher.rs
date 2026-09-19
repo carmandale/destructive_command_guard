@@ -1961,6 +1961,10 @@ struct ModuleBindings {
     bare: HashMap<String, (String, String)>,
     /// Modules imported wholesale (`from shutil import *`).
     wildcards: HashSet<String>,
+    /// Names a python body binds with a plain `import X` (`import os.path`
+    /// binds `os`). The name IS the module, so this only matters when the same
+    /// name is ALSO aliased to something else; see [`gate_admits`].
+    plain_imports: HashSet<String>,
 }
 
 static INLINE_REQUIRE: LazyLock<Regex> = LazyLock::new(|| {
@@ -2039,7 +2043,16 @@ fn gate_admits<D: Doc>(
                 return required == module;
             }
             if let Some(bound) = bindings.receivers.get(text) {
-                return bound == module;
+                // A python body can bind one name both ways, and either may be
+                // the one live at the call: `try: import subprocess32 as
+                // subprocess / except ImportError: import subprocess`. A plain
+                // import of the module this rule names keeps the name that
+                // module, so the alias cannot talk the call out of its rule
+                // (`.agent-config-dcg-subprocess-module-binding-ehxrb` cold
+                // review). JS records no plain imports, so the one-owner
+                // property above is untouched.
+                return bound == module
+                    || (text == module && bindings.plain_imports.contains(module));
             }
             text == receiver
         }
@@ -2076,16 +2089,30 @@ fn collect_bindings<D: Doc>(root: &Node<'_, D>, language: ScriptLanguage) -> Mod
 fn collect_python_bindings<D: Doc>(root: &Node<'_, D>, out: &mut ModuleBindings) {
     for node in root.dfs() {
         match node.kind().as_ref() {
-            // `import shutil as sh`. Plain `import shutil` needs no entry: the
-            // receiver the rule names IS the module.
+            // `import shutil as sh`, and plain `import shutil`. The plain one
+            // needs no receiver entry -- the receiver the rule names IS the
+            // module -- but it is recorded, because the same body may also
+            // alias that name to another module.
             "import_statement" => {
                 for name in node.field_children("name") {
-                    if name.kind().as_ref() != "aliased_import" {
-                        continue;
-                    }
-                    if let (Some(module), Some(alias)) = (name.field("name"), name.field("alias")) {
-                        out.receivers
-                            .insert(alias.text().to_string(), normalize_module(&module.text()));
+                    match name.kind().as_ref() {
+                        "aliased_import" => {
+                            if let (Some(module), Some(alias)) =
+                                (name.field("name"), name.field("alias"))
+                            {
+                                out.receivers.insert(
+                                    alias.text().to_string(),
+                                    normalize_module(&module.text()),
+                                );
+                            }
+                        }
+                        "dotted_name" => {
+                            let text = name.text();
+                            if let Some(top) = text.split('.').next() {
+                                out.plain_imports.insert(top.trim().to_string());
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -2366,27 +2393,86 @@ fn default_patterns() -> HashMap<ScriptLanguage, Vec<CompiledPattern>> {
             ),
             // Shell execution patterns - Medium severity to avoid false positives
             // per bead guidance: "Do not block on shell=True alone"
+            //
+            // Module-bound the way shutil is
+            // (`.agent-config-dcg-subprocess-module-binding-ehxrb`): the python
+            // refiner reads a literal argv off these calls and denies a
+            // destructive one, so a spelling these patterns cannot see is a
+            // deny that does not happen. The bare twins reach further than
+            // `rmtree($$$)` -- `run` and `call` are ordinary names -- but the
+            // gate admits one only where this body imported that very member
+            // from subprocess, and the match stays Medium, which the hook does
+            // not act on, unless its literal argv is destructive. The gate
+            // reads imports, not scope: a body that imports `run` from
+            // subprocess and then defines its own `run` is still read as
+            // subprocess. That deny is accepted, and pinned by
+            // tests/repro_subprocess_module_binding.rs.
             CompiledPattern::new(
-                "subprocess.run($$$)".to_string(),
+                "$M.run($$$)".to_string(),
                 "heredoc.python.subprocess_run".to_string(),
                 "subprocess.run() executes shell commands".to_string(),
                 Severity::Medium,
                 Some("Validate command arguments carefully".to_string()),
-            ),
+            )
+            .with_gate(BindingGate::Receiver {
+                module: "subprocess",
+                receiver: "subprocess",
+            }),
             CompiledPattern::new(
-                "subprocess.call($$$)".to_string(),
+                "run($$$)".to_string(),
+                "heredoc.python.subprocess_run".to_string(),
+                "subprocess.run() executes shell commands".to_string(),
+                Severity::Medium,
+                Some("Validate command arguments carefully".to_string()),
+            )
+            .with_gate(BindingGate::Bare {
+                module: "subprocess",
+                member: "run",
+            }),
+            CompiledPattern::new(
+                "$M.call($$$)".to_string(),
                 "heredoc.python.subprocess_call".to_string(),
                 "subprocess.call() executes shell commands".to_string(),
                 Severity::Medium,
                 Some("Validate command arguments carefully".to_string()),
-            ),
+            )
+            .with_gate(BindingGate::Receiver {
+                module: "subprocess",
+                receiver: "subprocess",
+            }),
             CompiledPattern::new(
-                "subprocess.Popen($$$)".to_string(),
+                "call($$$)".to_string(),
+                "heredoc.python.subprocess_call".to_string(),
+                "subprocess.call() executes shell commands".to_string(),
+                Severity::Medium,
+                Some("Validate command arguments carefully".to_string()),
+            )
+            .with_gate(BindingGate::Bare {
+                module: "subprocess",
+                member: "call",
+            }),
+            CompiledPattern::new(
+                "$M.Popen($$$)".to_string(),
                 "heredoc.python.subprocess_popen".to_string(),
                 "subprocess.Popen() spawns shell processes".to_string(),
                 Severity::Medium,
                 Some("Validate command arguments carefully".to_string()),
-            ),
+            )
+            .with_gate(BindingGate::Receiver {
+                module: "subprocess",
+                receiver: "subprocess",
+            }),
+            CompiledPattern::new(
+                "Popen($$$)".to_string(),
+                "heredoc.python.subprocess_popen".to_string(),
+                "subprocess.Popen() spawns shell processes".to_string(),
+                Severity::Medium,
+                Some("Validate command arguments carefully".to_string()),
+            )
+            .with_gate(BindingGate::Bare {
+                module: "subprocess",
+                member: "Popen",
+            }),
             CompiledPattern::new(
                 "os.system($$$)".to_string(),
                 "heredoc.python.os_system".to_string(),
@@ -4639,6 +4725,97 @@ def cleanup():
             assert_eq!(suffix("git -C . log --grep reset --hard"), None);
             // A flag-only option owns no word, so `--grep` is never reached.
             assert_eq!(suffix("git --no-pager log --grep reset --hard"), None);
+        }
+    }
+
+    /// `subprocess.run` / `.call` / `.Popen` are read on whatever the body binds
+    /// the module to (`.agent-config-dcg-subprocess-module-binding-ehxrb`), the
+    /// way `shutil.rmtree` is.
+    ///
+    /// Matcher level, so it pins the binding with no refiner involved: a benign
+    /// argv stays Medium either way, and the hook verdict for a destructive one
+    /// is `tests/repro_subprocess_module_binding.rs`.
+    mod python_subprocess_binding {
+        use super::*;
+
+        fn subprocess_rules(code: &str) -> Vec<String> {
+            AstMatcher::new()
+                .find_matches(code, ScriptLanguage::Python)
+                .unwrap()
+                .into_iter()
+                .map(|m| m.rule_id)
+                .filter(|id| id.starts_with("heredoc.python.subprocess_"))
+                .collect()
+        }
+
+        #[test]
+        fn every_bound_spelling_is_one_match_under_its_rule() {
+            for (code, rule) in [
+                ("import subprocess\nsubprocess.run(['ls'])", "run"),
+                ("subprocess.run(['ls'])", "run"),
+                ("import subprocess as sp\nsp.run(['ls'])", "run"),
+                ("from subprocess import run\nrun(['ls'])", "run"),
+                ("from subprocess import *\nrun(['ls'])", "run"),
+                ("import subprocess as sp\nsp.call(['ls'])", "call"),
+                ("from subprocess import call\ncall(['ls'])", "call"),
+                ("import subprocess as sp\nsp.Popen(['ls'])", "popen"),
+                ("from subprocess import Popen\nPopen(['ls'])", "popen"),
+                // Both bindings in one body, one call: still one match.
+                (
+                    "import subprocess\nfrom subprocess import run\nsubprocess.run(['ls'])",
+                    "run",
+                ),
+                // The name aliased AND plainly imported: either may be live, so
+                // the plain import keeps it subprocess.
+                (
+                    "try:\n    import subprocess32 as subprocess\nexcept ImportError:\n    import subprocess\nsubprocess.run(['ls'])",
+                    "run",
+                ),
+                (
+                    "import json as subprocess\nimport subprocess\nsubprocess.Popen(['ls'])",
+                    "popen",
+                ),
+            ] {
+                assert_eq!(
+                    subprocess_rules(code),
+                    vec![format!("heredoc.python.subprocess_{rule}")],
+                    "code: {code:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn what_the_imports_do_not_explain_is_not_subprocess() {
+            for code in [
+                "import asyncio\nasyncio.run(main())",
+                "app.run(debug=True)",
+                "import json as sp\nsp.run(['ls'])",
+                "def run(cmd):\n    print(cmd)\nrun(['ls'])",
+                "from asyncio import run\nrun(main())",
+                "from subprocess import check_output as run\nrun(['ls'])",
+                "from subprocess import run\ncall(['ls'])",
+                "call(['ls'])",
+                "from unittest import mock\nmock.call(['ls'])",
+                "self.call(['ls'])",
+                "pool.Popen(['ls'])",
+                "Popen(['ls'])",
+                "class Popen:\n    pass\nPopen(['ls'])",
+                // The bare twin must not take an attribute call: `run` is
+                // bound here, `runner.run` is not it.
+                "from subprocess import run\nrunner.run(['ls'])",
+                "from subprocess import Popen\npool.Popen(['ls'])",
+                // A name bound ONLY to another module is that module; the plain
+                // import is what keeps the name subprocess, not the spelling.
+                "import json as subprocess\nsubprocess.run(['ls'])",
+                // ...and it keeps only that NAME: `sp` is still json.
+                "import subprocess\nimport json as sp\nsp.run(['ls'])",
+            ] {
+                assert!(
+                    subprocess_rules(code).is_empty(),
+                    "must not match\ncode: {code:?}\ngot: {:?}",
+                    subprocess_rules(code)
+                );
+            }
         }
     }
 

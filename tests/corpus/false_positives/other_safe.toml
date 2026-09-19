@@ -116,3 +116,29 @@ expected = "allow"
 description = "a destructive-looking string inside quoted data stays data"
 command = 'echo "rm >/dev/null -rf /" > note.txt'
 expected = "allow"
+
+# ============================================================================
+# Python calls shaped like subprocess that are not subprocess
+# (.agent-config-dcg-subprocess-module-binding-ehxrb): the subprocess rules
+# read the module the body bound, and nothing here binds subprocess.
+# ============================================================================
+
+[[case]]
+description = "asyncio.run is not subprocess.run"
+command = "python3 -c \"import asyncio; asyncio.run(['git', 'reset', '--hard'])\""
+expected = "allow"
+
+[[case]]
+description = "a run imported from asyncio is not subprocess.run"
+command = "python3 -c \"from asyncio import run; run(['git', 'reset', '--hard'])\""
+expected = "allow"
+
+[[case]]
+description = "a receiver aliased to json is not subprocess"
+command = "python3 -c \"import json as sp; sp.run(['git', 'reset', '--hard'])\""
+expected = "allow"
+
+[[case]]
+description = "mock.call in a test body is not subprocess.call"
+command = "python3 <<'PY'\nfrom unittest import mock\nexpected = mock.call(['git', 'reset', '--hard'])\nPY"
+expected = "allow"
