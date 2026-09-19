@@ -622,6 +622,11 @@ fn refine_match_meta(
     match language {
         ScriptLanguage::JavaScript => refine_javascript_match(meta, matched_text),
         ScriptLanguage::TypeScript => refine_typescript_match(meta, matched_text),
+        // Wrapped here, not inside: the javascript, typescript and ruby
+        // refiners can DROP a match (an fs call with no recursive flag is not
+        // a finding), and python's cannot -- every subprocess call it is
+        // handed keeps at least the Medium meta it arrived with.
+        ScriptLanguage::Python => Some(refine_python_match(meta, matched_text)),
         ScriptLanguage::Ruby => refine_ruby_match(meta, matched_text),
         _ => Some(RefinedMatchMeta {
             rule_id: meta.rule_id.clone(),
@@ -913,6 +918,87 @@ fn refine_ruby_match(meta: &CompiledPattern, matched_text: &str) -> Option<Refin
     })
 }
 
+/// The first argument of a python call, when that argument is a LIST literal.
+///
+/// `[^\]]*` spans newlines, so a list broken across lines is still read.
+/// A nested list does not match, and an unmatched call falls back to the
+/// pattern's own Medium meta -- the behaviour before this rule existed.
+static PY_CALL_ARGV_LIST: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\(\s*\[(?P<items>[^\]]*)\]").expect("python argv list regex compiles")
+});
+
+/// A single-line python string literal. Deliberately separate from the
+/// JavaScript one: python's literal grammar is its own (prefixes, triple
+/// quotes), and the two must be free to diverge.
+static PY_STRING_LITERAL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?:"(?P<dq>[^"\n]*)"|'(?P<sq>[^'\n]*)')"#)
+        .expect("python string literal regex compiles")
+});
+
+/// The string literals of the first argument, when that argument is a list.
+///
+/// What comes back is the literal SKELETON of the argv, not the argv: an
+/// element that is not a literal -- a variable, a call, a join -- cannot be
+/// read here and is simply absent. That is deliberate, because a composed
+/// target still names itself (`os.path.join("/srv", "data")` yields `/srv`),
+/// and a guard that reads less than it could is the defect this rule exists
+/// to fix. `None` only when there is no list, or nothing literal inside it.
+fn python_argv_list(matched_text: &str) -> Option<Vec<&str>> {
+    let caps = PY_CALL_ARGV_LIST.captures(matched_text)?;
+    let items = caps.name("items")?.as_str();
+
+    let argv: Vec<&str> = PY_STRING_LITERAL
+        .captures_iter(items)
+        .filter_map(|caps| string_literal_from_caps(&caps))
+        .collect();
+
+    if argv.is_empty() { None } else { Some(argv) }
+}
+
+/// Upgrade a `subprocess` call that was handed a destructive argv.
+///
+/// `subprocess.run($$$)` is deliberately Medium: "do not block on shell=True
+/// alone". But the STRING form of the same call carries its command as
+/// contiguous shell text, which the filesystem pack already denies, while the
+/// LIST form hides it in separate literals that no pack can see -- so the
+/// SAFER spelling of the call was the one that got through
+/// (.agent-config-ei4it).
+///
+/// The list is handed to [`detect_command_words`], which judges ONE command
+/// whose words are already separated. That is the whole reason it is the right
+/// reader here: an argv list goes to execve, not to a shell, so it must not be
+/// re-joined into text and split again on metacharacters it never had -- a
+/// semicolon inside an element is a character in an argument and starts no
+/// second command.
+fn refine_python_match(meta: &CompiledPattern, matched_text: &str) -> RefinedMatchMeta {
+    let rule_id = meta.rule_id.as_str();
+
+    if matches!(
+        rule_id,
+        "heredoc.python.subprocess_run"
+            | "heredoc.python.subprocess_call"
+            | "heredoc.python.subprocess_popen"
+    ) {
+        if let Some(hit) = python_argv_list(matched_text)
+            .and_then(|argv| detect_command_words(argv.iter().copied()))
+        {
+            return RefinedMatchMeta {
+                rule_id: format!("{rule_id}.{}", hit.rule_suffix),
+                reason: hit.reason.to_string(),
+                severity: hit.severity,
+                suggestion: hit.suggestion.map(str::to_string),
+            };
+        }
+    }
+
+    RefinedMatchMeta {
+        rule_id: meta.rule_id.clone(),
+        reason: meta.reason.clone(),
+        severity: meta.severity,
+        suggestion: meta.suggestion.clone(),
+    }
+}
+
 // ============================================================================
 // Perl regex fallback ast_matcher (git_safety_guard-2d4)
 // ============================================================================
@@ -938,8 +1024,17 @@ static PERL_QX_SLASH_LITERAL: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static PERL_FILE_PATH_RMTREE_LITERAL: LazyLock<Regex> = LazyLock::new(|| {
+    // The `File::Path::` qualifier is OPTIONAL, because the documented way to
+    // call these is to import them: `use File::Path qw(rmtree); rmtree($dir)`.
+    // Requiring the qualifier read the one spelling nobody writes and allowed
+    // the one everybody does (.agent-config-ei4it).
+    //
+    // An unqualified `rmtree`/`remove_tree` from some other module matches too,
+    // and that is the intent: the name is the behaviour. A non-catastrophic
+    // target is still only Medium, so ordinary build-directory cleanup warns
+    // rather than denies -- the same bar the qualified form already met.
     Regex::new(
-        r#"(?m)\bFile::Path::(?P<fn>rmtree|remove_tree)\b(?:\s*\(\s*|\s+)(?:"(?P<dq>[^"\n]*)"|'(?P<sq>[^'\n]*)')"#,
+        r#"(?m)\b(?P<qual>File::Path::)?(?P<fn>rmtree|remove_tree)\b(?:\s*\(\s*|\s+)(?:"(?P<dq>[^"\n]*)"|'(?P<sq>[^'\n]*)')"#,
     )
     .expect("perl File::Path rmtree/remove_tree regex compiles")
 });
@@ -1189,6 +1284,15 @@ fn scan_perl_file_path(
         };
         let fn_name = caps.name("fn").map_or("rmtree", |m| m.as_str());
 
+        // The rule id is the FUNCTION, so the qualified and imported spellings
+        // are one rule and an allowlist written for either covers both. Only
+        // the reason names the spelling that was actually read, so it cannot
+        // claim a `File::Path::` prefix that was not in the body.
+        let display = caps.name("qual").map_or_else(
+            || fn_name.to_string(),
+            |qual| format!("{}{fn_name}", qual.as_str()),
+        );
+
         let severity = if is_catastrophic_path(path) {
             Severity::Critical
         } else {
@@ -1196,7 +1300,7 @@ fn scan_perl_file_path(
         };
 
         let rule_id = format!("heredoc.perl.file_path.{fn_name}");
-        let reason = format!("File::Path::{fn_name}() recursively deletes directories");
+        let reason = format!("{display}() recursively deletes directories");
 
         push_regex_match(
             out,
@@ -3888,6 +3992,52 @@ mod tests {
             assert!(
                 !matches[0].severity.blocks_by_default(),
                 "Medium should not block"
+            );
+        }
+
+        /// The same call is Medium or Critical depending on the argv it was
+        /// handed, so the rule reads the list rather than the call
+        /// (.agent-config-ei4it).
+        #[test]
+        fn a_destructive_argv_list_is_critical() {
+            let ast_matcher = AstMatcher::new();
+            let code = format!(
+                "import subprocess\nsubprocess.run(['{}', '{}', '/srv/data'])",
+                "r\u{6d}", "-r\u{66}"
+            );
+            let matches = ast_matcher
+                .find_matches(&code, ScriptLanguage::Python)
+                .unwrap();
+            assert!(!matches.is_empty(), "subprocess.run must still match");
+            assert_eq!(
+                matches[0].rule_id,
+                "heredoc.python.subprocess_run.rm_rf_catastrophic"
+            );
+            assert_eq!(matches[0].severity, Severity::Critical);
+            assert!(matches[0].severity.blocks_by_default());
+        }
+
+        /// An argv list goes to execve, not to a shell. A separator inside an
+        /// ELEMENT is a character in one argument and starts no second
+        /// command, so the list must never be re-joined and re-split.
+        #[test]
+        fn a_separator_inside_an_argv_element_starts_no_second_command() {
+            let ast_matcher = AstMatcher::new();
+            let code = format!(
+                "import subprocess\nsubprocess.run(['echo', 'hi; {} -r{} /tmp/x'])",
+                "r\u{6d}", "\u{66}"
+            );
+            let matches = ast_matcher
+                .find_matches(&code, ScriptLanguage::Python)
+                .unwrap();
+            assert!(!matches.is_empty(), "subprocess.run must still match");
+            assert_eq!(
+                matches[0].rule_id, "heredoc.python.subprocess_run",
+                "echo prints this argument; it does not run it"
+            );
+            assert!(
+                !matches[0].severity.blocks_by_default(),
+                "an argument of echo is not a delete"
             );
         }
     }
