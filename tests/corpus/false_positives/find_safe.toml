@@ -1,0 +1,113 @@
+# False positives: find commands that MUST stay allowed.
+#
+# `.agent-config-xzx79` (2026-09-23). This file is the reason `core.find` is
+# narrow. A guard that cries wolf gets switched off, and then it protects
+# nothing — so the deny surface is find-WITH-a-delete-action outside a temp
+# root, and every other find on this machine has to keep working.
+#
+# Two groups: a find that does not delete, and a find that deletes under a temp
+# root. The temp set here is character-for-character `core.filesystem`'s, so a
+# path `rm -rf` allows is a path `find -delete` allows.
+
+# ---------------------------------------------------------------------------
+# A find that does not delete — by far the common case
+# ---------------------------------------------------------------------------
+
+[[case]]
+description = "a plain walk"
+command = "find . -name '*.log' -print"
+expected = "allow"
+
+[[case]]
+description = "a walk with no action at all"
+command = "find . -type f -name '*.txt'"
+expected = "allow"
+
+[[case]]
+description = "-delete is not a substring match: a filename may end in .deleted"
+command = "find . -name '*.deleted'"
+expected = "allow"
+
+[[case]]
+description = "a depth-limited directory listing"
+command = "find . -maxdepth 2 -type d"
+expected = "allow"
+
+[[case]]
+description = "-prune, the shape every repo-wide search uses"
+command = "find . -name node_modules -prune -o -print"
+expected = "allow"
+
+[[case]]
+description = "-exec with a verb that is not a delete"
+command = "find . -type f -exec chmod 644 {} ;"
+expected = "allow"
+
+[[case]]
+description = "-exec grep: the word rm appears, in an argument, not in command position"
+command = "find . -exec grep -l rm {} ;"
+expected = "allow"
+
+[[case]]
+description = "xargs into a verb that is not a delete, carrying rm as its pattern"
+command = "find . -name '*.log' | xargs grep rm"
+expected = "allow"
+
+[[case]]
+description = "find named as data to another command"
+command = "echo find . -delete"
+expected = "allow"
+
+[[case]]
+description = "a commit message that talks about the command"
+command = 'git commit -m "use find . -delete next time"'
+expected = "allow"
+
+[[case]]
+description = "searching the docs for the command"
+command = 'grep -rn "find . -delete" docs/'
+expected = "allow"
+
+# ---------------------------------------------------------------------------
+# A find that deletes under a temp root — scratch work, allowed by design
+# ---------------------------------------------------------------------------
+
+[[case]]
+description = "-delete under /tmp"
+command = "find /tmp/scratch -type f -delete"
+expected = "allow"
+
+[[case]]
+description = "-delete rooted at /tmp itself"
+command = "find /tmp -name '*.log' -delete"
+expected = "allow"
+
+[[case]]
+description = "-delete with no expression between the temp root and the action"
+command = "find /tmp/scratch -delete"
+expected = "allow"
+
+[[case]]
+description = "the empty-directory sweep, the most common legitimate -delete"
+command = "find /tmp -type d -empty -delete"
+expected = "allow"
+
+[[case]]
+description = "-delete under /var/tmp"
+command = "find /var/tmp/x -delete"
+expected = "allow"
+
+[[case]]
+description = "-delete under $TMPDIR"
+command = "find $TMPDIR/build -type f -delete"
+expected = "allow"
+
+[[case]]
+description = "double-quoted $TMPDIR, which core.filesystem also allows for rm -rf"
+command = 'find "$TMPDIR/build" -type f -delete'
+expected = "allow"
+
+[[case]]
+description = "the xargs pipeline under a temp root"
+command = "find /tmp/x -print0 | xargs -0 rm -f"
+expected = "allow"

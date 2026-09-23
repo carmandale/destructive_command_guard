@@ -95,6 +95,66 @@ command = "rm -rf /var/log"
 expected_decision = "deny"
 expected_log = { decision = "deny", mode = "deny", pack_id = "core.filesystem", pattern_name = "rm-rf-general", rule_id = "core.filesystem:rm-rf-general", source = "pack", reason_contains = "rm -rf is destructive" }
 
+# find: the same act as rm -rf, spelled as a walk (.agent-config-xzx79).
+# Every one of these ALLOWED before core.find existed, tracing
+# `quick-rejected (no keywords)` — no pack claimed the word `find`.
+
+[[case]]
+id = "find.safe.walk"
+category = "find.safe"
+input_kind = "command"
+command = "find . -name '*.log' -print"
+expected_decision = "allow"
+expected_log = { decision = "allow" }
+
+[[case]]
+id = "find.safe.tmp-delete"
+category = "find.safe.tmp"
+input_kind = "command"
+command = "find /tmp/build -type f -delete"
+expected_decision = "allow"
+expected_log = { decision = "allow" }
+
+[[case]]
+id = "find.safe.tmpdir-brace-delete"
+category = "find.safe.tmp"
+input_kind = "command"
+command = "find ${TMPDIR}/build -type f -delete"
+expected_decision = "allow"
+expected_log = { decision = "allow" }
+
+[[case]]
+id = "find.safe.exec-not-a-delete"
+category = "find.safe"
+input_kind = "command"
+command = "find . -type f -exec chmod 644 {} ;"
+expected_decision = "allow"
+expected_log = { decision = "allow" }
+
+[[case]]
+id = "find.destructive.delete"
+category = "find.destructive"
+input_kind = "command"
+command = "find /var/log -type f -delete"
+expected_decision = "deny"
+expected_log = { decision = "deny", mode = "deny", pack_id = "core.find", pattern_name = "find-delete-outside-temp", rule_id = "core.find:find-delete-outside-temp", source = "pack", reason_contains = "find -delete removes every file" }
+
+[[case]]
+id = "find.destructive.exec-rm"
+category = "find.destructive"
+input_kind = "command"
+command = "find /var/log -type f -exec rm -f {} ;"
+expected_decision = "deny"
+expected_log = { decision = "deny", mode = "deny", pack_id = "core.find", pattern_name = "find-exec-delete-outside-temp", rule_id = "core.find:find-exec-delete-outside-temp", source = "pack", reason_contains = "find -exec rm runs a delete" }
+
+[[case]]
+id = "find.destructive.xargs-rm"
+category = "find.destructive"
+input_kind = "command"
+command = "find /var/log -type f -print0 | xargs -0 rm -f"
+expected_decision = "deny"
+expected_log = { decision = "deny", mode = "deny", pack_id = "core.find", pattern_name = "find-xargs-delete-outside-temp", rule_id = "core.find:find-xargs-delete-outside-temp", source = "pack", reason_contains = "find piped into xargs rm" }
+
 [[case]]
 id = "wrapper.sudo.git-reset-hard"
 category = "wrappers.sudo"

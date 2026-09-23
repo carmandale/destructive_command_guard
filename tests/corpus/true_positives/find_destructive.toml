@@ -1,0 +1,133 @@
+# True positives: find walks that delete, outside a temp root.
+#
+# `.agent-config-xzx79` (2026-09-23). Before `core.find` existed, every row in
+# this file traced `quick-rejected (no keywords)` and ALLOWED, because no pack
+# claimed the word `find` — while `rm -rf` on the same path DENIED. The rule was
+# named for the spelling, not the act.
+#
+# One row per shape the bead named, then the shapes that reach the same act by a
+# route the first three do not cover.
+
+# ---------------------------------------------------------------------------
+# Shape 1 — find ... -delete
+# ---------------------------------------------------------------------------
+
+[[case]]
+description = "find -delete on a protected path (the bead's reproducer: deletes every file in a git repo)"
+command = "find /Users/dalecarman/dev/agent-observer -type f -delete"
+expected = "deny"
+rule_id = "core.find:find-delete-outside-temp"
+
+[[case]]
+description = "find -delete rooted at the working directory"
+command = "find . -type f -delete"
+expected = "deny"
+rule_id = "core.find:find-delete-outside-temp"
+
+[[case]]
+description = "find -delete narrowed by -name is still a recursive bulk delete"
+command = "find . -name '*.mjs' -delete"
+expected = "deny"
+rule_id = "core.find:find-delete-outside-temp"
+
+[[case]]
+description = "find -delete under a tilde path"
+command = "find ~/dev/agent-observer -type f -delete"
+expected = "deny"
+rule_id = "core.find:find-delete-outside-temp"
+
+# ---------------------------------------------------------------------------
+# Shape 2 — find ... -exec rm
+# ---------------------------------------------------------------------------
+
+[[case]]
+description = "find -exec rm -f: no -rf anywhere, so no rm rule sees it"
+command = "find . -type f -exec rm -f {} ;"
+expected = "deny"
+rule_id = "core.find:find-exec-delete-outside-temp"
+
+[[case]]
+description = "find -execdir reaches the same outcome as -exec"
+command = "find . -type f -execdir rm -f {} ;"
+expected = "deny"
+rule_id = "core.find:find-exec-delete-outside-temp"
+
+[[case]]
+description = "find -ok prompts per file, which on a large tree is answered with a held-down y"
+command = "find . -type f -ok rm {} ;"
+expected = "deny"
+rule_id = "core.find:find-exec-delete-outside-temp"
+
+[[case]]
+description = "find -exec shred is unlinking with extra passes"
+command = "find /Users/dalecarman -name '*.key' -exec shred -u {} ;"
+expected = "deny"
+rule_id = "core.find:find-exec-delete-outside-temp"
+
+# ---------------------------------------------------------------------------
+# Shape 3 — find ... | xargs ... rm
+# ---------------------------------------------------------------------------
+
+[[case]]
+description = "find -print0 piped into xargs -0 rm -f (the bead's third reproducer)"
+command = "find /Users/dalecarman/dev/agent-observer -name '*.swift' -print0 | xargs -0 rm -f"
+expected = "deny"
+rule_id = "core.find:find-xargs-delete-outside-temp"
+
+[[case]]
+description = "the bare pipeline, no flags on either side"
+command = "find . -type f | xargs rm"
+expected = "deny"
+rule_id = "core.find:find-xargs-delete-outside-temp"
+
+[[case]]
+description = "an intermediate pipeline stage does not break the chain"
+command = "find . -type f | grep foo | xargs rm -f"
+expected = "deny"
+rule_id = "core.find:find-xargs-delete-outside-temp"
+
+# ---------------------------------------------------------------------------
+# Routes around the three shapes
+# ---------------------------------------------------------------------------
+
+[[case]]
+description = "a wrapper in front of find does not hide the walk"
+command = "sudo find /etc -type f -delete"
+expected = "deny"
+rule_id = "core.find:find-delete-outside-temp"
+
+[[case]]
+description = "an absolute path to find does not hide the walk"
+command = "/usr/bin/find /etc -type f -delete"
+expected = "deny"
+rule_id = "core.find:find-delete-outside-temp"
+
+[[case]]
+description = "a temp root traversed out of with .. is not a temp root"
+command = "find /tmp/../etc -type f -delete"
+expected = "deny"
+rule_id = "core.find:find-delete-outside-temp"
+
+[[case]]
+description = "a second root behind a temp one does not inherit the temp exemption"
+command = "find /tmp/a /etc -type f -delete"
+expected = "deny"
+rule_id = "core.find:find-delete-outside-temp"
+
+[[case]]
+description = "a find after a separator is judged, not skipped"
+command = "echo start && find /etc -type f -delete"
+expected = "deny"
+rule_id = "core.find:find-delete-outside-temp"
+
+[[case]]
+description = "a -delete with work appended after it is still a -delete"
+command = "find . -type f -delete && echo ok"
+expected = "deny"
+rule_id = "core.find:find-delete-outside-temp"
+
+[[case]]
+description = "the delete action reached through -o rather than by juxtaposition"
+command = "find . -name x -o -name y -delete"
+expected = "deny"
+rule_id = "core.find:find-delete-outside-temp"
