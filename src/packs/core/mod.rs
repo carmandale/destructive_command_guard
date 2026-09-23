@@ -6,6 +6,8 @@
 //! - Git commands that rewrite history
 //! - Git commands that destroy stashes
 //! - Filesystem commands that recursively delete outside temp directories
+//! - `find` walks that delete outside temp directories
 
 pub mod filesystem;
+pub mod find;
 pub mod git;

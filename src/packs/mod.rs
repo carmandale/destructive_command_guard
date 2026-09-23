@@ -876,13 +876,14 @@ impl EnabledKeywordIndex {
 
 /// Static pack entries - metadata is available without instantiating packs.
 /// Packs are built lazily on first access.
-static PACK_ENTRIES: [PackEntry; 82] = [
+static PACK_ENTRIES: [PackEntry; 83] = [
     PackEntry::new("core.git", core::git::KEYWORDS, core::git::create_pack),
     PackEntry::new(
         "core.filesystem",
         core::filesystem::KEYWORDS,
         core::filesystem::create_pack,
     ),
+    PackEntry::new("core.find", core::find::KEYWORDS, core::find::create_pack),
     PackEntry::new(
         "storage.s3",
         storage::s3::KEYWORDS,
