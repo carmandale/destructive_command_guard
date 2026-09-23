@@ -6,6 +6,7 @@ This document describes packs in the `core` category.
 
 - [Core Git](#coregit)
 - [Core Filesystem](#corefilesystem)
+- [Core Find](#corefind)
 
 ---
 
@@ -148,6 +149,58 @@ To allowlist all rules from this pack (use with caution):
 ```toml
 [[allow]]
 rule = "core.filesystem:*"
+reason = "Your reason here"
+risk_acknowledged = true
+```
+
+---
+
+## Core Find
+
+**Pack ID:** `core.find`
+
+Protects against bulk recursive deletion driven by find, outside temp directories
+
+### Keywords
+
+Commands containing these keywords are checked against this pack:
+
+- `find`
+- `/find`
+
+### Safe Patterns (Allowed)
+
+These patterns match safe commands that are always allowed:
+
+| Pattern Name | Pattern |
+|--------------|----------|
+| `find-temp-root` | `find\s+(?:-[HLPEdsx]+\s+)*(?:(?:/tmp\|/var/tmp\|\$TMPDIR\|\$\{TMPDIR\}\|\$\{TMPDIR:-/tmp\}\|\$\{TMPDIR:-/var/tmp\})(?:/(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))[^\s;&\|]*)?\|"(?:\$TMPDIR\|\$\{TMPDIR\}\|\$\{TMPDIR:-/tmp\}\|\$\{TMPDIR:-/var/tmp\})(?:/(?!(?:[^"]*/)?\.\.(?:/\|"))[^"]*)?")(?:\s+-\|\s*$)` |
+
+### Destructive Patterns (Blocked)
+
+These patterns match potentially destructive commands:
+
+| Pattern Name | Reason | Severity |
+|--------------|--------|----------|
+| `find-delete-outside-temp` | find -delete removes every file the walk reaches. Outside a temp directory this is recursive deletion and requires human approval — ask the user to run it manually. | high |
+| `find-exec-delete-outside-temp` | find -exec rm runs a delete on every file the walk reaches. Outside a temp directory this is recursive deletion and requires human approval — ask the user to run it manually. | high |
+| `find-xargs-delete-outside-temp` | find piped into xargs rm deletes every file the walk reaches. Outside a temp directory this is recursive deletion and requires human approval — ask the user to run it manually. | high |
+
+### Allowlist Guidance
+
+To allowlist a specific rule from this pack, add to your allowlist:
+
+```toml
+[[allow]]
+rule = "core.find:<pattern-name>"
+reason = "Your reason here"
+```
+
+To allowlist all rules from this pack (use with caution):
+
+```toml
+[[allow]]
+rule = "core.find:*"
 reason = "Your reason here"
 risk_acknowledged = true
 ```

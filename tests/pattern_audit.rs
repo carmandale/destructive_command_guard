@@ -41,6 +41,12 @@ fn test_audit_backtracking_requirements() {
                 "rm-force-recursive-tmpdir-brace",
             ]),
         ),
+        // core.find's ONE safe pattern, and only that one. Its `..`-traversal guard
+        // is `core.filesystem`'s lookahead verbatim, so it inherits the engine
+        // along with the semantics. The three destructive rules carry no
+        // lookaround at all and stay linear, which is what a rule that runs on
+        // every `find` on the box should be (.agent-config-xzx79).
+        ("core.find", HashSet::from(["find-temp-root"])),
         // checkout-ref-discard, restore-worktree and push-force-long left this set when
         // their lookahead was spelled out (.agent-config-qv9dy): on the backtracking
         // engine their option skipper ran out of backtracks on long harmless scripts.

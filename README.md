@@ -167,6 +167,7 @@ dcg uses a modular "pack" system to organize destructive command patterns by cat
 
 ### Core Packs (enabled by default)
 - `core.filesystem` - Protects against dangerous rm -rf commands outside temp directories
+- `core.find` - Protects against bulk recursive deletion driven by find (`-delete`, `-exec rm`, `| xargs rm`) outside temp directories
 - `core.git` - Protects against destructive git commands that can lose uncommitted work, rewrite history, or destroy stashes
 
 **Common packs enabled by default:**

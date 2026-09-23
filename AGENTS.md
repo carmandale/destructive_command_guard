@@ -608,6 +608,18 @@ DCG_BYPASS=1 <command>
 | `core.filesystem:rm-rf-root` | `rm -rf /`, `rm -rf ~` | Critical |
 | `core.filesystem:rm-rf-general` | `rm -rf` outside temp dirs | High |
 
+### Core Find Patterns (Always Enabled)
+
+The same act as `rm -rf`, spelled with a walk. Every rule here requires a
+deletion verb, so a `find` that only walks, prints or greps never reaches them.
+The temp carve-out is character-for-character `core.filesystem`'s.
+
+| Pattern ID | Blocks | Severity |
+|------------|--------|----------|
+| `core.find:find-delete-outside-temp` | `find <path> … -delete` outside temp dirs | High |
+| `core.find:find-exec-delete-outside-temp` | `find <path> … -exec rm …` (also `-execdir`, `-ok`, `-okdir`) | High |
+| `core.find:find-xargs-delete-outside-temp` | `find <path> … \| xargs … rm` | High |
+
 ### Safe Patterns (Whitelist - Always Allowed)
 
 | Pattern | Command | Why Safe |
@@ -617,6 +629,7 @@ DCG_BYPASS=1 <command>
 | `git-restore-staged` | `git restore --staged <file>` | Only unstages, doesn't discard |
 | `git-clean-dry-run` | `git clean -n`, `git clean --dry-run` | Preview only |
 | `rm-tmp` | `rm -rf /tmp/*`, `/var/tmp/*` | Temp directory cleanup |
+| `find-temp-root` | `find /tmp/x … -delete`, `$TMPDIR`, `/var/tmp` | Same temp set as `rm-tmp` |
 
 ### Pack Enable/Disable Examples
 

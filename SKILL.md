@@ -109,6 +109,7 @@ DCG uses a modular "pack" system to organize patterns by category:
 |------|-------------|
 | `core.git` | Destructive git commands |
 | `core.filesystem` | Dangerous rm -rf outside temp |
+| `core.find` | find walks that delete outside temp |
 
 ### Database Packs
 
