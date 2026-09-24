@@ -48,9 +48,38 @@
 //! | 5 | widen the safe pattern's tail from `(?:\s+-\|\s*$)` to `(?:\s\|$)` | `a_second_root_behind_a_temp_one_is_not_exempt` |
 //! | 6 | drop the double-quoted arm of the safe pattern | `temp_roots_agree_with_the_rm_pack` |
 //!
+//! # MUTANTS for the resolved per-user temp root (`.agent-config-o4e8j`)
+//!
+//! Same discipline, 2026-09-24, against `--lib` plus this harness. Each row's
+//! anchor count was asserted as exactly 1 before the edit and the new token
+//! grepped after, and the PANIC TEXT was read rather than the test name --
+//! rows 1, 2, 3 and 6 all land inside the one big
+//! `the_resolved_temp_root_agrees_with_the_rm_pack`, so a name alone would not
+//! say which assertion fired.
+//!
+//! | # | mutant | kills, by the assertion that fired |
+//! |---|--------|------------------------------------|
+//! | 1 | `path_is_resolved_temp` asked about a sentinel instead of the path | the `mktemp -d` row: `rm -rf <resolved>/codex-workflow/run-1` denied as `rm-rf-root-home` |
+//! | 2 | build `find_temp_root_pattern` with `&[]` resolved roots | the same path in the find spelling: denied as `find-delete-outside-temp` |
+//! | 3 | separator after the root no longer required (`trim_start_matches` for `strip_prefix`) | the sibling row: `<resolved>OTHER/run-1` ALLOWED when it must deny |
+//! | 4 | drop the two-segment floor in `temp_roots_from_tmpdir_value` | `a_degenerate_tmpdir_value_admits_nothing` -- `/var` becomes a scratch prefix |
+//! | 5 | `tmpdir_value_ends_with_slash` reduced to `is_some()` | `a_tmpdir_without_a_trailing_slash_shuts_the_no_separator_gate` |
+//! | 6 | drop the `..` guard in `path_is_resolved_temp` | the traversal row: `<resolved>/../C/run-1` ALLOWED when it must deny |
+//! | 7 | never derive the `/private` twin | `a_macos_tmpdir_value_yields_both_members_of_the_private_pair` |
+//!
+//! Row 3 is the one worth noting: its first spelling shared an anchor with a
+//! unit test and so applied to neither site, and a mutant that never applies
+//! reads exactly like a mutant nothing catches.
+//!
 //! The raw runner output for each row is on the bead's close reason, not here.
 
-#![allow(clippy::doc_markdown, clippy::uninlined_format_args)]
+// The `${TMPDIR}` in these command literals is shell text under test, not a
+// format argument.
+#![allow(
+    clippy::doc_markdown,
+    clippy::literal_string_with_formatting_args,
+    clippy::uninlined_format_args
+)]
 
 use std::io::Write;
 use std::process::Stdio;
@@ -66,7 +95,29 @@ mod spawn;
 /// was that both readings came from `dcg explain` and nobody had proved the
 /// PreToolUse hook agrees. It does, and this is where that stays proved.
 fn hook(command: &str) -> Option<(String, String)> {
+    hook_with_tmpdir(command, None)
+}
+
+/// The per-user temp directory the resolved-root rows are written against.
+///
+/// A literal, not this machine's real `$TMPDIR`: `spawn::dcg` clears the
+/// environment, so the child sees no `TMPDIR` unless a test hands it one, and a
+/// test that read the developer's own value would assert a different thing on
+/// every box. It ends in `/` because the macOS value does, which is what opens
+/// the no-separator gate in
+/// `core::filesystem::tmpdir_value_ends_with_slash`. It does not need to exist
+/// on disk; dcg judges the text of the command, never the filesystem.
+const FIXED_TMPDIR: &str = "/var/folders/2j/o4e8jtest0000gn/T/";
+
+/// [`FIXED_TMPDIR`] without its trailing slash — how a path under it is spelled.
+const FIXED_TMPDIR_ROOT: &str = "/var/folders/2j/o4e8jtest0000gn/T";
+
+/// The deny's rule id, or `None` for an allow, with `TMPDIR` optionally set.
+fn hook_with_tmpdir(command: &str, tmpdir: Option<&str>) -> Option<(String, String)> {
     let (mut cmd, sandbox) = spawn::dcg();
+    if let Some(tmpdir) = tmpdir {
+        cmd.env("TMPDIR", tmpdir);
+    }
     let input = payload::pre_tool_use(sandbox.root(), command).to_string();
     let mut child = cmd
         .stdin(Stdio::piped())
@@ -118,6 +169,38 @@ fn assert_denied_by(command: &str, rule_id: &str, why: &str) {
 fn assert_allowed(command: &str, why: &str) {
     if let Some((rule, stdout)) = hook(command) {
         panic!("DENIED as {rule:?}, want allow ({why}): {command:?}\n{stdout}");
+    }
+}
+
+/// [`assert_allowed`] with `TMPDIR` set to [`FIXED_TMPDIR`].
+fn assert_allowed_under_tmpdir(command: &str, why: &str) {
+    assert_allowed_with_tmpdir(command, FIXED_TMPDIR, why);
+}
+
+/// [`assert_denied_by`] with `TMPDIR` set to [`FIXED_TMPDIR`].
+fn assert_denied_by_under_tmpdir(command: &str, rule_id: &str, why: &str) {
+    assert_denied_by_with_tmpdir(command, FIXED_TMPDIR, rule_id, why);
+}
+
+/// [`assert_allowed`] with `TMPDIR` set to a value the caller chooses.
+fn assert_allowed_with_tmpdir(command: &str, tmpdir: &str, why: &str) {
+    if let Some((rule, stdout)) = hook_with_tmpdir(command, Some(tmpdir)) {
+        panic!(
+            "DENIED as {rule:?}, want allow ({why}) under TMPDIR={tmpdir:?}: {command:?}\n{stdout}"
+        );
+    }
+}
+
+/// [`assert_denied_by`] with `TMPDIR` set to a value the caller chooses.
+fn assert_denied_by_with_tmpdir(command: &str, tmpdir: &str, rule_id: &str, why: &str) {
+    match hook_with_tmpdir(command, Some(tmpdir)) {
+        Some((rule, stdout)) => assert_eq!(
+            rule, rule_id,
+            "denied, but by the wrong rule ({why}) under TMPDIR={tmpdir:?}: {command:?}\n{stdout}"
+        ),
+        None => {
+            panic!("ALLOWED, want a deny by {rule_id} ({why}) under TMPDIR={tmpdir:?}: {command:?}")
+        }
     }
 }
 
@@ -234,6 +317,232 @@ fn temp_roots_agree_with_the_rm_pack() {
         "find /Users/dalecarman/dev/agent-observer -type f -delete",
         "core.find:find-delete-outside-temp",
         "and the same path, the same answer, in the find spelling",
+    );
+}
+
+/// The resolved per-user temp root, asked in both spellings, both arms.
+///
+/// `.agent-config-o4e8j`: `/var/folders/<2>/<hash>/T/` is what `mktemp -d`
+/// prints, so an agent that makes scratch the standard way holds a path that
+/// used to DENY while the `$TMPDIR` spelling of the SAME directory ALLOWED. This
+/// is the coupling row for that fix — one `TMPDIR`, both packs, and the refusals
+/// that bound it.
+///
+/// Every row runs with `TMPDIR` set to [`FIXED_TMPDIR`], because
+/// `spawn::dcg` clears the environment; the assertions therefore read the same
+/// on any machine.
+#[test]
+fn the_resolved_temp_root_agrees_with_the_rm_pack() {
+    // ---- ALLOW: the resolved root, both members of the macOS /private pair.
+    for root in [
+        format!("{FIXED_TMPDIR_ROOT}/codex-workflow/run-1"),
+        format!("/private{FIXED_TMPDIR_ROOT}/codex-workflow/run-1"),
+    ] {
+        assert_allowed_under_tmpdir(
+            &format!("rm -rf {root}"),
+            "the directory mktemp -d hands out is scratch by its own name",
+        );
+        assert_allowed_under_tmpdir(
+            &format!("find {root} -type f -delete"),
+            "a path rm -rf allows is a path find -delete allows",
+        );
+    }
+
+    // ---- ALLOW: the ${TMPDIR:?} spellings, with and without a separator.
+    // `${TMPDIR:?}` is what .claude/rules/bash-safety.md prescribes for a
+    // delete target, and macOS's value already ends in `/`, so the no-separator
+    // form is the one that actually gets written.
+    for root in [
+        "${TMPDIR:?}/run-1",
+        "${TMPDIR:?}run-1",
+        "${TMPDIR}run-1",
+        "\"${TMPDIR:?}/run-1\"",
+        "\"${TMPDIR:?}run-1\"",
+        "\"${TMPDIR}run-1\"",
+    ] {
+        assert_allowed_under_tmpdir(
+            &format!("rm -rf {root}"),
+            "the guard spelling bash-safety.md asks for",
+        );
+        assert_allowed_under_tmpdir(
+            &format!("find {root} -type f -delete"),
+            "and the same spelling in the find arm",
+        );
+    }
+
+    // ---- DENY: everything the carve-out must NOT reach. Each row is a way the
+    // prefix test could have been written too loosely.
+    let refusals: &[(String, &str)] = &[
+        (
+            "/var/folders".to_string(),
+            "the shared parent of every user's temp dir is nobody's scratch",
+        ),
+        (
+            "/var/folders/2j/o4e8jtest0000gn".to_string(),
+            "the per-user folder ABOVE T holds the caches too",
+        ),
+        (
+            "/var/folders/ab/someoneelse0000gn/T/run-1".to_string(),
+            "another user's hash does not match this user's prefix",
+        ),
+        (
+            format!("{FIXED_TMPDIR_ROOT}OTHER/run-1"),
+            "a sibling that merely shares the prefix is not inside it",
+        ),
+        (
+            format!("{FIXED_TMPDIR_ROOT}/../C/run-1"),
+            "a traversal out of the root is not in the root",
+        ),
+    ];
+    for (path, why) in refusals {
+        assert_denied_by_under_tmpdir(
+            &format!("rm -rf {path}"),
+            "core.filesystem:rm-rf-root-home",
+            why,
+        );
+        assert_denied_by_under_tmpdir(
+            &format!("find {path} -type f -delete"),
+            "core.find:find-delete-outside-temp",
+            why,
+        );
+    }
+
+    // ---- DENY: the opaque variable, which is the whole reason the literal had
+    // to be named. dcg does not expand variables, so `$RUN_DIR` is never
+    // scratch however the directory it holds is spelled — and the bead requires
+    // this stay true, because the block it earns once stopped a delete that
+    // would have taken peers' live clones.
+    assert_denied_by_under_tmpdir(
+        "rm -rf \"$RUN_DIR\"",
+        "core.filesystem:rm-rf-general",
+        "an opaque variable is not a temp root",
+    );
+    assert_denied_by_under_tmpdir(
+        "find \"$RUN_DIR\" -type f -delete",
+        "core.find:find-delete-outside-temp",
+        "and it is not one in the find spelling either",
+    );
+
+    // ---- DENY: the controls. Without these a carve-out that matched anything
+    // would pass every ALLOW row above and nothing here would say so.
+    assert_denied_by_under_tmpdir(
+        "rm -rf /",
+        "core.filesystem:rm-rf-root-home",
+        "the root filesystem, with TMPDIR set",
+    );
+    assert_denied_by_under_tmpdir(
+        "rm -rf ~",
+        "core.filesystem:rm-rf-root-home",
+        "the home directory, with TMPDIR set",
+    );
+    assert_denied_by_under_tmpdir(
+        "rm -rf /Users/dalecarman/dev/agent-observer",
+        "core.filesystem:rm-rf-root-home",
+        "an ordinary repo path, with TMPDIR set",
+    );
+    assert_denied_by_under_tmpdir(
+        "find /Users/dalecarman/dev/agent-observer -type f -delete",
+        "core.find:find-delete-outside-temp",
+        "the same repo path in the find spelling, with TMPDIR set",
+    );
+}
+
+/// A `TMPDIR` that does not end in `/` shuts the no-separator gate.
+///
+/// `${TMPDIR}run-1` and `${TMPDIR:?}run-1` are only a path under the temp root
+/// because the macOS value ends in `/`. Given `/var/folders/<..>/T` instead, the
+/// same spelling expands to `/var/folders/<..>/Trun-1`, which is inside nothing
+/// -- and with `TMPDIR` unset, `${TMPDIR}src` expands to a RELATIVE `src`, so a
+/// recursive force delete written that way inside a repo would take the repo's
+/// own `src`. That is the failure this gate exists to prevent, so it is read
+/// here through the wire rather than asserted in the pattern builder, which is
+/// handed the flag directly and so cannot notice a gate wired to always-true.
+#[test]
+fn a_tmpdir_without_a_trailing_slash_shuts_the_no_separator_gate() {
+    const NO_SLASH: &str = "/var/folders/2j/o4e8jtest0000gn/T";
+
+    for command in ["rm -rf ${TMPDIR}run-1", "rm -rf ${TMPDIR:?}run-1"] {
+        assert_denied_by_with_tmpdir(
+            command,
+            NO_SLASH,
+            "core.filesystem:rm-rf-general",
+            "no trailing slash, so this spelling does not name a path under the root",
+        );
+    }
+    for command in [
+        "find ${TMPDIR}run-1 -delete",
+        "find ${TMPDIR:?}run-1 -delete",
+    ] {
+        assert_denied_by_with_tmpdir(
+            command,
+            NO_SLASH,
+            "core.find:find-delete-outside-temp",
+            "and the find arm shuts with it -- the two packs share the one answer",
+        );
+    }
+
+    // The controls, same TMPDIR. The separator-carrying spellings never depended
+    // on the value, so these prove the denials above are the gate closing and
+    // not the carve-out having died.
+    assert_allowed_with_tmpdir(
+        "rm -rf ${TMPDIR:?}/run-1",
+        NO_SLASH,
+        "the spelling that carries its own separator is unconditional",
+    );
+    assert_allowed_with_tmpdir(
+        "find ${TMPDIR:?}/run-1 -delete",
+        NO_SLASH,
+        "and so is its find spelling",
+    );
+    // And with a trailing slash the very same commands pass, which is the gate
+    // opening rather than the rows above being refused for some other reason.
+    assert_allowed_with_tmpdir(
+        "rm -rf ${TMPDIR}run-1",
+        FIXED_TMPDIR,
+        "the identical command, one trailing slash different",
+    );
+    assert_allowed_with_tmpdir(
+        "find ${TMPDIR}run-1 -delete",
+        FIXED_TMPDIR,
+        "the identical find command, one trailing slash different",
+    );
+}
+
+/// With no `TMPDIR` at all, nothing under `/var/folders` is scratch.
+///
+/// The resolved-root carve-out is derived from the environment, so a missing or
+/// degenerate value must admit NOTHING rather than admit a prefix near the root.
+/// This is the fail-closed reading, and it is also why every row in
+/// [`the_resolved_temp_root_agrees_with_the_rm_pack`] has to set `TMPDIR` for
+/// itself.
+#[test]
+fn with_no_tmpdir_the_resolved_carve_out_admits_nothing() {
+    for command in [
+        format!("rm -rf {FIXED_TMPDIR_ROOT}/run-1"),
+        format!("rm -rf /private{FIXED_TMPDIR_ROOT}/run-1"),
+    ] {
+        assert_denied_by(
+            &command,
+            "core.filesystem:rm-rf-root-home",
+            "TMPDIR unset: the literal is just another absolute path",
+        );
+    }
+    assert_denied_by(
+        &format!("find {FIXED_TMPDIR_ROOT}/run-1 -type f -delete"),
+        "core.find:find-delete-outside-temp",
+        "TMPDIR unset: and the find spelling agrees",
+    );
+
+    // The control: the spellings that never needed the environment still pass,
+    // so the rows above are the carve-out being absent and not the pack being
+    // dead.
+    assert_allowed(
+        "rm -rf /tmp/run-1",
+        "the literal temp root is unconditional",
+    );
+    assert_allowed(
+        "find /tmp/run-1 -type f -delete",
+        "and so is its find spelling",
     );
 }
 

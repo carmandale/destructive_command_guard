@@ -2,7 +2,10 @@
 //!
 //! This includes patterns for:
 //! - rm -rf outside temp directories (blocked)
-//! - rm -rf in /tmp, /var/tmp, $TMPDIR (allowed)
+//! - rm -rf in /tmp, /var/tmp, $TMPDIR (allowed) -- including the directory the
+//!   live $TMPDIR resolves to, see `resolved_temp_roots`
+
+use std::sync::OnceLock;
 
 use crate::packs::{DestructivePattern, Pack, PatternSuggestion, Platform, SafePattern, Severity};
 use crate::{destructive_pattern, safe_pattern};
@@ -411,6 +414,118 @@ fn path_is_safe_for_style(path: &PathToken<'_>, style: RmFlagStyle) -> bool {
     }
 }
 
+/// The absolute temp roots the live `TMPDIR` actually names, WITHOUT a trailing
+/// slash, so each one slots into the same `<root>/<rest>` shape `/tmp` uses.
+///
+/// `/tmp`, `/var/tmp` and the `$TMPDIR` spellings are literals dcg recognises
+/// without knowing the machine it runs on. The directory macOS actually hands
+/// out is not: it is `/var/folders/<2>/<hash>/T/`, which is exactly what
+/// `mktemp -d` prints, so an agent that makes scratch the standard way holds a
+/// path no literal here could match. Measured 2026-09-24 on the installed
+/// binary, a recursive force delete of `/var/folders/<..>/T/tmp.X` DENIED as
+/// `rm-rf-root-home` -- a rule named for something that path is not -- while the
+/// `"$TMPDIR/tmp.X"` spelling of the SAME directory ALLOWED
+/// (`.agent-config-o4e8j`).
+///
+/// Resolving the variable closes that spelling gap and grants nothing new:
+/// every path admitted here is already admitted under its `$TMPDIR` spelling.
+/// `/var/folders` itself, another user's hash, and an opaque `$VAR` all still
+/// fail the prefix test, and the root without a trailing `/` is refused exactly
+/// as the bare `/tmp` is.
+///
+/// Both members of the macOS pair are returned, because `/var` is a symlink to
+/// `/private/var` and the same directory is handed around in either spelling
+/// (`pending_exceptions.rs` documents that pair for its own path comparison).
+///
+/// Empty when `TMPDIR` is unset, relative, or shallower than two segments, so a
+/// missing or degenerate environment admits nothing rather than admitting a
+/// prefix near the root. That is also why the integration harness sees no
+/// resolved root unless it sets `TMPDIR` itself: `tests/common/spawn.rs` clears
+/// the environment.
+#[must_use]
+pub fn resolved_temp_roots() -> &'static [String] {
+    static ROOTS: OnceLock<Vec<String>> = OnceLock::new();
+    ROOTS.get_or_init(|| {
+        std::env::var_os("TMPDIR")
+            .map(|raw| temp_roots_from_tmpdir_value(&raw.to_string_lossy()))
+            .unwrap_or_default()
+    })
+}
+
+/// [`resolved_temp_roots`] without the environment, so the refusals are testable.
+///
+/// A `OnceLock` reads `TMPDIR` once per process, which a unit test cannot vary.
+/// Everything that decides whether a value is usable lives here instead.
+fn temp_roots_from_tmpdir_value(value: &str) -> Vec<String> {
+    let trimmed = value.trim_end_matches('/');
+    // Absolute, and at least two segments deep. `/`, `/var` and a relative value
+    // are all refused rather than admitted as a prefix near the root.
+    if !trimmed.starts_with('/') || trimmed.split('/').filter(|part| !part.is_empty()).count() < 2 {
+        return Vec::new();
+    }
+    let twin = trimmed
+        .strip_prefix("/private/var/")
+        .map(|rest| format!("/var/{rest}"))
+        .or_else(|| {
+            trimmed
+                .strip_prefix("/var/")
+                .map(|rest| format!("/private/var/{rest}"))
+        });
+    let mut roots = vec![trimmed.to_string()];
+    if let Some(twin) = twin {
+        if twin != roots[0] {
+            roots.push(twin);
+        }
+    }
+    roots
+}
+
+/// Whether the live `TMPDIR` ends in `/`, which is what decides one spelling.
+///
+/// `${TMPDIR:?}tmp.X` and `${TMPDIR}tmp.X` carry no separator of their own,
+/// because the macOS value already ends in one -- and `${TMPDIR:?}` is the form
+/// `.claude/rules/bash-safety.md` prescribes for a delete target, so it is a
+/// spelling agents are told to write. They name a path under the temp root only
+/// when the live value really does end in `/`. Unset, `${TMPDIR}src` expands to
+/// a RELATIVE `src`, so a recursive force delete of `${TMPDIR}src` inside a repo
+/// would take that repo's `src`; `${TMPDIR:?}` would instead abort the shell,
+/// which is safe but not something to lean on for the other form. The spellings
+/// that carry their own `/` need no such gate.
+pub(crate) fn tmpdir_value_ends_with_slash() -> bool {
+    static ENDS: OnceLock<bool> = OnceLock::new();
+    *ENDS.get_or_init(|| {
+        std::env::var_os("TMPDIR").is_some_and(|value| value.to_string_lossy().ends_with('/'))
+    })
+}
+
+/// Whether `path` is a literal path under one of [`resolved_temp_roots`].
+///
+/// The `/` is required, so the root itself (`/var/folders/<..>/T`) is refused
+/// just as the bare `/tmp` is, and a sibling that merely shares the prefix
+/// (`/var/folders/<..>/TOTHER`) cannot pass.
+fn path_is_resolved_temp(path: &str) -> bool {
+    resolved_temp_roots().iter().any(|root| {
+        path.strip_prefix(root.as_str())
+            .and_then(|rest| rest.strip_prefix('/'))
+            .is_some_and(|rest| !has_dotdot_segment(rest))
+    })
+}
+
+/// The `${TMPDIR}`/`${TMPDIR:?}` forms written without a separator.
+///
+/// Gated on [`tmpdir_value_ends_with_slash`]; see there for why.
+fn path_is_safe_braced_tmpdir_without_separator(path: &str) -> bool {
+    if !tmpdir_value_ends_with_slash() {
+        return false;
+    }
+    for prefix in ["${TMPDIR:?}", "${TMPDIR}"] {
+        if let Some(rest) = path.strip_prefix(prefix) {
+            return !rest.is_empty() && !has_dotdot_segment(rest);
+        }
+    }
+    false
+}
+
 fn path_is_safe_unquoted(path: &str) -> bool {
     if let Some(rest) = path.strip_prefix("/tmp/") {
         return !has_dotdot_segment(rest);
@@ -424,6 +539,11 @@ fn path_is_safe_unquoted(path: &str) -> bool {
     if let Some(rest) = path.strip_prefix("${TMPDIR}/") {
         return !has_dotdot_segment(rest);
     }
+    // `${TMPDIR:?}` expands exactly as `${TMPDIR}` does, and aborts rather than
+    // expanding empty. It was denied until `.agent-config-o4e8j`.
+    if let Some(rest) = path.strip_prefix("${TMPDIR:?}/") {
+        return !has_dotdot_segment(rest);
+    }
     // Handle shell default value syntax: ${TMPDIR:-/tmp} and ${TMPDIR:-/var/tmp}
     // These always expand to a safe temp directory.
     if let Some(rest) = path.strip_prefix("${TMPDIR:-/tmp}/") {
@@ -432,7 +552,13 @@ fn path_is_safe_unquoted(path: &str) -> bool {
     if let Some(rest) = path.strip_prefix("${TMPDIR:-/var/tmp}/") {
         return !has_dotdot_segment(rest);
     }
-    false
+    // The resolved per-user temp dir, unquoted only -- a double-quoted `/tmp`
+    // literal is denied here, so the literal this mirrors is denied in quotes
+    // too.
+    if path_is_resolved_temp(path) {
+        return true;
+    }
+    path_is_safe_braced_tmpdir_without_separator(path)
 }
 
 fn path_is_safe_double_quoted(path: &str) -> bool {
@@ -442,6 +568,11 @@ fn path_is_safe_double_quoted(path: &str) -> bool {
     if let Some(rest) = path.strip_prefix("${TMPDIR}/") {
         return !has_dotdot_segment(rest);
     }
+    // `${TMPDIR:?}` expands exactly as `${TMPDIR}` does, and aborts rather than
+    // expanding empty. It was denied until `.agent-config-o4e8j`.
+    if let Some(rest) = path.strip_prefix("${TMPDIR:?}/") {
+        return !has_dotdot_segment(rest);
+    }
     // Handle shell default value syntax: ${TMPDIR:-/tmp} and ${TMPDIR:-/var/tmp}
     // These always expand to a safe temp directory.
     if let Some(rest) = path.strip_prefix("${TMPDIR:-/tmp}/") {
@@ -450,7 +581,7 @@ fn path_is_safe_double_quoted(path: &str) -> bool {
     if let Some(rest) = path.strip_prefix("${TMPDIR:-/var/tmp}/") {
         return !has_dotdot_segment(rest);
     }
-    false
+    path_is_safe_braced_tmpdir_without_separator(path)
 }
 
 fn has_dotdot_segment(path: &str) -> bool {
@@ -734,6 +865,80 @@ mod tests {
     use super::*;
     use crate::packs::Severity;
     use crate::packs::test_helpers::*;
+
+    #[test]
+    fn a_macos_tmpdir_value_yields_both_members_of_the_private_pair() {
+        let roots = temp_roots_from_tmpdir_value("/var/folders/2j/abc0000gn/T/");
+        assert_eq!(
+            roots,
+            vec![
+                "/var/folders/2j/abc0000gn/T".to_string(),
+                "/private/var/folders/2j/abc0000gn/T".to_string(),
+            ],
+            "the trailing slash is stripped and the /private twin is derived"
+        );
+    }
+
+    #[test]
+    fn a_private_tmpdir_value_yields_the_same_pair_the_other_way_round() {
+        let roots = temp_roots_from_tmpdir_value("/private/var/folders/2j/abc0000gn/T");
+        assert_eq!(
+            roots,
+            vec![
+                "/private/var/folders/2j/abc0000gn/T".to_string(),
+                "/var/folders/2j/abc0000gn/T".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_degenerate_tmpdir_value_admits_nothing() {
+        // Each of these, admitted, would make a path near the root scratch.
+        for value in ["", "/", "//", "/var", "/var/", "relative/tmp", "tmp"] {
+            assert!(
+                temp_roots_from_tmpdir_value(value).is_empty(),
+                "TMPDIR={value:?} must admit no prefix at all"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_var_tmpdir_value_gets_no_invented_twin() {
+        assert_eq!(
+            temp_roots_from_tmpdir_value("/Users/somebody/scratch"),
+            vec!["/Users/somebody/scratch".to_string()],
+            "the /private pair is a /var fact; nothing else gets a second spelling"
+        );
+    }
+
+    #[test]
+    fn a_resolved_root_needs_a_separator_and_a_real_prefix_match() {
+        // `path_is_resolved_temp` reads the process TMPDIR, so drive the same
+        // predicate the roots feed: strip + separator + dotdot.
+        let root = "/var/folders/2j/abc0000gn/T";
+        let under = |path: &str| {
+            path.strip_prefix(root)
+                .and_then(|rest| rest.strip_prefix('/'))
+                .is_some_and(|rest| !has_dotdot_segment(rest))
+        };
+        assert!(
+            under("/var/folders/2j/abc0000gn/T/tmp.X"),
+            "a path under it"
+        );
+        assert!(
+            under("/var/folders/2j/abc0000gn/T/"),
+            "the root, as /tmp/ is"
+        );
+        assert!(!under(root), "the bare root, as bare /tmp is refused");
+        assert!(
+            !under("/var/folders/2j/abc0000gn/TOTHER/x"),
+            "a sibling sharing the prefix is not inside it"
+        );
+        assert!(
+            !under("/var/folders/2j/abc0000gn/T/../C/x"),
+            "a traversal out of the root is not in the root"
+        );
+    }
 
     #[test]
     fn test_pack_creation() {

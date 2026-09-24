@@ -174,7 +174,7 @@ These patterns match safe commands that are always allowed:
 
 | Pattern Name | Pattern |
 |--------------|----------|
-| `find-temp-root` | `find\s+(?:-[HLPEdsx]+\s+)*(?:(?:/tmp\|/var/tmp\|\$TMPDIR\|\$\{TMPDIR\}\|\$\{TMPDIR:-/tmp\}\|\$\{TMPDIR:-/var/tmp\})(?:/(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))[^\s;&\|]*)?\|"(?:\$TMPDIR\|\$\{TMPDIR\}\|\$\{TMPDIR:-/tmp\}\|\$\{TMPDIR:-/var/tmp\})(?:/(?!(?:[^"]*/)?\.\.(?:/\|"))[^"]*)?")(?:\s+-\|\s*$)` |
+| `find-temp-root` | `find\s+(?:-[HLPEdsx]+\s+)*(?:(?:/tmp\|/var/tmp\|\$TMPDIR\|\$\{TMPDIR\}\|\$\{TMPDIR:\?\}\|\$\{TMPDIR:-/tmp\}\|\$\{TMPDIR:-/var/tmp\}\|<the resolved $TMPDIR>\|<the resolved $TMPDIR>)(?:/(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))[^\s;&\|]*)?\|\$\{TMPDIR(?::\?)?\}(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))[^\s;&\|]+\|"(?:\$TMPDIR\|\$\{TMPDIR\}\|\$\{TMPDIR:\?\}\|\$\{TMPDIR:-/tmp\}\|\$\{TMPDIR:-/var/tmp\})(?:/(?!(?:[^"]*/)?\.\.(?:/\|"))[^"]*)?"\|"\$\{TMPDIR(?::\?)?\}(?!(?:[^"]*/)?\.\.(?:/\|"))[^"]+")(?:\s+-\|\s*$)` |
 
 ### Destructive Patterns (Blocked)
 
