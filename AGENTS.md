@@ -628,8 +628,8 @@ The temp carve-out is character-for-character `core.filesystem`'s.
 | `git-checkout-orphan` | `git checkout --orphan <branch>` | Creates orphan branch |
 | `git-restore-staged` | `git restore --staged <file>` | Only unstages, doesn't discard |
 | `git-clean-dry-run` | `git clean -n`, `git clean --dry-run` | Preview only |
-| `rm-tmp` | `rm -rf /tmp/*`, `/var/tmp/*` | Temp directory cleanup |
-| `find-temp-root` | `find /tmp/x … -delete`, `$TMPDIR`, `/var/tmp` | Same temp set as `rm-tmp` |
+| `rm-tmp` | `rm -rf /tmp/*`, `/var/tmp/*`, `$TMPDIR`, `${TMPDIR}`, `${TMPDIR:?}`, and the directory the live `$TMPDIR` resolves to | Temp directory cleanup. The resolved root is `/var/folders/<2>/<hash>/T` plus its `/private` twin, recognised by SHAPE — `/var/folders` itself, another user's hash, the cache sibling `C`, and an unrecognised `TMPDIR` all admit nothing |
+| `find-temp-root` | the same set, in the `find` spelling | Same temp set as `rm-tmp`, held there by `temp_roots_agree_with_the_rm_pack`. One exception, pre-existing: `find` accepts a BARE temp root and `rm` refuses one |
 
 ### Pack Enable/Disable Examples
 

@@ -24,8 +24,17 @@
 //! The safe pattern carves out exactly the roots `core.filesystem` already
 //! treats as scratch -- `/tmp`, `/var/tmp`, `$TMPDIR`, `${TMPDIR}`,
 //! `${TMPDIR:?}`, the two `${TMPDIR:-...}` default forms, and the directory the
-//! live `$TMPDIR` resolves to -- and reuses its `..`-traversal guard verbatim. A path `rm -rf` denies is a path `find -delete` denies; a path
-//! `rm -rf` allows is a path `find -delete` allows. One line, two spellings.
+//! live `$TMPDIR` resolves to -- and reuses its `..`-traversal guard verbatim.
+//! A path `rm -rf` denies is a path `find -delete` denies; a path `rm -rf`
+//! allows is a path `find -delete` allows. One line, two spellings.
+//!
+//! With one PRE-EXISTING exception, stated here because the sentence above reads
+//! as absolute and is not: a BARE temp root. `find /tmp -delete` is ALLOWED while
+//! `rm -rf /tmp` is DENIED, because the root group here is followed by an
+//! OPTIONAL `(?:/...)?` while the `rm` side requires the separator. That is true
+//! of the pin and of every build before it, it reaches the resolved root for the
+//! same reason, and `.agent-config-o4e8j` did not change it -- tightening it
+//! would move a false-positive surface that bead holds no grant for.
 //!
 //! The two sets are separate mechanisms -- a structural parse there, a regex
 //! here -- so nothing but a test can hold them together. That test is
@@ -73,7 +82,9 @@
 //! root instead of hiding it behind a variable, and it is allowed again.
 
 use crate::destructive_pattern;
-use crate::packs::core::filesystem::{resolved_temp_roots, tmpdir_value_ends_with_slash};
+use crate::packs::core::filesystem::{
+    braced_tmpdir_without_separator_is_scratch, resolved_temp_roots,
+};
 use crate::packs::regex_engine::LazyCompiledRegex;
 use crate::packs::{DestructivePattern, Pack, PatternSuggestion, SafePattern};
 
@@ -124,10 +135,34 @@ fn create_safe_patterns() -> Vec<SafePattern> {
     vec![SafePattern {
         regex: LazyCompiledRegex::new_owned(find_temp_root_pattern(
             resolved_temp_roots(),
-            tmpdir_value_ends_with_slash(),
+            braced_tmpdir_without_separator_is_scratch(),
         )),
         name: "find-temp-root",
     }]
+}
+
+/// The token standing in for a resolved root in generated documentation.
+///
+/// Deliberately free of regex metacharacters, so `regex::escape` leaves it
+/// readable.
+pub const DOC_RESOLVED_ROOT: &str = "__RESOLVED_TMPDIR__";
+
+/// `find-temp-root` as DOCUMENTED: the shape, reading no environment.
+///
+/// The LIVE pattern contains the directory `$TMPDIR` resolves to, and carries the
+/// two no-separator arms only when the gate is open. Both are properties of the
+/// process environment, so rendering the live pattern into a checked-in doc
+/// committed one machine's temp hash AND made `pack_docs_match_generated_content`
+/// red wherever `TMPDIR` is unset or not macOS-shaped -- over `ssh`, on Linux, and
+/// on this repo's own ubuntu-latest CI. Redacting the hash alone did not fix that,
+/// because the ARMS come and go too (cold review, 2026-09-24).
+///
+/// So the doc renders this instead: one placeholder root, gate open. Every machine
+/// generates the same bytes. The live pattern carries one alternative per resolved
+/// root -- two on macOS, the `/private` twin included.
+#[must_use]
+pub fn documented_temp_root_pattern() -> String {
+    find_temp_root_pattern(&[DOC_RESOLVED_ROOT.to_string()], true)
 }
 
 /// A walk rooted at a temp directory, and rooted there ONLY.
@@ -158,9 +193,9 @@ fn create_safe_patterns() -> Vec<SafePattern> {
 /// which a `OnceLock` would have frozen for the whole process.
 ///
 /// `braced_without_separator` carries
-/// `core.filesystem::tmpdir_value_ends_with_slash`; the reason that gate exists
-/// is documented there, and it must be the SAME answer in both packs or the two
-/// temp sets disagree.
+/// `core.filesystem::braced_tmpdir_without_separator_is_scratch`; the reason
+/// that gate exists is documented there, and it must be the SAME answer in both
+/// packs or the two temp sets disagree.
 fn find_temp_root_pattern(resolved: &[String], braced_without_separator: bool) -> String {
     const DOTDOT_UNQUOTED: &str = r"(?!\.\.(?:/|\s|$)|[^\s]*/\.\.(?:/|\s|$))";
     const DOTDOT_QUOTED: &str = r#"(?!(?:[^"]*/)?\.\.(?:/|"))"#;

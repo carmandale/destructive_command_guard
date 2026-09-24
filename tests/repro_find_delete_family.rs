@@ -407,6 +407,28 @@ fn the_resolved_temp_root_agrees_with_the_rm_pack() {
         );
     }
 
+    // ---- The BARE resolved root, both spellings, written down rather than
+    // implied. `find` accepts it and `rm` refuses it. That asymmetry is
+    // pre-existing -- `find /tmp -delete` ALLOWs while `rm -rf /tmp` DENIEs, on
+    // the pin and on every build before it -- and it reaches the resolved root for
+    // the same reason. The matrix that went to review listed only the rm half,
+    // which invited the reading that the bare root stays blocked in both.
+    assert_denied_by_under_tmpdir(
+        &format!("rm -rf {FIXED_TMPDIR_ROOT}"),
+        "core.filesystem:rm-rf-root-home",
+        "rm refuses a bare temp root, resolved or literal",
+    );
+    assert_allowed_under_tmpdir(
+        &format!("find {FIXED_TMPDIR_ROOT} -delete"),
+        "find accepts a bare temp root, resolved or literal -- pre-existing",
+    );
+    assert_allowed("find /tmp -delete", "the literal this mirrors, same answer");
+    assert_denied_by(
+        "rm -rf /tmp",
+        "core.filesystem:rm-rf-root-home",
+        "and the literal's rm spelling, the same answer too",
+    );
+
     // ---- DENY: the opaque variable, which is the whole reason the literal had
     // to be named. dcg does not expand variables, so `$RUN_DIR` is never
     // scratch however the directory it holds is spelled — and the bead requires
@@ -444,6 +466,103 @@ fn the_resolved_temp_root_agrees_with_the_rm_pack() {
         "find /Users/dalecarman/dev/agent-observer -type f -delete",
         "core.find:find-delete-outside-temp",
         "the same repo path in the find spelling, with TMPDIR set",
+    );
+}
+
+/// A `TMPDIR` this guard does not recognise as a temp dir admits NOTHING.
+///
+/// This is the row the first cut did not have, and its absence is why a real
+/// fail-open passed a green suite. The gate for the no-separator `${TMPDIR}x`
+/// spelling used to ask only "does the value end in `/`", so a value refused as a
+/// ROOT still opened that arm: with `TMPDIR=/`, `${TMPDIR}etc` was admitted as
+/// scratch while the literal `/etc` was denied -- a guard reopened through a
+/// variable. Both blind reviewers found it independently on 2026-09-24.
+///
+/// Every row is a value somebody could plausibly have exported, and each is asked
+/// in all four no-separator arms plus the literal it would have resolved to.
+#[test]
+fn an_unrecognised_tmpdir_admits_nothing_in_any_arm() {
+    // (TMPDIR, the literal it would have resolved to, that literal's deny rule).
+    // The rule differs by SHAPE, not by policy: an absolute path denies as
+    // `rm-rf-root-home` and a relative one as `rm-rf-general`, so pinning a single
+    // rule across every row would assert something untrue about the relative ones.
+    const HOSTILE: &[(&str, &str, &str)] = &[
+        ("/", "/etc", "core.filesystem:rm-rf-root-home"),
+        ("/", "/Users", "core.filesystem:rm-rf-root-home"),
+        ("/var/", "/var/log", "core.filesystem:rm-rf-root-home"),
+        (
+            "/var/folders/",
+            "/var/folders/ab/someoneelse0000gn/T/x",
+            "core.filesystem:rm-rf-root-home",
+        ),
+        (
+            "/Users/dalecarman/",
+            "/Users/dalecarman/.ssh",
+            "core.filesystem:rm-rf-root-home",
+        ),
+        (
+            "/Users/dalecarman/dev/",
+            "/Users/dalecarman/dev/agent-observer",
+            "core.filesystem:rm-rf-root-home",
+        ),
+        (
+            "/home/runner/work/_temp/",
+            "/home/runner/work/_temp/x",
+            "core.filesystem:rm-rf-root-home",
+        ),
+        // A relative value, whose literal is relative too -- hence the other rule.
+        ("relative/", "relative/x", "core.filesystem:rm-rf-general"),
+        // The CACHE sibling is not the temp dir, though it is the right shape in
+        // every other respect.
+        (
+            "/var/folders/2j/o4e8jtest0000gn/C/",
+            "/var/folders/2j/o4e8jtest0000gn/C/x",
+            "core.filesystem:rm-rf-root-home",
+        ),
+    ];
+
+    for (tmpdir, literal, literal_rule) in HOSTILE {
+        for command in [
+            "rm -rf ${TMPDIR}x",
+            "rm -rf \"${TMPDIR}x\"",
+            "rm -rf ${TMPDIR:?}x",
+            "rm -rf \"${TMPDIR:?}x\"",
+        ] {
+            assert_denied_by_with_tmpdir(
+                command,
+                tmpdir,
+                "core.filesystem:rm-rf-general",
+                "an unrecognised TMPDIR opens no arm",
+            );
+        }
+        for command in ["find ${TMPDIR}x -delete", "find ${TMPDIR:?}x -delete"] {
+            assert_denied_by_with_tmpdir(
+                command,
+                tmpdir,
+                "core.find:find-delete-outside-temp",
+                "and the find pack shuts with it",
+            );
+        }
+        assert_denied_by_with_tmpdir(
+            &format!("rm -rf {literal}"),
+            tmpdir,
+            literal_rule,
+            "the literal that value would have resolved to is not admitted either",
+        );
+    }
+
+    // The control. `/tmp/` IS recognised, so the very same no-separator spelling
+    // passes there -- these two rows are what make the refusals above a refusal
+    // rather than the arm having been removed outright.
+    assert_allowed_with_tmpdir(
+        "rm -rf ${TMPDIR}x",
+        "/tmp/",
+        "a recognised root with a trailing slash still opens the arm",
+    );
+    assert_allowed_with_tmpdir(
+        "find ${TMPDIR}x -delete",
+        "/tmp/",
+        "and in the find pack too",
     );
 }
 

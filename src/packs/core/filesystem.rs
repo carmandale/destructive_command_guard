@@ -436,14 +436,19 @@ fn path_is_safe_for_style(path: &PathToken<'_>, style: RmFlagStyle) -> bool {
 /// Both members of the macOS pair are returned, because `/var` is a symlink to
 /// `/private/var` and the same directory is handed around in either spelling
 /// (`pending_exceptions.rs` documents that pair for its own path comparison).
+/// Note what that is, precisely: a widening the literal does NOT get. `/tmp` is a
+/// symlink to `/private/tmp` in exactly the same way, and `/private/tmp/x` is
+/// denied. So the resolved root is treated like `/tmp` PLUS its twin, which is
+/// asymmetric in the permissive direction; the bead asks for the twin by name
+/// (`mktemp -d` and `realpath` disagree about which spelling they print), so it
+/// stays, but calling it parity would be false.
 ///
 /// Empty when `TMPDIR` is unset, relative, or shallower than two segments, so a
 /// missing or degenerate environment admits nothing rather than admitting a
 /// prefix near the root. That is also why the integration harness sees no
 /// resolved root unless it sets `TMPDIR` itself: `tests/common/spawn.rs` clears
 /// the environment.
-#[must_use]
-pub fn resolved_temp_roots() -> &'static [String] {
+pub(crate) fn resolved_temp_roots() -> &'static [String] {
     static ROOTS: OnceLock<Vec<String>> = OnceLock::new();
     ROOTS.get_or_init(|| {
         std::env::var_os("TMPDIR")
@@ -452,15 +457,49 @@ pub fn resolved_temp_roots() -> &'static [String] {
     })
 }
 
+/// Whether a `TMPDIR` value names a directory worth resolving as scratch.
+///
+/// An allowlist of SHAPES, and deliberately not a depth floor. The floor this
+/// replaced — absolute, at least two segments — admitted `/Users/<anyone>` and
+/// `/var/folders` itself, so `TMPDIR=$HOME` (a value people really do export)
+/// made an entire home directory scratch, and `TMPDIR=/var/folders/` made every
+/// OTHER user's temp dir scratch. Both are named in the grant as things that stay
+/// blocked, and both were found by cold review on 2026-09-24 before this shipped.
+///
+/// Recognised, and nothing else:
+///
+/// - `/tmp`, `/var/tmp` — already literals in both packs, so this adds nothing
+/// - `/var/folders/<a>/<b>/T` — the macOS per-user temp dir
+/// - `/private/var/folders/<a>/<b>/T` — the same directory, the other spelling
+///
+/// `T` only: the sibling `C` is the per-user CACHE directory and is not scratch.
+/// Anything else resolves to NOTHING, which leaves the `$TMPDIR` spellings
+/// working and simply declines to admit the literal — fail closed, not fail open.
+/// Nothing is stat'd; this is a judgement about a name, and a guard that trusted
+/// the filesystem here would be answering a different question.
+fn is_recognised_temp_root(value: &str) -> bool {
+    if value == "/tmp" || value == "/var/tmp" {
+        return true;
+    }
+    let Some(rest) = value
+        .strip_prefix("/private/var/folders/")
+        .or_else(|| value.strip_prefix("/var/folders/"))
+    else {
+        return false;
+    };
+    let parts: Vec<&str> = rest.split('/').collect();
+    parts.len() == 3 && !parts[0].is_empty() && !parts[1].is_empty() && parts[2] == "T"
+}
+
 /// [`resolved_temp_roots`] without the environment, so the refusals are testable.
 ///
 /// A `OnceLock` reads `TMPDIR` once per process, which a unit test cannot vary.
-/// Everything that decides whether a value is usable lives here instead.
+/// Everything that decides whether a value is usable lives here instead, and
+/// [`braced_tmpdir_without_separator_is_scratch`] reads its answer rather than
+/// re-deciding — one refusal list, two readers.
 fn temp_roots_from_tmpdir_value(value: &str) -> Vec<String> {
     let trimmed = value.trim_end_matches('/');
-    // Absolute, and at least two segments deep. `/`, `/var` and a relative value
-    // are all refused rather than admitted as a prefix near the root.
-    if !trimmed.starts_with('/') || trimmed.split('/').filter(|part| !part.is_empty()).count() < 2 {
+    if !is_recognised_temp_root(trimmed) {
         return Vec::new();
     }
     let twin = trimmed
@@ -480,42 +519,65 @@ fn temp_roots_from_tmpdir_value(value: &str) -> Vec<String> {
     roots
 }
 
-/// Whether the live `TMPDIR` ends in `/`, which is what decides one spelling.
+/// Whether `${TMPDIR}x` — no separator — names a path inside the temp root.
 ///
 /// `${TMPDIR:?}tmp.X` and `${TMPDIR}tmp.X` carry no separator of their own,
-/// because the macOS value already ends in one -- and `${TMPDIR:?}` is the form
+/// because the macOS value already ends in one, and `${TMPDIR:?}` is the form
 /// `.claude/rules/bash-safety.md` prescribes for a delete target, so it is a
-/// spelling agents are told to write. They name a path under the temp root only
-/// when the live value really does end in `/`. Unset, `${TMPDIR}src` expands to
-/// a RELATIVE `src`, so a recursive force delete of `${TMPDIR}src` inside a repo
-/// would take that repo's `src`; `${TMPDIR:?}` would instead abort the shell,
-/// which is safe but not something to lean on for the other form. The spellings
-/// that carry their own `/` need no such gate.
-pub(crate) fn tmpdir_value_ends_with_slash() -> bool {
-    static ENDS: OnceLock<bool> = OnceLock::new();
-    *ENDS.get_or_init(|| {
+/// spelling agents are told to write. Two things must hold for it to be scratch:
+/// the value has to be a temp root this module recognises, AND it has to end in
+/// `/` so the concatenation lands inside that root rather than beside it.
+///
+/// BOTH halves, from ONE refusal list, and that is the whole point of the first
+/// line. This used to ask only "does the value end in `/`", which let a value
+/// [`temp_roots_from_tmpdir_value`] REFUSES one function away still open the
+/// widest arm the carve-out has: with `TMPDIR=/`, `${TMPDIR}etc` was admitted as
+/// scratch while the literal `/etc` was denied — the guard reopened, through a
+/// variable, exactly what it refuses spelled out. Both blind reviewers found it
+/// independently on 2026-09-24 and it never shipped. A second reader of the same
+/// environment variable is a second policy; there is now one.
+///
+/// Unset, `${TMPDIR}src` expands to a RELATIVE `src`, so a recursive force delete
+/// written that way inside a repo would take that repo's own `src`. The spellings
+/// that carry their own `/` need no gate and do not consult this.
+pub(crate) fn braced_tmpdir_without_separator_is_scratch() -> bool {
+    static SCRATCH: OnceLock<bool> = OnceLock::new();
+    *SCRATCH.get_or_init(|| {
+        if resolved_temp_roots().is_empty() {
+            return false;
+        }
         std::env::var_os("TMPDIR").is_some_and(|value| value.to_string_lossy().ends_with('/'))
     })
 }
 
-/// Whether `path` is a literal path under one of [`resolved_temp_roots`].
+/// Whether `path` sits under `root`, separator required.
+///
+/// Split out from [`path_is_resolved_temp`] so it can be tested for real. The
+/// test that used to cover this built its own copy of the strip/strip/dotdot
+/// chain and asserted against that, which certified the test file and not the
+/// binary: deleting the feature outright left it green (cold review, 2026-09-24).
 ///
 /// The `/` is required, so the root itself (`/var/folders/<..>/T`) is refused
 /// just as the bare `/tmp` is, and a sibling that merely shares the prefix
 /// (`/var/folders/<..>/TOTHER`) cannot pass.
+fn path_is_under_temp_root(path: &str, root: &str) -> bool {
+    path.strip_prefix(root)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .is_some_and(|rest| !has_dotdot_segment(rest))
+}
+
+/// Whether `path` is a literal path under one of [`resolved_temp_roots`].
 fn path_is_resolved_temp(path: &str) -> bool {
-    resolved_temp_roots().iter().any(|root| {
-        path.strip_prefix(root.as_str())
-            .and_then(|rest| rest.strip_prefix('/'))
-            .is_some_and(|rest| !has_dotdot_segment(rest))
-    })
+    resolved_temp_roots()
+        .iter()
+        .any(|root| path_is_under_temp_root(path, root))
 }
 
 /// The `${TMPDIR}`/`${TMPDIR:?}` forms written without a separator.
 ///
-/// Gated on [`tmpdir_value_ends_with_slash`]; see there for why.
+/// Gated on [`braced_tmpdir_without_separator_is_scratch`]; see there for why.
 fn path_is_safe_braced_tmpdir_without_separator(path: &str) -> bool {
-    if !tmpdir_value_ends_with_slash() {
+    if !braced_tmpdir_without_separator_is_scratch() {
         return false;
     }
     for prefix in ["${TMPDIR:?}", "${TMPDIR}"] {
@@ -903,40 +965,96 @@ mod tests {
     }
 
     #[test]
-    fn a_non_var_tmpdir_value_gets_no_invented_twin() {
-        assert_eq!(
-            temp_roots_from_tmpdir_value("/Users/somebody/scratch"),
-            vec!["/Users/somebody/scratch".to_string()],
-            "the /private pair is a /var fact; nothing else gets a second spelling"
-        );
+    fn a_tmpdir_value_that_is_not_a_temp_dir_shape_admits_nothing() {
+        // The floor this replaced admitted every one of these. `TMPDIR=$HOME` is
+        // the one that matters: it made a whole home directory scratch.
+        for value in [
+            "/Users/somebody/scratch",
+            "/Users/dalecarman",
+            "/Users/dalecarman/",
+            "/Users/dalecarman/dev",
+            "/home/runner/work/_temp",
+            "/var/folders",
+            "/var/folders/",
+            "/var/folders/2j",
+            "/var/folders/2j/abc0000gn",
+            "/var/folders/2j/abc0000gn/C",
+            "/var/folders/2j/abc0000gn/0",
+            "/var/folders/2j/abc0000gn/T/nested",
+            "/private/var/folders/2j/abc0000gn/C",
+            "/usr/local",
+            "/etc",
+        ] {
+            assert!(
+                temp_roots_from_tmpdir_value(value).is_empty(),
+                "TMPDIR={value:?} must admit no prefix at all"
+            );
+        }
+    }
+
+    #[test]
+    fn the_recognised_temp_root_shapes_are_exactly_these() {
+        for value in [
+            "/tmp",
+            "/var/tmp",
+            "/var/folders/2j/abc0000gn/T",
+            "/private/var/folders/2j/abc0000gn/T",
+        ] {
+            assert!(
+                is_recognised_temp_root(value),
+                "must be recognised: {value}"
+            );
+        }
+        for value in [
+            "",
+            "/",
+            "/var",
+            "/var/folders",
+            "/var/folders//T",
+            "/var/folders/2j/abc0000gn/C",
+            "/var/folders/2j/abc0000gn/T/x",
+            "/var/folders/2j/T",
+            "/Users/dalecarman",
+            "/private/tmp",
+            "tmp",
+            "relative/T",
+        ] {
+            assert!(
+                !is_recognised_temp_root(value),
+                "must NOT be recognised: {value:?}"
+            );
+        }
     }
 
     #[test]
     fn a_resolved_root_needs_a_separator_and_a_real_prefix_match() {
-        // `path_is_resolved_temp` reads the process TMPDIR, so drive the same
-        // predicate the roots feed: strip + separator + dotdot.
+        // Calls the REAL predicate. The version of this test that shipped to
+        // review built its own copy of the chain and asserted against that, so
+        // deleting the feature left it green.
         let root = "/var/folders/2j/abc0000gn/T";
-        let under = |path: &str| {
-            path.strip_prefix(root)
-                .and_then(|rest| rest.strip_prefix('/'))
-                .is_some_and(|rest| !has_dotdot_segment(rest))
-        };
         assert!(
-            under("/var/folders/2j/abc0000gn/T/tmp.X"),
+            path_is_under_temp_root("/var/folders/2j/abc0000gn/T/tmp.X", root),
             "a path under it"
         );
         assert!(
-            under("/var/folders/2j/abc0000gn/T/"),
-            "the root, as /tmp/ is"
+            path_is_under_temp_root("/var/folders/2j/abc0000gn/T/", root),
+            "the root with a trailing slash, as /tmp/ is"
         );
-        assert!(!under(root), "the bare root, as bare /tmp is refused");
         assert!(
-            !under("/var/folders/2j/abc0000gn/TOTHER/x"),
+            !path_is_under_temp_root(root, root),
+            "the bare root, as bare /tmp is refused"
+        );
+        assert!(
+            !path_is_under_temp_root("/var/folders/2j/abc0000gn/TOTHER/x", root),
             "a sibling sharing the prefix is not inside it"
         );
         assert!(
-            !under("/var/folders/2j/abc0000gn/T/../C/x"),
+            !path_is_under_temp_root("/var/folders/2j/abc0000gn/T/../C/x", root),
             "a traversal out of the root is not in the root"
+        );
+        assert!(
+            !path_is_under_temp_root("/var/folders/2j/abc0000gn/T/a/../../C", root),
+            "a traversal buried deeper is still a traversal"
         );
     }
 

@@ -3,7 +3,7 @@
 //! This test generates per-pack reference documentation from `PackRegistry` metadata
 //! and verifies that all packs have documentation entries.
 
-use destructive_command_guard::packs::core::filesystem::resolved_temp_roots;
+use destructive_command_guard::packs::core::find::documented_temp_root_pattern;
 use destructive_command_guard::packs::{Pack, PackRegistry};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -23,31 +23,27 @@ fn category_filename(category: &str) -> String {
     format!("{category}.md")
 }
 
-/// Replace the directory the live `$TMPDIR` names with a stable placeholder.
+/// The text to document a safe pattern with, which is not always its own text.
 ///
-/// `core.find`'s `find-temp-root` is built at startup and contains the resolved
-/// per-user temp root -- on macOS `/var/folders/<2>/<hash>/T` and its
-/// `/private` twin (`.agent-config-o4e8j`). That string is machine- and
-/// user-specific, so rendering it verbatim would commit one machine's temp hash
-/// to a doc every other machine then disagrees with, and would publish a path no
-/// reader can use. The placeholder says what is actually there.
+/// `core.find`'s `find-temp-root` is BUILT AT STARTUP from the environment: it
+/// contains the directory `$TMPDIR` resolves to, and it carries the two
+/// no-separator arms only when that value ends in `/`. This file compares the
+/// generated doc byte-for-byte against a checked-in artifact, so rendering the
+/// live pattern makes the comparison depend on the machine running it -- it
+/// committed one machine's temp hash, and it was RED with `TMPDIR` unset, with
+/// `TMPDIR=/tmp`, and on this repo's ubuntu-latest CI (`.agent-config-o4e8j`,
+/// cold review 2026-09-24). An earlier attempt redacted the hash alone, which
+/// fixed the privacy half and left the byte comparison broken, because the ARMS
+/// come and go as well.
 ///
-/// With `TMPDIR` unset or degenerate the root list is empty and this is a no-op,
-/// which is also the state the checked-in doc is written for.
-fn redact_resolved_temp_roots(pattern: &str) -> String {
-    let mut out = pattern.to_string();
-    // Longest first: `/var/folders/<..>/T` is a substring of its own
-    // `/private/var/folders/<..>/T` twin, so replacing the short one first
-    // leaves `/private<placeholder>` behind.
-    let mut roots: Vec<&String> = resolved_temp_roots().iter().collect();
-    roots.sort_by_key(|root| std::cmp::Reverse(root.len()));
-    for root in roots {
-        // The pattern holds the root regex-escaped, then pipe-escaped for the
-        // markdown table; match it the same way round.
-        let needle = regex::escape(root).replace('|', "\\|");
-        out = out.replace(&needle, "<the resolved $TMPDIR>");
+/// `documented_temp_root_pattern()` reads no environment, so every machine
+/// generates the same bytes.
+fn documented_pattern_text(name: &str, live: &str) -> String {
+    if name == "find-temp-root" {
+        documented_temp_root_pattern()
+    } else {
+        live.to_string()
     }
-    out
 }
 
 /// Generate markdown documentation for a single pack.
@@ -76,9 +72,9 @@ fn generate_pack_section(pack: &Pack) -> String {
         out.push_str("| Pattern Name | Pattern |\n");
         out.push_str("|--------------|----------|\n");
         for p in &pack.safe_patterns {
-            let pattern_str = p.regex.as_str();
+            let pattern_str = documented_pattern_text(p.name, p.regex.as_str());
             // Escape pipe characters in markdown tables
-            let escaped = redact_resolved_temp_roots(&pattern_str.replace('|', "\\|"));
+            let escaped = pattern_str.replace('|', "\\|");
             let _ = writeln!(out, "| `{}` | `{escaped}` |", p.name);
         }
         out.push('\n');
