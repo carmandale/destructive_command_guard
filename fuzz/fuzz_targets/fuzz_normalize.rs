@@ -32,11 +32,17 @@ fuzz_target!(|data: &[u8]| {
             command
         );
 
-        // Normalized result should not be longer than original
-        // (we're stripping prefixes, not adding)
+        // Normalization may add whitespace but never content. Since d19a7226
+        // (.agent-config-6yt2i, .agent-config-fhj4b) it writes the word break
+        // the shell already implies around a glued redirection, so `>%` comes
+        // back as `> %` and plain length can grow; the first nightly that
+        // really fuzzed found exactly that (.agent-config-j1qwb). Moving a
+        // redirection keeps its bytes and every other step strips, so the
+        // non-whitespace bytes can only stay or shrink.
+        let content = |s: &str| s.bytes().filter(|b| !b.is_ascii_whitespace()).count();
         assert!(
-            normalized.len() <= command.len(),
-            "Normalized command is longer than original"
+            content(&normalized) <= content(command),
+            "Normalization added non-whitespace content to: {command:?} -> {normalized:?}"
         );
     }
 });
