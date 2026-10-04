@@ -187,16 +187,16 @@ Cleared 2026-09-07 under `.agent-config-9brj5`: `ci.yml`, `bench.yml` and
 `cli-version-audit.yml` were `disabled_fork`; all ten workflows are now `active`
 and a push to `main` produced this repo's first `event: push` run.
 
-**A fmt red costs you every other CI signal.** `ci.yml`'s `check` job runs
-`cargo fmt -- --check` **first**, so when it fails the job stops there: clippy and
-the whole test step are skipped, and the run reports one red gate while the others
-never ran at all. Measured 2026-09-16 under `.agent-config-w2stx`: the last eight
-pushes to `main` all failed at `Check formatting` with clippy and tests showing as
-skipped — the third instance of the same two files (`.agent-config-pcqod`,
-`.agent-config-moubj` closed it twice before).
+**A fmt red used to cost every other CI signal.** `cargo fmt -- --check` was the
+first step of `ci.yml`'s `check` job, so when it failed clippy, the test step and
+every job that `needs: check` never ran, and the run showed one red gate. It
+happened four times: `.agent-config-pcqod`, `.agent-config-moubj`,
+`.agent-config-w2stx` (eight pushes on 2026-09-16), then `.agent-config-j1qwb`, a
+single unformatted line that kept the suite dark from 2026-09-19 to 2026-10-04.
+Since `.agent-config-j1qwb`, formatting is its own `fmt` job that nothing waits on:
+a diff still turns the run red, but clippy, the tests and the suite still report.
 
-So `cargo fmt --check` is not a tidiness step; it is what keeps the rest of CI
-readable. Run it before you push, and read the run afterwards — `main` is **not**
+Run `cargo fmt --check` before you push anyway, and read the run afterwards — `main` is **not**
 branch-protected (`gh api repos/carmandale/destructive_command_guard/branches/main/protection`
 returns 404), so a push lands whatever CI says. Beware the reverse trap: bare
 `cargo fmt` reformats files your change does not own, which quietly folds someone
@@ -704,18 +704,18 @@ Use these schemas for:
 
 | Job | Trigger | Purpose | Blocking |
 |-----|---------|---------|----------|
-| `check` | PR, push | Format, clippy, UBS, tests | Yes |
+| `fmt` | PR, push | `cargo fmt --check`; nothing waits on it | Yes |
+| `check` | PR, push | Clippy, UBS, tests | Yes |
 | `coverage` | PR, push | Coverage thresholds | Yes |
 | `memory-tests` | PR, push | Memory leak detection | Yes |
-| `benchmarks` | push to main | Performance budgets | Warn only |
 | `e2e` | PR, push | End-to-end shell tests | Yes |
 | `scan-regression` | PR, push | Scan output stability | Yes |
 | `perf-regression` | PR, push | Process-per-invocation perf | Yes |
+| `fuzz` | schedule, manual | Every `cargo fuzz list` target for 60s | Yes |
 
 ### Check Job
 
-Runs format, clippy, UBS static analysis, and unit tests. Includes:
-- `cargo fmt --check` - Code formatting
+Runs clippy, UBS static analysis, and unit tests (formatting is the separate `fmt` job). Includes:
 - `cargo clippy --all-targets -- -D warnings` - Lints (pedantic + nursery enabled)
 - UBS analysis on changed Rust files (warning-only, non-blocking)
 - `cargo nextest run` - Full test suite with JUnit XML report
@@ -738,14 +738,11 @@ Runs dedicated memory leak tests with:
 
 Tests include: hook input parsing, pattern evaluation, heredoc extraction, file extractors, full pipeline, and a self-test that verifies the framework catches leaks.
 
-### Benchmarks Job
+### Benchmarks
 
-Runs on push to main only (benchmarks are noisy on PRs). Checks performance budgets from `src/perf.rs`:
-- Quick reject: < 50us panic
-- Fast path: < 500us panic
-- Pattern match: < 1ms panic
-- Heredoc extract: < 2ms panic
-- Full pipeline: < 50ms panic
+`bench.yml`, not `ci.yml`, owns benchmarks: it benches the base commit and this one on
+the same runner and fails on a regression. `ci.yml` had a second `benchmarks` job
+that could not fail; `.agent-config-j1qwb` removed it.
 
 ### UBS Static Analysis
 
