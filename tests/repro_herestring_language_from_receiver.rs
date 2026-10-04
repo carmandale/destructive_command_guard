@@ -188,7 +188,9 @@ fn assert_denied_like_its_heredoc_twin(herestring: &str, heredoc: &str, rule: &s
             "control: the heredoc twin denied by another rule, so this row proves \
              nothing: {heredoc:?}\n{stdout}"
         ),
-        None => panic!("control: the heredoc twin ALLOWED, so this row proves nothing: {heredoc:?}"),
+        None => {
+            panic!("control: the heredoc twin ALLOWED, so this row proves nothing: {heredoc:?}")
+        }
     }
     match hook(herestring) {
         Some((got, stdout)) => assert_eq!(

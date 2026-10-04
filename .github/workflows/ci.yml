@@ -32,6 +32,30 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # Formatting is its own job, and nothing `needs:` it; see .agent-config-j1qwb.
+  #
+  # It used to be the first step of `check`, so one unformatted line stopped
+  # clippy and the whole test step, and every job below that `needs: check`
+  # went with them. The run showed one red gate while the rest never ran. That
+  # happened four times (.agent-config-pcqod, .agent-config-moubj,
+  # .agent-config-w2stx, .agent-config-j1qwb); the last one, a single line in
+  # tests/repro_herestring_language_from_receiver.rs, kept the suite dark from
+  # run 35416986220 on 2026-09-19 to run 37176865382 on 2026-10-04.
+  #
+  # A format diff still turns the run red. It just no longer hides the answers
+  # to every other question.
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
   check:
     runs-on: ubuntu-latest
     steps:
@@ -79,9 +103,6 @@ jobs:
           key: ${{ runner.os }}-cargo-check-registry-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-check-registry-
-
-      - name: Check formatting
-        run: cargo fmt -- --check
 
       - name: Run clippy
         run: cargo clippy --all-targets -- -D warnings
@@ -216,20 +237,13 @@ jobs:
           df -h /
           du -sh target || true
 
-      - name: Generate test summary
-        if: always()
-        run: |
-          echo "## Test Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          # Count pack tests
-          PACK_TESTS=$(cargo test packs:: -- --list 2>/dev/null | grep -c "test$" || echo "0")
-          TOTAL_TESTS=$(cargo test -- --list 2>/dev/null | grep -c "test$" || echo "0")
-
-          echo "| Category | Count |" >> $GITHUB_STEP_SUMMARY
-          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Total Tests | $TOTAL_TESTS |" >> $GITHUB_STEP_SUMMARY
-          echo "| Pack Tests | $PACK_TESTS |" >> $GITHUB_STEP_SUMMARY
+      # A "Generate test summary" step sat here and is gone on purpose; see
+      # .agent-config-j1qwb. It ran `cargo test -- --list` twice under
+      # `if: always()` to print a test count. When an earlier step had failed,
+      # nothing was built yet, so it compiled the whole test graph to count it:
+      # 12m46s of run 37176865382's 13m `check`, after formatting had already
+      # failed at 28s. nextest prints the count itself, and the JUnit report
+      # below carries every case.
 
       - name: Upload test results
         if: always()
@@ -569,79 +583,16 @@ jobs:
             memory-metrics.log
           retention-days: 14
 
-  # Performance benchmark enforcement (push to master only)
-  # Runs benchmarks and checks against performance budgets defined in src/perf.rs
-  benchmarks:
-    runs-on: ubuntu-latest
-    needs: check
-    # Only run on push to main, not on PRs (benchmarks are noisy)
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@nightly
-
-      - name: Cache cargo registry and target
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-bench-
-
-      - name: Run benchmarks
-        run: |
-          # Run benchmarks and capture output
-          cargo bench --bench heredoc_perf -- --noplot 2>&1 | tee benchmark_output.txt
-          echo "## Benchmark Results" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          grep -E "^(tier|pack|core|shell|language|full)" benchmark_output.txt | head -50 >> $GITHUB_STEP_SUMMARY || true
-          echo '```' >> $GITHUB_STEP_SUMMARY
-
-      - name: Check performance budgets
-        run: |
-          # Extract timing summaries and check against budgets
-          # Budgets from src/perf.rs:
-          # - Quick reject: 50μs panic
-          # - Fast path: 500μs panic
-          # - Pattern match: 1ms panic
-          # - Heredoc extract: 2ms panic
-          # - Full pipeline: 50ms panic
-          echo "## Performance Budget Check" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          PANIC_VIOLATIONS=0
-
-          # Check for any results exceeding 50ms (absolute max)
-          if grep -E "time:.*\[.*[0-9]+\.[0-9]+ s" benchmark_output.txt; then
-            echo "::error::Some benchmarks exceeded 1 second - major regression detected"
-            PANIC_VIOLATIONS=$((PANIC_VIOLATIONS + 1))
-          fi
-
-          # Check full_pipeline benchmarks (budget: 50ms panic)
-          if grep -A1 "full_pipeline" benchmark_output.txt | grep -E "time:.*\[.*[5-9][0-9]\.[0-9]+ ms|[0-9]{3,}\.[0-9]+ ms"; then
-            echo "::warning::Full pipeline benchmark exceeds 50ms budget"
-            PANIC_VIOLATIONS=$((PANIC_VIOLATIONS + 1))
-          fi
-
-          if [ $PANIC_VIOLATIONS -gt 0 ]; then
-            echo "::error::$PANIC_VIOLATIONS performance budget violations detected"
-            echo "Budget violations: $PANIC_VIOLATIONS" >> $GITHUB_STEP_SUMMARY
-            # For now, warn but don't fail (benchmarks can be noisy in CI)
-            # exit 1
-          else
-            echo "All benchmarks within budget" >> $GITHUB_STEP_SUMMARY
-          fi
-
-      - name: Upload benchmark results
-        uses: actions/upload-artifact@v4
-        with:
-          name: benchmark-results
-          path: benchmark_output.txt
-          retention-days: 30
+  # A `benchmarks` job sat here and is gone on purpose; see .agent-config-j1qwb.
+  #
+  # It ran `cargo bench --bench heredoc_perf` on every push to main, read the
+  # numbers against hard-coded budgets, and could not fail: its `exit 1` was
+  # commented out. bench.yml runs the same bench on every push to main that
+  # touches src/, benches/ or the Cargo files -- the pushes that can move it --
+  # benches the base commit first on the same runner, and fails on a
+  # regression. So this was a second, weaker copy of that gate, costing 8.7m
+  # per push (run 35416438492) and caching a `target` dir against
+  # .agent-config-wrlqe.
 
   # End-to-end shell script tests
   e2e:
@@ -959,6 +910,9 @@ jobs:
     runs-on: ubuntu-latest
     # Only run on schedule or manual trigger, not on every PR
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # A backstop for a wedged run, not a budget: the build plus eight minutes
+    # of fuzzing fit well inside it.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -967,7 +921,7 @@ jobs:
           components: llvm-tools-preview
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
 
       - name: Cache cargo registry and fuzz corpus
         uses: actions/cache@v4
@@ -981,15 +935,60 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-fuzz-
 
-      - name: Run fuzz tests (time-limited)
+      # One build, then every target fuzzes for its full minute; see
+      # .agent-config-j1qwb.
+      #
+      # This used to be `timeout 10m cargo fuzz run "$target" ... || true` once
+      # per target. Every `cargo fuzz run` starts with a build, and the build
+      # alone outlasted ten minutes: cargo-fuzz compiles at one codegen unit by
+      # default, so the whole crate went through ASan and coverage
+      # instrumentation as a single LLVM module on one core. `timeout` killed
+      # all eight targets mid-compile, `|| true` swallowed it, and the summary
+      # still printed "completed". Run 37176865382 spent 80m on this job,
+      # concluded success, and fuzzed nothing -- its log holds no libFuzzer line
+      # at all. That job was the 81-minute nightly.
+      #
+      # `--codegen-units 16` is cargo-fuzz's own advice for faster builds at a
+      # small cost per execution, the right side of that trade when each target
+      # runs for sixty seconds. The build is its own step so its minutes show on
+      # their own, and the run passes the same flags so it reuses that build.
+      # A target passes only if it exits 0 AND libFuzzer printed its closing
+      # "Done N runs" line, so a run that never fuzzed cannot read as green
+      # again.
+      - name: Build fuzz targets
+        run: cargo fuzz build --codegen-units 16
+
+      - name: Run fuzz targets (60s each)
         run: |
-          cd fuzz
-          echo "## Fuzzing Results" >> $GITHUB_STEP_SUMMARY
-          for target in fuzz_context fuzz_evaluate fuzz_hook_input fuzz_normalize fuzz_heredoc_trigger fuzz_heredoc_extract fuzz_heredoc_language fuzz_shell_extract; do
-            echo "Fuzzing $target (~60s runtime + build)..."
-            timeout 10m cargo fuzz run "$target" -- -max_total_time=60 || true
-            echo "- $target: completed" >> $GITHUB_STEP_SUMMARY
+          set -o pipefail
+          targets=$(cargo fuzz list)
+          if [ -z "$targets" ]; then
+            echo "::error::cargo fuzz list returned no targets"
+            exit 1
+          fi
+          echo "## Fuzzing Results" >> "$GITHUB_STEP_SUMMARY"
+          failed=0
+          for target in $targets; do
+            echo "::group::$target"
+            if cargo fuzz run --codegen-units 16 "$target" -- -max_total_time=60 2>&1 | tee "fuzz-$target.log"; then
+              rc=0
+            else
+              rc=$?
+            fi
+            echo "::endgroup::"
+            done_line=$(grep -m1 -E '^Done [0-9]+ runs' "fuzz-$target.log" || true)
+            if [ "$rc" -eq 0 ] && [ -n "$done_line" ]; then
+              echo "- $target: ok -- $done_line" >> "$GITHUB_STEP_SUMMARY"
+            else
+              failed=$((failed + 1))
+              echo "::error::$target failed (exit $rc, libFuzzer Done line: ${done_line:-missing})"
+              echo "- $target: FAILED (exit $rc) -- ${done_line:-no libFuzzer Done line}" >> "$GITHUB_STEP_SUMMARY"
+            fi
           done
+          if [ "$failed" -gt 0 ]; then
+            echo "::error::$failed fuzz target(s) failed; crash inputs are in the fuzz-artifacts upload"
+            exit 1
+          fi
 
       - name: Upload fuzz artifacts
         if: always()
