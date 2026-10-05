@@ -913,6 +913,17 @@ jobs:
     # A backstop for a wedged run, not a budget: the build plus eight minutes
     # of fuzzing fit well inside it.
     timeout-minutes: 45
+    # Findings are news, not a verdict on the run, like `toolchain-float`
+    # below; see .agent-config-j1qwb. A failing target turns THIS job red, lists
+    # itself in the step summary, uploads its crash input, and gets a bead. It
+    # does not turn the run red. The first real run (37245858853) found three
+    # inputs, all bytes no real command produces: NUL then `"<"`, `\""a`, and a
+    # heredoc carrying \x01. Dale's 09-19 freeze stops hardening against such
+    # constructs, so a finding may stay open for good. A run concluded by it
+    # would be red every night, and a red that is always on means nothing --
+    # the state this job was rescued from. The run's own conclusion stays the
+    # suite's.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
