@@ -711,7 +711,7 @@ Use these schemas for:
 | `e2e` | PR, push | End-to-end shell tests | Yes |
 | `scan-regression` | PR, push | Scan output stability | Yes |
 | `perf-regression` | PR, push | Process-per-invocation perf | Yes |
-| `fuzz` | schedule, manual | Every `cargo fuzz list` target for 60s | Yes |
+| `fuzz` | schedule, manual | Every `cargo fuzz list` target for 60s | No: a finding reds the job and gets a bead, not the run |
 
 ### Check Job
 
