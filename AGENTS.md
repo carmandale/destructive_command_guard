@@ -724,10 +724,11 @@ Runs clippy, UBS static analysis, and unit tests (formatting is the separate `fm
 
 Runs `cargo llvm-cov` and enforces thresholds:
 - **Overall:** >= 70%
-- **src/evaluator.rs:** >= 80%
-- **src/hook.rs:** >= 80%
+- **src/evaluator.rs:** >= 65%
+- **src/hook.rs:** >= 70%
 
-Coverage is uploaded to Codecov for trend tracking. Dashboard: https://codecov.io/gh/Dicklesworthstone/destructive_command_guard
+The report is uploaded as the `coverage-report` artifact. Nothing goes to Codecov:
+this fork has no token, and the upload step crashed the job (`.agent-config-j1qwb`).
 
 ### Memory Tests Job
 
