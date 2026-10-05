@@ -337,31 +337,15 @@ jobs:
           cat coverage-summary.txt >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
-        with:
-          files: lcov.info
-          fail_ci_if_error: false
-          verbose: true
-          name: dcg-coverage
-          flags: unittests
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-
-      - name: Codecov upload status
-        if: always()
-        run: |
-          echo "## Codecov Upload" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          if [ -f lcov.info ]; then
-            lines=$(wc -l < lcov.info)
-            echo "- Coverage file: lcov.info ($lines lines)" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "- Warning: Coverage file not found" >> $GITHUB_STEP_SUMMARY
-          fi
-          echo "- Upload: Attempted (check Codecov dashboard for status)" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Dashboard: https://codecov.io/gh/Dicklesworthstone/destructive_command_guard" >> $GITHUB_STEP_SUMMARY
+      # Two Codecov steps sat here and are gone on purpose; see .agent-config-j1qwb.
+      # They uploaded lcov.info to a dashboard this fork does not have: the
+      # fork holds no CODECOV_TOKEN secret (the step's env printed it empty),
+      # and the summary pointed at upstream's page. In run 37245858853 the
+      # action died in its own TLS handshake ("SSL alert number 40") before
+      # uploading anything -- `fail_ci_if_error: false` does not cover the action
+      # crashing -- and took the enforced threshold check below down with it.
+      # The coverage report still goes up as the artifact here, and the
+      # thresholds are what this job is for.
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
