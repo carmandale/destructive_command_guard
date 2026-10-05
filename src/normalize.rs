@@ -1486,6 +1486,13 @@ fn is_heredoc_delimiter_token(command: &str, token_start: usize) -> bool {
     head.ends_with(b"<<")
 }
 
+/// Does `word`, read unquoted, open with a redirection or a command separator
+/// rather than a command name? Blanks before it are word breaks, so skipped.
+fn opens_with_shell_syntax(word: &str) -> bool {
+    word.trim_start_matches(|c: char| c.is_ascii_whitespace())
+        .starts_with(['<', '>', ';', '|', '&', '(', ')'])
+}
+
 pub fn dequote_segment_command_words(command: &str) -> Cow<'_, str> {
     // Fast path: most commands contain no quotes, backslashes, or .exe extensions
     // that need normalization. Check for these special cases to enable normalization.
@@ -1575,8 +1582,28 @@ pub fn dequote_segment_command_words(command: &str) -> Cow<'_, str> {
         // `sudo""` is read as a wrapper here too. Read as the command word, it
         // came out `sudo`, the wrapper step stripped it only on the next pass,
         // and a run of them took one pass each (.agent-config-4d55y).
-        let replacement = normalize_command_word_token(current);
+        //
+        // A word whose dequoted text opens with shell syntax (`">"`, `';'`,
+        // `'>x'`) is kept as written: the shell runs it as a command name, so
+        // it is data. Dequoted, it became an operator that handed the command
+        // word to the next word only on the next pass, one pass per word
+        // (.agent-config-4d55y).
+        let replacement =
+            normalize_command_word_token(current).filter(|r| !opens_with_shell_syntax(r));
         let word = replacement.as_deref().unwrap_or(current);
+
+        // A word that dequotes to nothing but whitespace (`' '`, `"\f"`) is a
+        // word break once dequoted, so the command word is the next one, here
+        // as on the next pass. Read as the command word, a run of them took
+        // one pass each (.agent-config-4d55y).
+        if let Some(repl) = replacement
+            .as_ref()
+            .filter(|r| r.bytes().all(|b| b.is_ascii_whitespace()))
+        {
+            replacements.push((tok.byte_range.clone(), repl.clone()));
+            continue;
+        }
+
         if let Some(next_wrapper) = NormalizeWrapper::from_command_word(word) {
             wrapper = next_wrapper;
             if let Some(repl) = replacement {
@@ -2837,6 +2864,14 @@ mod idempotence_tests {
             // 27 5c 27 0a, CI run 37247496130: the dequoted `\` and the newline
             // after it are a line continuation.
             ("'\\'\n", ""),
+            // CI run 37251323934, shrunk from 374 bytes: each command word
+            // `">"` dequoted to a bare `>`, the next pass parked it at the end,
+            // and the next `">"` became the command word, one per pass, past
+            // the cap. Kept as written, `">"` is the command word and stays.
+            (
+                "\">\">\">\">\">\">\">\">\">\">\">\">\">\">\"\\\r'\n\"'",
+                "\">\" > \">\" > \">\" > \">\" > \">\" > \">\" > \">\" > \"\\\r'\n\"'",
+            ),
         ] {
             assert_settled(input, expected);
         }
@@ -2855,6 +2890,12 @@ mod idempotence_tests {
         assert_settled(
             &format!("x{}a", "\\".repeat(21)),
             &format!("x{}a", "\\".repeat(20)),
+        );
+        let separators = format!("{}git status", "';' ".repeat(20));
+        assert_settled(&separators, &separators);
+        assert_settled(
+            &format!("{}git status", "' ' ".repeat(20)),
+            &format!("{}git status", " ".repeat(40)),
         );
     }
 
