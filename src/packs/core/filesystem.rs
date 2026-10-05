@@ -272,17 +272,65 @@ fn parse_rm_segment(
 ) -> RmParseDecision {
     let mut options_ended = false;
     let mut flags = RmFlagTracker::default();
+    // Redirection words set aside rather than read as targets; see below.
+    let mut redirections: Vec<PathToken<'_>> = Vec::new();
+    let mut expects_redirect_target = false;
+    let mut unreadable_redirection = false;
+    let mut prev_end: Option<usize> = None;
 
     let mut paths: Vec<PathToken<'_>> = Vec::new();
 
     for token in tokens.iter().skip(start_idx) {
         if token.kind == NormalizeTokenKind::Separator {
+            let sep = token.text(command);
+            // `2>&1`, `>&2`, `<&-`, `>|`: the tokenizer ends a word at `&` and
+            // `|`, but glued to a bare operator the shell reads them as the
+            // operator's own bytes, and the word after is still its target.
+            if expects_redirect_target
+                && prev_end == Some(token.byte_range.start)
+                && matches!(sep, Some("&" | "|"))
+            {
+                prev_end = Some(token.byte_range.end);
+                continue;
+            }
+            unreadable_redirection |= sep == Some("(");
             break;
         }
+        prev_end = Some(token.byte_range.end);
 
         let Some(text) = token.text(command) else {
             continue;
         };
+
+        // A REDIRECTION is not an rm target. The shell strips the operator and
+        // its file out of the argument list before rm runs, so `rm -rf /tmp/x
+        // 2>/dev/null` deletes /tmp/x and nothing else. Read as two more
+        // targets, `2>` and `/dev/null` failed the all-scratch test and the
+        // /tmp target itself was then judged `rm-rf-root-home`: a routine
+        // cleanup denied as the most dangerous rule this pack has
+        // (`.agent-config-q6ub5`). normalize splits `2>/dev/null` into `2>`
+        // and `/dev/null`, and usually moves it to the end of the command --
+        // but not on a line carrying a heredoc or here-string, and not one cut
+        // at `(` -- so a redirection reaches here glued or split, and anywhere
+        // in the segment, real targets after it included. Set aside before the
+        // option test, because `--` ends rm's options and not the shell's
+        // redirections. Same two predicates as the search-pattern masker in
+        // context.rs and the receiver resolver in heredoc.rs, reused rather
+        // than restated so the readers cannot drift apart
+        // (.claude/rules/single-source.md). Quoted and escaped `>` start with
+        // a quote or a backslash, are data, and stay targets.
+        if expects_redirect_target {
+            expects_redirect_target = false;
+            unreadable_redirection |= runs_code_to_expand(text);
+            redirections.push(path_token(text, &token.byte_range));
+            continue;
+        }
+        if crate::heredoc::is_redirection_token(text) {
+            expects_redirect_target = crate::heredoc::is_bare_redirection_operator(text);
+            unreadable_redirection |= runs_code_to_expand(text);
+            redirections.push(path_token(text, &token.byte_range));
+            continue;
+        }
 
         if !options_ended {
             if text == "--" {
@@ -332,12 +380,20 @@ fn parse_rm_segment(
         }
 
         options_ended = true;
-        let (quote, unquoted) = strip_outer_quotes(text);
-        paths.push(PathToken {
-            unquoted,
-            quote,
-            range: token.byte_range.clone(),
-        });
+        paths.push(path_token(text, &token.byte_range));
+    }
+
+    // FAIL CLOSED on a redirection this reader cannot vouch for: an operator
+    // still waiting for its target; a segment cut at a `(` the shell reads as
+    // part of a word (`<(cmd)`, `>$(mktemp)`), where the command's later
+    // targets lie past the cut; or a word the shell runs code to expand
+    // (`> "$(cmd)"`). Those words go back as targets, which is exactly how they
+    // were judged before `.agent-config-q6ub5`. Setting them aside
+    // unconditionally turned `rm -rf /tmp/x <(echo) /etc` into an allow, and,
+    // because an Allow here skips this whole pack, hid the regex rule that
+    // denies an `rm -rf ~` inside a quoted substitution used as the file.
+    if expects_redirect_target || unreadable_redirection {
+        paths.append(&mut redirections);
     }
 
     let flag_state = flags.resolve();
@@ -388,6 +444,23 @@ fn parse_rm_segment(
         severity,
         span,
     })
+}
+
+/// Whether expanding `word` makes the shell run a command: a command
+/// substitution, `$(...)` or backticks. Unquoted `$(` never reaches here --
+/// the tokenizer cuts the word at `(` -- so this catches the quoted forms.
+/// `'$(x)'` is literal and is caught too, which only keeps its old deny.
+fn runs_code_to_expand(word: &str) -> bool {
+    word.contains("$(") || word.contains('`')
+}
+
+fn path_token<'a>(text: &'a str, range: &Range<usize>) -> PathToken<'a> {
+    let (quote, unquoted) = strip_outer_quotes(text);
+    PathToken {
+        unquoted,
+        quote,
+        range: range.clone(),
+    }
 }
 
 fn strip_outer_quotes(token: &str) -> (QuoteKind, &str) {
@@ -1216,6 +1289,69 @@ mod tests {
             "rm -rf /tmp/../etc",
             RM_RF_ROOT_HOME_NAME,
             Severity::Critical,
+        );
+    }
+
+    /// `.agent-config-q6ub5`: a redirection's file is not an rm target. The
+    /// parser receives a redirection glued (as an agent writes it) or split
+    /// (as normalize hands it over); both spellings appear below.
+    #[test]
+    fn test_rm_parser_redirection_is_not_a_target() {
+        for cmd in [
+            "rm -rf /tmp/x 2>/dev/null",
+            "rm -rf /tmp/x 2> /dev/null",
+            "rm -rf /tmp/x >/dev/null",
+            "rm -rf /tmp/x > /dev/null 2>&1",
+            "rm -rf /tmp/x 2>&1",
+            "rm -rf /tmp/x >|/tmp/log",
+            "rm -rf /tmp/x < /dev/null",
+            "rm -rf /tmp/x 2>>/tmp/log",
+            r#"rm -rf /tmp/x > "/dev/null""#,
+            "rm 2>/dev/null -rf /tmp/x",
+            "rm -r -f /tmp/x 2> /dev/null",
+            "rm --recursive --force /tmp/x 2> /dev/null",
+            r#"rm -rf "$TMPDIR/x" 2> /dev/null"#,
+        ] {
+            assert_rm_parser_allows(cmd);
+        }
+    }
+
+    /// The other half of `.agent-config-q6ub5`: dropping the redirection must
+    /// leave every real target judged, wherever the redirection sits.
+    #[test]
+    fn test_rm_parser_redirection_keeps_real_targets() {
+        for cmd in [
+            "rm -rf /Users/someone/x 2>/dev/null",
+            "rm -rf /Users/someone/x 2> /dev/null",
+            "rm -rf ~/x >/dev/null",
+            "rm -rf ~/x > /dev/null",
+            "rm -rf 2> /dev/null /Users/someone/x",
+            "rm -rf /tmp/x 2> /dev/null /",
+            // Quoted and escaped `>` are data, not operators, so `/etc` stays.
+            r#"rm -rf /tmp/x ">" /etc"#,
+            r"rm -rf /tmp/x \> /etc",
+            // The `&` of `2>&1` belongs to the operator; the word after the
+            // descriptor is still rm's.
+            "rm -rf /tmp/x 2>&1 /etc",
+            "rm -rf /tmp/x >&2 /etc",
+            "rm -rf /tmp/x >|/tmp/log /etc",
+            // Fail closed where the reader cannot see the redirection's end:
+            // a word cut at `(`, or an operator with no target.
+            "rm -rf /tmp/x <(echo) /etc",
+            "rm -rf /tmp/x >$(mktemp) /etc",
+            "rm -rf /tmp/x 2> $(mktemp) /etc",
+            "rm -rf /tmp/x 2>",
+            // ...or a file name the shell runs code to compute.
+            r#"rm -rf /tmp/x > "$(rm -rf ~)""#,
+            "rm -rf /tmp/x 2>`rm -rf ~`",
+            r#"rm -rf /tmp/x <<< "$(rm -rf ~)""#,
+        ] {
+            assert_rm_parser_denies(cmd, RM_RF_ROOT_HOME_NAME, Severity::Critical);
+        }
+        assert_rm_parser_denies(
+            "rm -rf ./build 2> /dev/null",
+            RM_RF_GENERAL_NAME,
+            Severity::High,
         );
     }
 
