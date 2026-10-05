@@ -2198,25 +2198,34 @@ const GIT_MESSAGE_SUBCOMMANDS: &[&str] = &["commit", "tag", "notes"];
 /// reaches an executor some other way (`git commit -F - <<'EOF' ... | bash`)
 /// is still judged, because the four vetoes below it still run.
 ///
-/// Reuses `operator_line_start` and `tokenize_backwards` -- the same line
-/// bound and the same tokenizer `extract_heredoc_target_command` resolves the
-/// receiver with -- so there is no second reading of the receiver's words.
+/// Asks `resolve_receiver` -- the same line bound, tokenizer and wrapper
+/// grammar `extract_heredoc_target_command` uses -- which word IS the command,
+/// and reads only that command's own arguments, so there is no second reading
+/// of the receiver's words. Until `.agent-config-qcwcw` there was one: this
+/// took the first word ANYWHERE on the line whose basename is `git`, so
+/// `bash -s git commit -F - <<'EOF'` and `python3 - git commit -F - <<'PY'`
+/// read as commit messages, and bodies that bash and python execute were
+/// masked (`.agent-config-cxdc9`; dcg audit finding A2). What this inherits
+/// is `resolve_receiver`'s own residual: a command word it skips as an
+/// argument (`./deploy`, `python3.11`) hands the receiver to a later word, for
+/// every sink and not only this one (`.agent-config-1phqc`).
 fn receiver_reads_stdin_as_a_message(command: &str, heredoc_start: usize) -> bool {
     let line_start = operator_line_start(command, heredoc_start);
     let Some(before) = command.get(line_start..heredoc_start) else {
         return false;
     };
     let tokens = tokenize_backwards(before.trim_end());
-    let ordered: Vec<&str> = tokens.iter().rev().map(String::as_str).collect();
+    let ordered: Vec<String> = tokens.iter().rev().cloned().collect();
 
-    // `/usr/bin/git`, and `sudo git` alike: the name is the last path segment.
-    let Some(git_at) = ordered
-        .iter()
-        .position(|t| t.rsplit('/').next() == Some("git"))
-    else {
+    // The program that reads the body must be git. `git` among another
+    // program's ARGUMENTS is data to that program, which may execute its stdin.
+    // `/usr/bin/git`, `sudo git` and `git -C dir` resolve to `git` here.
+    let Some((receiver, rest)) = resolve_receiver(&ordered, 0) else {
         return false;
     };
-    let rest = &ordered[git_at + 1..];
+    if receiver != "git" {
+        return false;
+    }
 
     // The SUBCOMMAND is the first word that is not a global option, and
     // `-C <dir>`, `-c k=v` and friends take a value that is not one either.
@@ -2242,8 +2251,10 @@ fn receiver_reads_stdin_as_a_message(command: &str, heredoc_start: usize) -> boo
     // `-F -`, `--file -`, `--file=-`, `-F-`: every spelling git's parse-options
     // accepts for "the message is on stdin".
     rest.windows(2)
-        .any(|w| matches!(w[0], "-F" | "--file") && w[1] == "-")
-        || rest.iter().any(|t| matches!(*t, "--file=-" | "-F-"))
+        .any(|w| matches!(w[0].as_str(), "-F" | "--file") && w[1] == "-")
+        || rest
+            .iter()
+            .any(|t| matches!(t.as_str(), "--file=-" | "-F-"))
 }
 
 /// Extract the command that receives a heredoc or here-string.
@@ -2283,7 +2294,7 @@ fn extract_heredoc_target_command(command: &str, heredoc_start: usize) -> Option
     // the operator.
     let tokens = tokenize_backwards(trimmed);
     let ordered: Vec<String> = tokens.iter().rev().cloned().collect();
-    resolve_receiver(&ordered, 0)
+    resolve_receiver(&ordered, 0).map(|(name, _args)| name)
 }
 
 /// How many times a receiver may be re-resolved through a stripped wrapper.
@@ -2294,8 +2305,9 @@ fn extract_heredoc_target_command(command: &str, heredoc_start: usize) -> Option
 /// list, so this is a backstop and not the termination argument.
 const MAX_WRAPPER_DELEGATIONS: usize = 8;
 
-/// Walk a simple command's tokens in order and return its command word.
-fn resolve_receiver(ordered: &[String], depth: usize) -> Option<String> {
+/// Walk a simple command's tokens in order and return its command word, and the
+/// words after it -- that command's own arguments, past any wrapper.
+fn resolve_receiver(ordered: &[String], depth: usize) -> Option<(String, Vec<String>)> {
     // A bare redirection OPERATOR takes the NEXT token as its target, so that
     // token is a filename and not the command word either.
     let mut expect_redirect_target = false;
@@ -2402,7 +2414,7 @@ fn resolve_receiver(ordered: &[String], depth: usize) -> Option<String> {
                 continue;
             }
 
-            return Some(basename.to_string());
+            return Some((basename.to_string(), ordered[index + 1..].to_vec()));
         }
 
         // Skip if this looks like a file with extension
@@ -2416,7 +2428,7 @@ fn resolve_receiver(ordered: &[String], depth: usize) -> Option<String> {
             continue;
         }
 
-        return Some(token.clone());
+        return Some((token.clone(), ordered[index + 1..].to_vec()));
     }
 
     None

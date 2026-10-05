@@ -37,7 +37,10 @@
 //!   ---------------------------------------------------------|------------------
 //!   drop the `receiver_reads_stdin_as_a_message` clause      | all six kill rows
 //!   accept any `-F`, not only `-F -`                         | a_message_file_that_is_not_stdin_is_not_this_sink
-//!   drop the `git` name test                                 | a_foreign_command_taking_dash_f_is_not_a_git_sink
+//!   drop the `git` name test                                 | a_shell_given_message_words_still_runs_its_stdin
+//!                                                            | (since `.agent-config-qcwcw`; the foreign
+//!                                                            | `notes add` row no longer kills it, because
+//!                                                            | only `notes`'s own words are read now)
 //!   drop the subcommand test                                 | a_git_subcommand_that_is_not_a_message_sink_is_not_inert
 //!   drop the global-option value skip                        | the_sink_survives_a_wrapper_a_path_and_a_global_option
 //! ```
@@ -240,6 +243,110 @@ fn the_piped_control_still_denies_in_hook_mode() {
         format!("{stdout}{stderr}").contains("core.filesystem:"),
         "the control must still deny on the wire\nstdout: {stdout}\nstderr: {stderr}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The RECEIVER must be git (`.agent-config-qcwcw`, dcg audit finding A2;
+// described first as `.agent-config-cxdc9`). The clause above used to take the
+// first word ANYWHERE on the line whose basename is `git`, so `git commit -F -`
+// written as the ARGUMENTS of a program that executes its stdin masked a body
+// that program runs. Measured on the installed hook (e3849407) at 6:42 PM CDT
+// 2026-10-04: rows 1 and 2 below ALLOWED, the controls denied.
+//
+// WHICH ROW IS A KILL, run against e3849407's `src/heredoc.rs` and restored:
+//
+//   row                                                    | e3849407
+//   -------------------------------------------------------|---------
+//   a_shell_given_git_words_as_arguments_still_runs_its_stdin | RED
+//   python_given_git_words_as_arguments_still_runs_its_stdin  | RED
+//   an_unknown_program_given_git_words_is_not_a_git_sink      | RED
+//   a_shell_given_message_words_still_runs_its_stdin          | green
+//   the_a2_envelopes_on_the_wire                              | RED
+//
+// The e3849407 column IS the mutant that reads git's words from the first
+// `git` on the line again. The other mutant, one change on the fixed tree,
+// restored after:
+//
+//   mutant                                          | rows it turns red
+//   ------------------------------------------------|-----------------------------
+//   drop the `receiver != "git"` test               | a_shell_given_message_words_still_runs_its_stdin
+// ---------------------------------------------------------------------------
+
+/// A2 row 3: `bash -s` reads its script from stdin. `git commit -F -` is bash's
+/// positional parameters, not a command that runs.
+#[test]
+fn a_shell_given_git_words_as_arguments_still_runs_its_stdin() {
+    for receiver in ["bash -s git commit -F -", "sh -s git commit -F -"] {
+        let cmd = format!("{receiver} <<'EOF'\n{TRIGGER}\nEOF");
+        assert_denied(&cmd, "the shell runs the body; git is only its argv");
+    }
+}
+
+/// A2 row 4: `python3 -` reads its program from stdin.
+#[test]
+fn python_given_git_words_as_arguments_still_runs_its_stdin() {
+    let cmd = "python3 - git commit -F - <<'PY'\nimport shutil\nshutil.rmtree(\"/srv/data\")\nPY";
+    assert_denied(cmd, "python runs the body; git is only its sys.argv");
+}
+
+/// cxdc9 row G04: a program this guard knows nothing about is not git's
+/// message path because its arguments spell one. Spelled `deploy`, not G04's
+/// `./deploy`: `resolve_receiver` skips a path it does not recognise and reads
+/// the NEXT word as the command, so `./deploy git ...` still resolves to git.
+/// That misread is the receiver reader's, not this clause's -- `python3.11 -
+/// cat <<'PY'` is masked the same way with no git on the line -- and is
+/// `.agent-config-1phqc`.
+#[test]
+fn an_unknown_program_given_git_words_is_not_a_git_sink() {
+    let cmd = format!("deploy git commit -F - <<'EOF'\n{TRIGGER}\nEOF");
+    assert_denied(&cmd, "an unknown receiver is not a message sink");
+}
+
+/// Kills the mutant that drops the receiver-name test: reading only the
+/// receiver's own arguments is not enough on its own, because bash's arguments
+/// can spell a message subcommand without any `git` at all.
+#[test]
+fn a_shell_given_message_words_still_runs_its_stdin() {
+    let cmd = format!("bash -s commit -F - <<'EOF'\n{TRIGGER}\nEOF");
+    assert_denied(&cmd, "the receiver is bash, whatever its argv spells");
+}
+
+/// The four A2 envelopes as the card states them, through the real binary:
+/// allow, deny, DENY, DENY. Row 1 is the real commit message, which must still
+/// reach git.
+#[test]
+fn the_a2_envelopes_on_the_wire() {
+    let commit = format!("git commit -F - <<'EOF'\ndocs: {TRIGGER} is what the guard stops\nEOF");
+    let (stdout, stderr, exit_code) = run_hook(&commit);
+    assert_eq!(exit_code, 0, "hook mode exits 0 whatever the verdict");
+    assert!(
+        stdout.trim().is_empty(),
+        "a real commit message must reach git\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let denied = [
+        (
+            format!("bash -s <<'EOF'\n{TRIGGER}\nEOF"),
+            "core.filesystem:",
+        ),
+        (
+            format!("bash -s git commit -F - <<'EOF'\n{TRIGGER}\nEOF"),
+            "core.filesystem:",
+        ),
+        (
+            "python3 - git commit -F - <<'PY'\nimport shutil\nshutil.rmtree(\"/srv/data\")\nPY"
+                .to_string(),
+            "heredoc.python:",
+        ),
+    ];
+    for (cmd, rule) in denied {
+        let (stdout, stderr, exit_code) = run_hook(&cmd);
+        assert_eq!(exit_code, 0, "hook mode exits 0 whatever the verdict");
+        assert!(
+            stdout.contains("\"deny\"") && format!("{stdout}{stderr}").contains(rule),
+            "must deny on the wire with {rule}: {cmd:?}\nstdout: {stdout}\nstderr: {stderr}"
+        );
+    }
 }
 
 /// Scope: stdin, not a file. `-F msg.txt` leaves the heredoc unread, and this
