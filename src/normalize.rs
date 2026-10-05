@@ -1279,6 +1279,15 @@ pub fn normalize_command_word_token(token: &str) -> Option<String> {
                         local_changed = true;
                         continue;
                     }
+                    // `\\` is one escaped backslash, so it does not escape the
+                    // byte after it. Read one byte at a time, `\\\a` lost one
+                    // backslash per normalization pass (.agent-config-4d55y).
+                    if next == '\\' {
+                        result.push(c);
+                        result.push(next);
+                        chars.next();
+                        continue;
+                    }
                 }
             }
             result.push(c);
@@ -1325,8 +1334,10 @@ pub fn normalize_command_word_token(token: &str) -> Option<String> {
         }
     }
 
-    // Strip Windows .exe extension from command words (e.g., git.exe -> git)
-    if out.to_ascii_lowercase().ends_with(".exe") && out.len() > 4 {
+    // Strip Windows .exe extension from command words (e.g., git.exe -> git).
+    // Every one, so `git.exe.exe` does not take one normalization pass per
+    // suffix (.agent-config-4d55y).
+    while out.to_ascii_lowercase().ends_with(".exe") && out.len() > 4 {
         out.truncate(out.len() - 4);
         changed = true;
     }
@@ -1559,8 +1570,18 @@ pub fn dequote_segment_command_words(command: &str) -> Cow<'_, str> {
         }
 
         // If we haven't found the command word yet, check wrappers/assignments.
-        if let Some(next_wrapper) = NormalizeWrapper::from_command_word(current) {
+        //
+        // The word is normalized first, so a wrapper spelled `sudo.exe` or
+        // `sudo""` is read as a wrapper here too. Read as the command word, it
+        // came out `sudo`, the wrapper step stripped it only on the next pass,
+        // and a run of them took one pass each (.agent-config-4d55y).
+        let replacement = normalize_command_word_token(current);
+        let word = replacement.as_deref().unwrap_or(current);
+        if let Some(next_wrapper) = NormalizeWrapper::from_command_word(word) {
             wrapper = next_wrapper;
+            if let Some(repl) = replacement {
+                replacements.push((tok.byte_range.clone(), repl));
+            }
             continue;
         }
 
@@ -1571,9 +1592,8 @@ pub fn dequote_segment_command_words(command: &str) -> Cow<'_, str> {
         // Found the segment's command word.
         segment_has_cmd = true;
 
-        let replacement = normalize_command_word_token(current);
         // Track the normalized command word for safe registry checks
-        current_cmd_word = Some(replacement.clone().unwrap_or_else(|| current.to_string()));
+        current_cmd_word = Some(word.to_string());
 
         if let Some(repl) = replacement {
             replacements.push((tok.byte_range.clone(), repl));
@@ -1988,8 +2008,36 @@ fn consume_redirection_run(bytes: &[u8], at: usize, len: usize) -> (Range<usize>
 /// Normalize a command by stripping absolute paths from common binaries.
 ///
 /// Returns the original command unchanged if normalization fails (fail-open).
-#[inline]
+///
+/// One pass runs every step once, and the steps feed each other: the command
+/// word dequote turns `"<"` into a glued `<` the redirection split already
+/// passed, and dequoting `sudo.exe` exposes a wrapper the wrapper step already
+/// passed. So one pass left work for the next, and normalizing twice differed
+/// from normalizing once (`.agent-config-4d55y`, found by `fuzz_normalize`).
+/// The pass repeats until its output stops changing.
+///
+/// Not by keeping such quotes on: the dequote is how the pack scan reads the
+/// shell string in `os.system('rm -rf /srv/data > /dev/null')`, and a dequote
+/// that left a quoted `>` alone let that delete through.
 pub fn normalize_command(cmd: &str) -> Cow<'_, str> {
+    let mut out = normalize_command_pass(cmd);
+    // Real commands settle in one or two passes. The cap bounds a cycle no
+    // input is known to make; `fuzz_normalize` would report one as
+    // non-idempotent.
+    for _ in 0..NORMALIZE_PASS_CAP {
+        let next = match normalize_command_pass(&out) {
+            Cow::Owned(next) if next != out.as_ref() => next,
+            _ => break,
+        };
+        out = Cow::Owned(next);
+    }
+    out
+}
+
+const NORMALIZE_PASS_CAP: usize = 8;
+
+#[inline]
+fn normalize_command_pass(cmd: &str) -> Cow<'_, str> {
     // 0. Restore the word break an unquoted redirection already makes, so the
     //    command word is visible to every later step (tokenizer, path
     //    normalizers, pack patterns).
@@ -2757,6 +2805,67 @@ mod redirection_position_tests {
         assert_eq!(
             normalize_command("git>/dev/null reset --hard").as_ref(),
             "git reset --hard > /dev/null"
+        );
+    }
+}
+
+/// `normalize_command(normalize_command(x)) == normalize_command(x)`, the
+/// property `fuzz_normalize` asserts (`.agent-config-4d55y`). Every row is the
+/// exact output, checked again after a second call.
+#[cfg(test)]
+mod idempotence_tests {
+    use super::normalize_command;
+
+    fn assert_settled(input: &str, expected: &str) {
+        let once = normalize_command(input);
+        assert_eq!(once.as_ref(), expected, "{input:?}");
+        assert_eq!(normalize_command(&once).as_ref(), expected, "{input:?}");
+    }
+
+    /// Each input `fuzz_normalize` failed on before the pass repeated.
+    #[test]
+    fn the_inputs_fuzz_normalize_found_settle_in_one_call() {
+        for (input, expected) in [
+            // 00 22 3c 22: the dequote gave a glued `\0<`, the next call split it.
+            ("\0\"<\"", "\0 <"),
+            // 3c 20 00 20 00 3c: a target-less `<` took the parked one as target.
+            ("< \0 \0<", "\0 \0 < <"),
+            // 5c 22 22 61, CI run 37245858853: the dequote left `\a`.
+            ("\\\"\"a", "a"),
+            // 2a 5c 5c 7a 7a 00: `\\` is one escaped backslash, not an escape of `z`.
+            ("*\\\\zz\0", "*\\\\zz\0"),
+            // 27 5c 27 0a, CI run 37247496130: the dequoted `\` and the newline
+            // after it are a line continuation.
+            ("'\\'\n", ""),
+        ] {
+            assert_settled(input, expected);
+        }
+    }
+
+    /// A run of the same thing settles in one call however long it is, not one
+    /// call per repeat. Each run is longer than the pass cap, so a step that
+    /// strips one repeat per pass fails here.
+    #[test]
+    fn a_long_run_settles_in_one_call() {
+        assert_settled(&format!("git{}", ".exe".repeat(10)), "git");
+        assert_settled(
+            &format!("{}git reset --hard", "sudo.exe ".repeat(10)),
+            "git reset --hard",
+        );
+        assert_settled(
+            &format!("x{}a", "\\".repeat(21)),
+            &format!("x{}a", "\\".repeat(20)),
+        );
+    }
+
+    /// The dequote is how the pack scan reads a shell string handed to another
+    /// language. Keeping the quotes on around a `>` would have settled the
+    /// first row too, and let this delete through.
+    #[test]
+    fn a_quoted_shell_string_is_still_read_as_a_command() {
+        assert_settled(
+            "python3 <<'PY'\nimport os\nos.system('rm -rf /srv/data > /dev/null')\nPY",
+            "python3 <<'PY'\nimport os\nos.system(rm -rf /srv/data > /dev/null)\nPY",
         );
     }
 }
