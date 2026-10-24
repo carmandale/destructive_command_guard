@@ -264,6 +264,66 @@ pub(crate) fn parse_rm_command(command: &str) -> RmParseDecision {
     RmParseDecision::NoMatch
 }
 
+/// Exempt only a static trap action proven safe by the same rm target parser.
+/// A quoted action is deferred code, so the ordinary command scan cannot see
+/// it. Never exempt its surrounding command or an unparsed compound action.
+pub(crate) fn safe_rm_trap_spans(command: &str) -> Vec<(usize, usize)> {
+    let tokens = tokenize_for_normalization(command);
+    let mut spans = Vec::new();
+    for segment in tokens.split(|token| token.kind == NormalizeTokenKind::Separator) {
+        if segment.first().and_then(|token| token.text(command)) != Some("trap") {
+            continue;
+        }
+        let action_index = if segment.get(1).and_then(|token| token.text(command)) == Some("--") {
+            2
+        } else {
+            1
+        };
+        let Some(action) = segment.get(action_index) else {
+            continue;
+        };
+        let Some(raw) = action.text(command) else {
+            continue;
+        };
+        let Some(body) = raw
+            .strip_prefix('\'')
+            .and_then(|text| text.strip_suffix('\''))
+        else {
+            continue;
+        };
+        // Adjacent quoted fragments and substitutions are outside this narrow
+        // proof. Signal arguments must be plain names or numbers.
+        if body.contains(['\'', '`']) || body.contains("$(") {
+            continue;
+        }
+        let signals = &segment[action_index + 1..];
+        if signals.is_empty()
+            || signals.iter().any(|token| {
+                token.text(command).is_none_or(|text| {
+                    text.is_empty()
+                        || !text
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                })
+            })
+        {
+            continue;
+        }
+        let action_tokens = tokenize_for_normalization(body);
+        if action_tokens.first().and_then(|token| token.text(body)) != Some("rm")
+            || action_tokens
+                .iter()
+                .any(|token| token.kind == NormalizeTokenKind::Separator)
+        {
+            continue;
+        }
+        if matches!(parse_rm_command(body), RmParseDecision::Allow) {
+            spans.push((action.byte_range.start + 1, action.byte_range.end - 1));
+        }
+    }
+    spans
+}
+
 #[allow(clippy::too_many_lines)]
 fn parse_rm_segment(
     command: &str,
@@ -1200,6 +1260,35 @@ mod tests {
         assert_safe_pattern_matches(&pack, "rm -fr /tmp/test");
         assert_safe_pattern_matches(&pack, "rm -r -f /tmp/test");
         assert_safe_pattern_matches(&pack, "rm --recursive --force /tmp/test");
+    }
+
+    #[test]
+    fn static_safe_trap_exempts_only_its_action() {
+        let command = "ps -p 1 -o pid,comm\ntrap 'rm -rf /tmp/example' EXIT\ntrap 'rm -rf /' INT";
+        let spans = safe_rm_trap_spans(command);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(&command[spans[0].0..spans[0].1], "rm -rf /tmp/example");
+        assert_eq!(
+            safe_rm_trap_spans("trap -- 'rm -rf \"$TMPDIR/example\"' EXIT").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn unsafe_or_unparsed_trap_actions_get_no_exemption() {
+        for command in [
+            "trap 'rm -rf /' EXIT",
+            "trap 'rm -rf ~/' EXIT",
+            "trap 'rm -rf /tmp/example /Users/example' EXIT",
+            "trap 'rm -rf /tmp/example; rm -rf /' EXIT",
+            "trap 'rm -rf \"$TASK_DIR\"' EXIT",
+            "trap 'rm -rf /tmp/$(echo example)' EXIT",
+            "trap 'rm -rf /tmp/`echo example`' EXIT",
+            "echo trap 'rm -rf /tmp/example' EXIT",
+            "trap \"rm -rf /tmp/example\" EXIT",
+        ] {
+            assert!(safe_rm_trap_spans(command).is_empty(), "{command}");
+        }
     }
 
     #[test]

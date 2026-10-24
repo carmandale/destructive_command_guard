@@ -394,13 +394,21 @@ fn strip_env(command: &str) -> Option<(String, StrippedWrapper)> {
         return None;
     }
 
-    let rest = after_env.trim_start();
+    let rest = after_env.trim_start_matches([' ', '\t']);
     if rest.is_empty() {
         // Just "env" with no args - don't strip (it prints environment)
         return None;
     }
 
-    let bytes = rest.as_bytes();
+    // env with no program prints its environment. Do not consume a later
+    // simple command as that program: option/assignment parsing otherwise
+    // skips newlines, and a pipe used to become the supposed command word.
+    // Reuse the shell tokenizer so separators inside quoted values stay data.
+    let segment_end = tokenize_for_normalization(rest)
+        .iter()
+        .find(|token| token.kind == NormalizeTokenKind::Separator)
+        .map_or(rest.len(), |token| token.byte_range.start);
+    let bytes = &rest.as_bytes()[..segment_end];
     let mut idx = 0;
 
     // Phase 1: Parse options (including -S/--split-string special case)
@@ -410,6 +418,29 @@ fn strip_env(command: &str) -> Option<(String, StrippedWrapper)> {
         EnvParseResult::SplitString(idx, remaining) => {
             let stripped_len = trimmed.len() - rest.len() + idx;
             let stripped_text = trimmed[..stripped_len].trim_end().to_string();
+            // -S expands env's own arguments. A plain program can be returned
+            // directly, preserving the one-wrapper record. Options or
+            // assignments need another bounded iteration; an empty string or
+            // a shell separator still describes an environment dump.
+            let remaining = remaining.trim_start_matches([' ', '\t']);
+            let tokens = tokenize_for_normalization(remaining);
+            let plain_program = tokens.first().is_some_and(|token| {
+                token.kind == NormalizeTokenKind::Word
+                    && token.text(remaining).is_some_and(|word| {
+                        !word.starts_with(['-', '#'])
+                            && !word
+                                .trim_start_matches(|c: char| c.is_ascii_digit())
+                                .starts_with(['<', '>'])
+                    })
+                    && parse_env_assignments(remaining.as_bytes(), 0) == 0
+            });
+            let remaining = if plain_program {
+                remaining.to_string()
+            } else if remaining.is_empty() {
+                String::from("env")
+            } else {
+                format!("env {remaining}")
+            };
             return Some((
                 remaining,
                 StrippedWrapper {
@@ -428,9 +459,17 @@ fn strip_env(command: &str) -> Option<(String, StrippedWrapper)> {
         idx += 1;
     }
 
-    let remaining = &rest[idx..];
-    if remaining.is_empty() {
+    if idx >= bytes.len() {
         // env with no command (just assignments) - don't strip
+        return None;
+    }
+
+    let remaining = &rest[idx..];
+    // A redirection (possibly with an fd prefix) or shell comment is not a
+    // program either. normalize_command parks redirections at the end first;
+    // direct strip_wrapper_prefixes callers conservatively retain env here.
+    let after_fd = remaining.trim_start_matches(|c: char| c.is_ascii_digit());
+    if remaining.starts_with('#') || after_fd.starts_with(['<', '>']) {
         return None;
     }
 
@@ -529,9 +568,6 @@ fn parse_env_options(rest: &str, bytes: &[u8], mut idx: usize) -> EnvParseResult
                 }
                 "--split-string" => {
                     let raw_arg = if let Some(value) = value_opt {
-                        if value.is_empty() {
-                            return EnvParseResult::Abort;
-                        }
                         value.to_string()
                     } else {
                         let Some(next_idx) = consume_env_arg(word_end) else {
@@ -2175,6 +2211,55 @@ mod tests {
     fn test_env_alone() {
         let result = strip_wrapper_prefixes("env");
         assert!(!result.was_normalized());
+    }
+
+    #[test]
+    fn test_env_without_command_is_not_a_wrapper() {
+        for command in [
+            "env | grep PUBLIC_NAME",
+            "env -u PUBLIC_NAME | sort",
+            "env PUBLIC_MODE=test; true",
+            "env && true",
+            "env\ntrue",
+            "env PUBLIC_MODE=test\ntrue",
+            "env # a comment is not a command",
+            "env > /tmp/example.txt",
+            "env 1> /tmp/example.txt",
+            "env < /dev/null",
+            "env 10>> /tmp/example.txt",
+        ] {
+            let result = strip_wrapper_prefixes(command);
+            assert!(!result.was_normalized(), "{command:?}");
+            assert_eq!(normalize_command(command), command, "{command:?}");
+        }
+    }
+
+    #[test]
+    fn test_env_real_command_keeps_wrapper_behavior() {
+        for (command, expected) in [
+            (
+                "env PUBLIC_MODE=test python3 script.py",
+                "python3 script.py",
+            ),
+            ("env -u PUBLIC_NAME git status | cat", "git status | cat"),
+            ("env PUBLIC_MODE='one\ntwo' git status", "git status"),
+            ("sudo -n env PUBLIC_MODE=test git status", "git status"),
+            ("command env git status", "git status"),
+        ] {
+            assert_eq!(strip_wrapper_prefixes(command).normalized, expected);
+        }
+    }
+
+    #[test]
+    fn test_env_split_string_without_program_keeps_env() {
+        for (command, expected) in [
+            ("env -S ''", "env"),
+            ("env -S 'PUBLIC_MODE=test'", "env PUBLIC_MODE=test"),
+            ("env -S '' | sort", "env | sort"),
+            ("env --split-string=''", "env"),
+        ] {
+            assert_eq!(normalize_command(command), expected, "{command:?}");
+        }
     }
 
     #[test]
