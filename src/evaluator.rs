@@ -2026,6 +2026,8 @@ fn evaluate_packs_with_allowlists(
                     if pack.matches_safe(command_for_packs) {
                         continue;
                     }
+                    safe_spans =
+                        crate::packs::core::filesystem::safe_rm_trap_spans(command_for_packs);
                 }
                 Some(crate::packs::core::filesystem::RmParseDecision::Deny(hit)) => {
                     if let Some(allow_hit) =
