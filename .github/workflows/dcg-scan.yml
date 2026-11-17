@@ -51,10 +51,10 @@ jobs:
             RELEASE_URL="https://api.github.com/repos/Dicklesworthstone/destructive_command_guard/releases/tags/$DCG_VERSION"
           fi
 
-          # Get download URL for Linux x86_64 binary
+          # Release assets are archives; select the Linux x86_64 archive,
+          # not a signature/checksum sidecar, and unpack the executable.
           DOWNLOAD_URL=$(curl -sL "$RELEASE_URL" | \
-            jq -r '.assets[] | select(.name | contains("linux") and contains("x86_64")) | .browser_download_url' | \
-            head -1)
+            jq -r '.assets[] | select(.name == "dcg-x86_64-unknown-linux-musl.tar.xz") | .browser_download_url')
 
           if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
             echo "::warning::No pre-built binary found, building from source..."
@@ -65,9 +65,9 @@ jobs:
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           else
             echo "Downloading dcg from: $DOWNLOAD_URL"
-            curl -sL "$DOWNLOAD_URL" -o dcg
-            chmod +x dcg
-            sudo mv dcg /usr/local/bin/
+            curl -fLsS "$DOWNLOAD_URL" -o dcg.tar.xz
+            tar -xJf dcg.tar.xz dcg
+            sudo install -m 0755 dcg /usr/local/bin/dcg
           fi
 
       - name: Verify dcg installation
