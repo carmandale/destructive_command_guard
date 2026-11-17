@@ -1076,10 +1076,9 @@ pub fn sanitize_for_pattern_matching(command: &str) -> Cow<'_, str> {
     let mut pending_safe_flag: Option<PendingSafeFlag<'_>> = None; // Safe flag waiting for value(s)
     let mut options_ended = false;
     let mut search_pattern_masked = false;
-    // A bare redirection OPERATOR inside a search command's argument list takes
-    // the NEXT token as its target, so that token is a filename and not the
-    // pattern either. `.agent-config-y5eor`.
-    let mut search_expects_redirect_target = false;
+    // Redirections belong to the shell, not to a print/search command's data
+    // arguments. A bare operator also owns the next token (the filename).
+    let mut expects_redirect_target = false;
     let mut wrapper: WrapperState = WrapperState::None;
     let mut command_query_mode = false;
     let mut search_cmd_override: Option<&str> = None;
@@ -1094,6 +1093,7 @@ pub fn sanitize_for_pattern_matching(command: &str) -> Cow<'_, str> {
             pending_safe_flag = None;
             options_ended = false;
             search_pattern_masked = false;
+            expects_redirect_target = false;
             wrapper = WrapperState::None;
             command_query_mode = false;
             search_cmd_override = None;
@@ -1194,6 +1194,17 @@ pub fn sanitize_for_pattern_matching(command: &str) -> Cow<'_, str> {
             }
         }
 
+        if segment_cmd_is_all_args_data || is_search_command(search_cmd_override.unwrap_or(cmd)) {
+            if expects_redirect_target {
+                expects_redirect_target = false;
+                continue;
+            }
+            if crate::heredoc::is_redirection_token(token_text) {
+                expects_redirect_target = crate::heredoc::is_bare_redirection_operator(token_text);
+                continue;
+            }
+        }
+
         if segment_cmd_is_all_args_data {
             // For commands like echo/printf, treat all args as data, but never strip inline code.
             if !token.has_inline_code {
@@ -1290,28 +1301,6 @@ pub fn sanitize_for_pattern_matching(command: &str) -> Cow<'_, str> {
 
             let is_option = !options_ended && token_text.starts_with('-') && token_text != "-";
             if is_option {
-                continue;
-            }
-
-            // A REDIRECTION is not the pattern. `grep <<'EOF'` has no positional
-            // pattern at all -- the text arrives on stdin -- so the first
-            // non-flag token is the heredoc operator, and masking it to spaces
-            // destroyed the `<<`. Heredoc masking runs LATER, on this function's
-            // output (evaluator.rs steps 5 -> 6 -> 7), so it then found no
-            // heredoc and handed the body to every rule in every pack: `grep
-            // <<'EOF'` denied while `grep pat <<'EOF'` allowed, inverting on
-            // whether a pattern token happened to be there to be eaten instead.
-            // Same shape as the receiver resolver's own redirection arm in
-            // `extract_heredoc_target_command`, and it reuses that arm's two
-            // predicates rather than restating them, so the two readers cannot
-            // drift apart (.claude/rules/single-source.md). `.agent-config-y5eor`.
-            if search_expects_redirect_target {
-                search_expects_redirect_target = false;
-                continue;
-            }
-            if crate::heredoc::is_redirection_token(token_text) {
-                search_expects_redirect_target =
-                    crate::heredoc::is_bare_redirection_operator(token_text);
                 continue;
             }
 
@@ -2922,6 +2911,27 @@ mod tests {
             .iter()
             .find(|s| s.kind == SpanKind::InlineCode);
         assert!(code_span.is_some(), "python -c content must be InlineCode");
+    }
+
+    #[test]
+    fn sanitize_preserves_print_command_redirections() {
+        for command in ["echo", "printf"] {
+            for redirect in ["> target", ">> 'target'", ">\"target\"", "2>target"] {
+                let cmd = format!("{command} 'rm -rf /' {redirect}");
+                let sanitized = sanitize_for_pattern_matching(&cmd);
+                assert!(
+                    sanitized.contains(redirect),
+                    "lost redirect: {cmd} -> {sanitized}"
+                );
+                assert!(
+                    !sanitized.contains("rm -rf"),
+                    "printed data remained: {cmd}"
+                );
+            }
+        }
+        for cmd in ["echo '> target'", "printf '%s' '> target'"] {
+            assert!(!sanitize_for_pattern_matching(cmd).contains("target"));
+        }
     }
 
     #[test]
