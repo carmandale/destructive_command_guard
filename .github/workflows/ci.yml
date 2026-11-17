@@ -489,7 +489,12 @@ jobs:
           # (.agent-config-h4qaa) and what the budgets in src/perf.rs are
           # written against. These tests assert memory GROWTH against a
           # runtime baseline, so the profile moves the baseline, not the budget.
-          if cargo test --test memory_tests --profile bench -- --nocapture --test-threads=1 2>&1 | tee -a memory-output.log; then
+          # The bench profile alone still lost two hosted runners during
+          # dependency compilation (.agent-config-px81m, run 44050086067).
+          # Keep two compilers on this 4-vCPU / 16-GB runner so the runner
+          # service has headroom. Keep the profile and test assertions intact;
+          # time reports peak child RSS alongside the test result.
+          if /usr/bin/time -v cargo test --jobs 2 --test memory_tests --profile bench -- --nocapture --test-threads=1 2>&1 | tee -a memory-output.log; then
             echo "" | tee -a memory-output.log
             echo "=== Memory Tests: ALL PASSED ===" | tee -a memory-output.log
             echo "memory_tests_result=passed" >> $GITHUB_OUTPUT
