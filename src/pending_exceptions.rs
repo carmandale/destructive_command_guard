@@ -14,6 +14,8 @@ use std::env;
 use std::fmt::Write as FmtWrite;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom, Write};
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::config::{config_dir_override, resolve_config_path_value};
@@ -1161,12 +1163,15 @@ fn open_locked(path: &Path) -> io::Result<File> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(path)?;
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true).truncate(false);
+    // Both stores retain raw commands. Create privately even with a permissive
+    // umask, then repair existing files through the opened descriptor before use.
+    #[cfg(unix)]
+    options.mode(0o600);
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     file.lock_exclusive()?;
     Ok(file)
 }
@@ -1435,6 +1440,102 @@ mod tests {
             enabled: true,
             mode: crate::logging::RedactionMode::Arguments,
             max_argument_len: 8,
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_store_creation_is_owner_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (pending, dir) = make_store();
+        let now = Utc::now();
+        let redaction = redaction_config();
+        let (record, _) = pending
+            .record_block(
+                "fixture-command",
+                "/repo",
+                "fixture",
+                &redaction,
+                false,
+                None,
+                None,
+            )
+            .unwrap();
+        let allow = AllowOnceStore::new(dir.path().join("allow_once.jsonl"));
+        let entry = AllowOnceEntry::from_pending(
+            &record,
+            now,
+            AllowOnceScopeKind::Cwd,
+            "/repo",
+            true,
+            false,
+            &redaction,
+        );
+        allow.add_entry(&entry, now).unwrap();
+
+        for path in [pending.path(), allow.path()] {
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "raw-command store must be owner-private: {}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_store_open_repairs_permissions_without_changing_records() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (pending, dir) = make_store();
+        let now = Utc::now();
+        let redaction = redaction_config();
+        let record = PendingExceptionRecord::new(
+            now,
+            "/repo",
+            "fixture-command",
+            "fixture",
+            &redaction,
+            false,
+            None,
+        );
+        let allow = AllowOnceStore::new(dir.path().join("allow_once.jsonl"));
+        let entry = AllowOnceEntry::from_pending(
+            &record,
+            now,
+            AllowOnceScopeKind::Cwd,
+            "/repo",
+            true,
+            false,
+            &redaction,
+        );
+        let fixtures = [
+            (
+                pending.path(),
+                format!("{}\n", serde_json::to_string(&record).unwrap()),
+            ),
+            (
+                allow.path(),
+                format!("{}\n", serde_json::to_string(&entry).unwrap()),
+            ),
+        ];
+        for (path, contents) in &fixtures {
+            std::fs::write(path, contents).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+
+        assert_eq!(pending.preview_active(now).unwrap().0, vec![record]);
+        assert_eq!(allow.preview_active(now).unwrap().0, vec![entry]);
+        for (path, contents) in &fixtures {
+            assert_eq!(std::fs::read_to_string(path).unwrap(), *contents);
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "existing raw-command store must be repaired: {}",
+                path.display()
+            );
         }
     }
 
