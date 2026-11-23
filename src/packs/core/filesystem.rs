@@ -107,11 +107,9 @@ const RM_RF_ROOT_HOME_REASON: &str = "rm -rf on root or home paths is EXTREMELY 
 const RM_RF_GENERAL_NAME: &str = "rm-rf-general";
 const RM_RF_GENERAL_REASON: &str = "rm -rf is destructive and is not run here. Remove what you made with trash <path> or git worktree remove <path>.";
 const RM_R_F_SEPARATE_NAME: &str = "rm-r-f-separate";
-const RM_R_F_SEPARATE_REASON: &str =
-    "rm with separate -r -f flags is destructive and is not run here. Remove what you made with trash <path> or git worktree remove <path>.";
+const RM_R_F_SEPARATE_REASON: &str = "rm with separate -r -f flags is destructive and is not run here. Remove what you made with trash <path> or git worktree remove <path>.";
 const RM_RECURSIVE_FORCE_NAME: &str = "rm-recursive-force-long";
-const RM_RECURSIVE_FORCE_REASON: &str =
-    "rm --recursive --force is destructive and is not run here. Remove what you made with trash <path> or git worktree remove <path>.";
+const RM_RECURSIVE_FORCE_REASON: &str = "rm --recursive --force is destructive and is not run here. Remove what you made with trash <path> or git worktree remove <path>.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QuoteKind {
