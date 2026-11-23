@@ -245,7 +245,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         destructive_pattern!(
             "find-delete-outside-temp",
             r"find\s[^;&|]*\s-delete\b",
-            "find -delete removes every file the walk reaches. Outside a temp directory this is recursive deletion and requires human approval — ask the user to run it manually.",
+            "find -delete removes every file the walk reaches. Outside a temp directory this is recursive deletion and is not run here. Remove what you made with trash <path> or git worktree remove <path>.",
             High,
             "find -delete walks the whole tree under its starting path and unlinks \
              everything the expression selects. There is no confirmation, no \
@@ -271,7 +271,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         destructive_pattern!(
             "find-exec-delete-outside-temp",
             r"find\s[^;&|]*-(?:exec|ok)(?:dir)?\s+(?:sudo\s+)?(?:/\S*/)?(?:rm|unlink|shred)\b",
-            "find -exec rm runs a delete on every file the walk reaches. Outside a temp directory this is recursive deletion and requires human approval — ask the user to run it manually.",
+            "find -exec rm runs a delete on every file the walk reaches. Outside a temp directory this is recursive deletion and is not run here. Remove what you made with trash <path> or git worktree remove <path>.",
             High,
             "find -exec rm is rm -rf with extra steps: the walk supplies the paths \
              and rm unlinks them one batch at a time. -f on the rm suppresses even \
@@ -294,7 +294,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         destructive_pattern!(
             "find-xargs-delete-outside-temp",
             r"find\s[^;&]*\|\s*(?:sudo\s+)?(?:/\S*/)?xargs\s+(?:-\S+\s+)*(?:sudo\s+)?(?:/\S*/)?(?:rm|unlink|shred)\b",
-            "find piped into xargs rm deletes every file the walk reaches. Outside a temp directory this is recursive deletion and requires human approval — ask the user to run it manually.",
+            "find piped into xargs rm deletes every file the walk reaches. Outside a temp directory this is recursive deletion and is not run here. Remove what you made with trash <path> or git worktree remove <path>.",
             High,
             "find | xargs rm is the third spelling of the same act. The pipe makes it \
              read like two harmless halves — a walk that prints, and an rm that is \

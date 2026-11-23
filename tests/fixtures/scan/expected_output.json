@@ -38,7 +38,7 @@
       "decision": "deny",
       "severity": "error",
       "rule_id": "core.filesystem:rm-rf-general",
-      "reason": "rm -rf is destructive and requires human approval. Explain what you want to delete and why, then ask the user to run the command manually.",
+      "reason": "rm -rf is destructive and is not run here. Remove what you made with trash <path> or git worktree remove <path>.",
       "suggestion": "Use `rm -ri` for interactive confirmation of each file"
     },
     {
@@ -71,7 +71,7 @@
       "decision": "deny",
       "severity": "error",
       "rule_id": "core.filesystem:rm-rf-root-home",
-      "reason": "rm -rf on root or home paths is EXTREMELY DANGEROUS. This command will NOT be executed. Ask the user to run it manually if truly needed.",
+      "reason": "rm -rf on root or home paths is EXTREMELY DANGEROUS. This command will NOT be executed. Remove what you made with trash <path> or git worktree remove <path>.",
       "suggestion": "Use `rm -ri` for interactive confirmation of each file"
     },
     {
@@ -82,7 +82,7 @@
       "decision": "deny",
       "severity": "error",
       "rule_id": "core.filesystem:rm-rf-general",
-      "reason": "rm -rf is destructive and requires human approval. Explain what you want to delete and why, then ask the user to run the command manually.",
+      "reason": "rm -rf is destructive and is not run here. Remove what you made with trash <path> or git worktree remove <path>.",
       "suggestion": "Use `rm -ri` for interactive confirmation of each file"
     },
     {
@@ -126,7 +126,7 @@
       "decision": "deny",
       "severity": "error",
       "rule_id": "core.filesystem:rm-rf-root-home",
-      "reason": "rm -rf on root or home paths is EXTREMELY DANGEROUS. This command will NOT be executed. Ask the user to run it manually if truly needed.",
+      "reason": "rm -rf on root or home paths is EXTREMELY DANGEROUS. This command will NOT be executed. Remove what you made with trash <path> or git worktree remove <path>.",
       "suggestion": "Use `rm -ri` for interactive confirmation of each file"
     },
     {
@@ -137,7 +137,7 @@
       "decision": "deny",
       "severity": "error",
       "rule_id": "core.filesystem:rm-rf-root-home",
-      "reason": "rm -rf on root or home paths is EXTREMELY DANGEROUS. This command will NOT be executed. Ask the user to run it manually if truly needed.",
+      "reason": "rm -rf on root or home paths is EXTREMELY DANGEROUS. This command will NOT be executed. Remove what you made with trash <path> or git worktree remove <path>.",
       "suggestion": "Use `rm -ri` for interactive confirmation of each file"
     }
   ]

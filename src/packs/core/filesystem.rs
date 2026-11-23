@@ -103,15 +103,15 @@ use crate::{normalize::NormalizeTokenKind, normalize::tokenize_for_normalization
 use std::ops::Range;
 
 const RM_RF_ROOT_HOME_NAME: &str = "rm-rf-root-home";
-const RM_RF_ROOT_HOME_REASON: &str = "rm -rf on root or home paths is EXTREMELY DANGEROUS. This command will NOT be executed. Ask the user to run it manually if truly needed.";
+const RM_RF_ROOT_HOME_REASON: &str = "rm -rf on root or home paths is EXTREMELY DANGEROUS. This command will NOT be executed. Remove what you made with trash <path> or git worktree remove <path>.";
 const RM_RF_GENERAL_NAME: &str = "rm-rf-general";
-const RM_RF_GENERAL_REASON: &str = "rm -rf is destructive and requires human approval. Explain what you want to delete and why, then ask the user to run the command manually.";
+const RM_RF_GENERAL_REASON: &str = "rm -rf is destructive and is not run here. Remove what you made with trash <path> or git worktree remove <path>.";
 const RM_R_F_SEPARATE_NAME: &str = "rm-r-f-separate";
 const RM_R_F_SEPARATE_REASON: &str =
-    "rm with separate -r -f flags is destructive and requires human approval.";
+    "rm with separate -r -f flags is destructive and is not run here. Remove what you made with trash <path> or git worktree remove <path>.";
 const RM_RECURSIVE_FORCE_NAME: &str = "rm-recursive-force-long";
 const RM_RECURSIVE_FORCE_REASON: &str =
-    "rm --recursive --force is destructive and requires human approval.";
+    "rm --recursive --force is destructive and is not run here. Remove what you made with trash <path> or git worktree remove <path>.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QuoteKind {
@@ -973,7 +973,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         destructive_pattern!(
             "rm-rf-root-home",
             r"rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+[/~]|rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+[/~]",
-            "rm -rf on root or home paths is EXTREMELY DANGEROUS. This command will NOT be executed. Ask the user to run it manually if truly needed.",
+            "rm -rf on root or home paths is EXTREMELY DANGEROUS. This command will NOT be executed. Remove what you made with trash <path> or git worktree remove <path>.",
             Critical,
             "This command would recursively delete files starting from the root filesystem (/) \
              or home directory (~). This is catastrophic and will destroy:\n\n\
@@ -993,7 +993,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         destructive_pattern!(
             "rm-rf-general",
             r"rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f|rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR]",
-            "rm -rf is destructive and requires human approval. Explain what you want to delete and why, then ask the user to run the command manually.",
+            "rm -rf is destructive and is not run here. Remove what you made with trash <path> or git worktree remove <path>.",
             High,
             "rm -rf recursively removes files and directories without confirmation prompts. \
              The -f (force) flag suppresses all warnings, making accidental deletions \
@@ -1016,7 +1016,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         destructive_pattern!(
             "rm-r-f-separate",
             r"rm\s+(-[a-zA-Z]+\s+)*-[rR]\s+(-[a-zA-Z]+\s+)*-f|rm\s+(-[a-zA-Z]+\s+)*-f\s+(-[a-zA-Z]+\s+)*-[rR]",
-            "rm with separate -r -f flags is destructive and requires human approval.",
+            "rm with separate -r -f flags is destructive and is not run here. Remove what you made with trash <path> or git worktree remove <path>.",
             High,
             "rm with separate -r and -f flags has the same effect as rm -rf: recursive \
              forced deletion without confirmation.\n\n\
@@ -1036,7 +1036,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         destructive_pattern!(
             "rm-recursive-force-long",
             r"rm\s+.*--recursive.*--force|rm\s+.*--force.*--recursive",
-            "rm --recursive --force is destructive and requires human approval.",
+            "rm --recursive --force is destructive and is not run here. Remove what you made with trash <path> or git worktree remove <path>.",
             High,
             "rm --recursive --force is the long-form equivalent of rm -rf. While more \
              readable, it carries identical risks: silent, recursive, irreversible deletion.\n\n\
