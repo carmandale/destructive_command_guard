@@ -504,7 +504,12 @@ fn format_explanation_block(explanation: &str) -> String {
 /// and not require me to clean up their messes"; .agent-config-5q23m). Every
 /// other pack keeps the ask-the-user line, because some refuse exactly what
 /// only the user's own hand may do (Tailnet Lock, writes as the owner).
-const DELETE_PACKS: [&str; 3] = ["core.filesystem", "core.find", "local.recursive_rm"];
+const DELETE_PACKS: [&str; 4] = [
+    "core.filesystem",
+    "core.find",
+    "local.recursive_rm",
+    "local.trash_verbs",
+];
 
 const ASK_USER_CLOSING: &str = "If this operation is truly needed, ask the user for explicit \
      permission and have them run the command manually.";
@@ -1333,6 +1338,7 @@ mod tests {
             ("core.filesystem", "rm-rf-root-home"),
             ("core.find", "find-delete-outside-temp"),
             ("local.recursive_rm", "recursive-rm-absolute-or-home-target"),
+            ("local.trash_verbs", "move-into-trash-directory"),
         ] {
             let message = format_denial_message(
                 "rm -rf ~/dev/leftover",
