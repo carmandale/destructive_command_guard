@@ -496,6 +496,35 @@ fn format_explanation_block(explanation: &str) -> String {
     output
 }
 
+/// Packs whose every rule refuses a delete.
+///
+/// Their refusal must not tell the agent to hand the delete to the user: what
+/// an agent made, it removes itself through a route that keeps a recovery path
+/// (Dale, 2026-11-23: "I need agents to be able to clean up after themselves
+/// and not require me to clean up their messes"; .agent-config-5q23m). Every
+/// other pack keeps the ask-the-user line, because some refuse exactly what
+/// only the user's own hand may do (Tailnet Lock, writes as the owner).
+const DELETE_PACKS: [&str; 4] = [
+    "core.filesystem",
+    "core.find",
+    "local.recursive_rm",
+    "local.trash_verbs",
+];
+
+const ASK_USER_CLOSING: &str = "If this operation is truly needed, ask the user for explicit \
+     permission and have them run the command manually.";
+
+const DELETE_CLOSING: &str = "Never hand this delete to the user: if you made it, remove it \
+     yourself through trash <path>, git worktree remove <path>, or a mktemp -d scratch dir.";
+
+fn closing_line(pack: Option<&str>) -> &'static str {
+    if pack.is_some_and(|p| DELETE_PACKS.contains(&p)) {
+        DELETE_CLOSING
+    } else {
+        ASK_USER_CLOSING
+    }
+}
+
 /// Format the denial message for the JSON output (plain text).
 #[must_use]
 pub fn format_denial_message(
@@ -556,6 +585,7 @@ pub fn format_denial_message(
     // fork predates that commit, so it is applied here in the same shape to
     // keep the two trees rebasable. Guarded by
     // `denial_message_echoes_command_once`.
+    let closing = closing_line(pack);
     format!(
         "BLOCKED by dcg\n\n\
          {explain_hint}\n\n\
@@ -563,8 +593,7 @@ pub fn format_denial_message(
          {explanation_block}\n\n\
          {rule_line}\
          {allow_once_line}\
-         If this operation is truly needed, ask the user for explicit \
-         permission and have them run the command manually."
+         {closing}"
     )
 }
 
@@ -1297,6 +1326,37 @@ mod tests {
             message.trim_end().ends_with("run the command manually."),
             "the manual-permission line must remain last:\n{message}"
         );
+    }
+
+    /// A delete refusal points to the safe routes and never to the user.
+    ///
+    /// The core home-path rule fires before the local recursive-rm pack on a
+    /// delete under the home directory, so both must close the same way.
+    #[test]
+    fn delete_refusals_close_on_the_safe_routes() {
+        for (pack, pattern) in [
+            ("core.filesystem", "rm-rf-root-home"),
+            ("core.find", "find-delete-outside-temp"),
+            ("local.recursive_rm", "recursive-rm-absolute-or-home-target"),
+            ("local.trash_verbs", "move-into-trash-directory"),
+        ] {
+            let message = format_denial_message(
+                "rm -rf ~/dev/leftover",
+                "destructive",
+                None,
+                Some(pack),
+                Some(pattern),
+                Some("35836"),
+            );
+            assert!(
+                message.trim_end().ends_with(DELETE_CLOSING),
+                "{pack} must close on the safe routes:\n{message}"
+            );
+            assert!(
+                !message.contains("ask the user"),
+                "{pack} must not hand the delete to the user:\n{message}"
+            );
+        }
     }
 
     /// No code minted, no hatch line — and no dangling placeholder.

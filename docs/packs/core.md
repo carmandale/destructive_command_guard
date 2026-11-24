@@ -129,10 +129,10 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `rm-rf-root-home` | rm -rf on root or home paths is EXTREMELY DANGEROUS. This command will NOT be executed. Ask the user to run it manually if truly needed. | critical |
-| `rm-rf-general` | rm -rf is destructive and requires human approval. Explain what you want to delete and why, then ask the user to run the command manually. | high |
-| `rm-r-f-separate` | rm with separate -r -f flags is destructive and requires human approval. | high |
-| `rm-recursive-force-long` | rm --recursive --force is destructive and requires human approval. | high |
+| `rm-rf-root-home` | rm -rf on root or home paths is EXTREMELY DANGEROUS. This command will NOT be executed. Remove what you made with trash <path> or git worktree remove <path>. | critical |
+| `rm-rf-general` | rm -rf is destructive and is not run here. Remove what you made with trash <path> or git worktree remove <path>. | high |
+| `rm-r-f-separate` | rm with separate -r -f flags is destructive and is not run here. Remove what you made with trash <path> or git worktree remove <path>. | high |
+| `rm-recursive-force-long` | rm --recursive --force is destructive and is not run here. Remove what you made with trash <path> or git worktree remove <path>. | high |
 
 ### Allowlist Guidance
 
@@ -182,9 +182,9 @@ These patterns match potentially destructive commands:
 
 | Pattern Name | Reason | Severity |
 |--------------|--------|----------|
-| `find-delete-outside-temp` | find -delete removes every file the walk reaches. Outside a temp directory this is recursive deletion and requires human approval — ask the user to run it manually. | high |
-| `find-exec-delete-outside-temp` | find -exec rm runs a delete on every file the walk reaches. Outside a temp directory this is recursive deletion and requires human approval — ask the user to run it manually. | high |
-| `find-xargs-delete-outside-temp` | find piped into xargs rm deletes every file the walk reaches. Outside a temp directory this is recursive deletion and requires human approval — ask the user to run it manually. | high |
+| `find-delete-outside-temp` | find -delete removes every file the walk reaches. Outside a temp directory this is recursive deletion and is not run here. Remove what you made with trash <path> or git worktree remove <path>. | high |
+| `find-exec-delete-outside-temp` | find -exec rm runs a delete on every file the walk reaches. Outside a temp directory this is recursive deletion and is not run here. Remove what you made with trash <path> or git worktree remove <path>. | high |
+| `find-xargs-delete-outside-temp` | find piped into xargs rm deletes every file the walk reaches. Outside a temp directory this is recursive deletion and is not run here. Remove what you made with trash <path> or git worktree remove <path>. | high |
 
 ### Allowlist Guidance
 
